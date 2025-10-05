@@ -17,11 +17,9 @@ spec:
     - cotpa-work01
     - cotpa-work01.cantrellcloud.net
     - 172.16.15.135
-  node-taint:
-  - "node-role.kubernetes.io/worker="
   node-label:
+  - "node-role.kubernetes.io/worker="
   - "env=preprod"
-  - "role=worker"
   
   
   
