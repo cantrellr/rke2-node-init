@@ -3012,7 +3012,7 @@ action_add_server() {
     echo "server: \"$SERVER_URL\""     # required
     echo "token: $TOKEN"           # required
     echo "node-ip: \"$IP\""
-    _emit_tls_san_yaml "$TLS_SANS"
+    emit_tls_sans "$TLS_SANS"
     echo "kubelet-arg:"
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
