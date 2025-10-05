@@ -12,13 +12,8 @@ spec:
   searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
   serverURL: https://172.16.15.131:9345
 
-  write-kubeconfig-mode: "0640"
-  tls-san:
-    - cotpa-work01
-    - cotpa-work01.cantrellcloud.net
-    - 172.16.15.135
   node-label:
-  - 'node-role.kubernetes.io/worker=""'
+  - "role=worker"
   - "env=preprod"
   
   
