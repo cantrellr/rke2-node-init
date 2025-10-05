@@ -3,7 +3,7 @@ kind: Agent
 metadata:
   name: cotpa-work01
 spec:
-  token: K100d52bb8e82c63eb2a0e978dd4ccc92333bc6f407aa301c0064139ab2383b465f::server:235e4d8a03794ef5b8d9c6aa2bad4e108466a0bf
+  token: K100d52bb8e82c63eb2a0e978dd4ccc92333bc6f407aa301c0064139ab2383b465f::server:3182b19e41fb7731076433b4f11571aea11e2e4a
   ip: 172.16.15.135
   prefix: 24
   gateway: 172.16.15.1
