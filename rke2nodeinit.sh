@@ -64,7 +64,7 @@ esac
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
-# -----------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
 
 set -Eeuo pipefail
 trap 'rc=$?; echo "[ERROR] Unexpected failure (exit $rc) at line $LINENO"; exit $rc' ERR
