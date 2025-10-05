@@ -1,0 +1,36 @@
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: cotpa-ctrl02
+spec:
+  ip: 172.16.15.132
+  prefix: 24
+  gateway: 172.16.15.1
+  hostname: cotpa-ctrl02
+  dns: ["172.16.69.71", "172.16.69.72"]
+  searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+  token: EhzZ9EKz0gt8Dz2zPRz9WnromnOQo5Ia4Smjw5zmtNY=
+  serverURL: https://172.16.15.131:9345
+
+  write-kubeconfig-mode: "0640"
+  tls-san:
+    - cotpa-ctrl02
+    - cotpa-ctrl02.cantrellcloud.net
+    - 172.16.15.132
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=preprod"
+
+  kube-apiserver-arg:
+    - audit-log-maxage=15
+
+  
+  
+  
+  
+  # Optional: your CA handling
+  customCA:
+    rootCrt: certs/rke2ca-cert.crt
+    rootKey: certs/rke2ca-cert-key.pem
+    installToOSTrust: true

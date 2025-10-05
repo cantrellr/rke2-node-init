@@ -2904,7 +2904,7 @@ if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
     Image|image)      ACTION="image"       ;;
     Airgap|airgap)    ACTION="airgap"      ;;
     Server|server)    ACTION="server"      ;;
-    AddServer|add-server|addServer) ACTION="add-server" ;;
+    AddServer|add-server|addServer|addserver|Addserver|add_server|Add_server|add_Server) ACTION="add-server" ;;
     Agent|agent)      ACTION="agent"       ;;
     Verify|verify)    ACTION="verify"      ;;
     *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
@@ -2916,7 +2916,7 @@ case "${ACTION:-}" in
   server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;
-  add-server|add_server) action_add_server ;;
+  AddServer|add-server|addServer|addserver|Addserver|add_server|Add_server|add_Server) action_add_server ;;
   airgap)      action_airgap ;;
   push)        action_push   ;;
   *) print_help; exit 1 ;;
