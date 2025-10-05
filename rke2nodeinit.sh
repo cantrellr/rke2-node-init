@@ -1633,13 +1633,13 @@ ensure_full_cluster_token() {
 
   local ca_cert=""
   if ! ca_cert="$(find_trusted_cluster_ca_certificate)"; then
-    log WARN "customCA configured but no trusted CA certificate could be located; leaving token unchanged."
+    log WARN "customCA configured but no trusted CA certificate could be located; leaving token unchanged." >&2
     printf '%s' "$trimmed"
     return 0
   fi
 
   if ! is_cert_trusted_by_system_store "$ca_cert"; then
-    log WARN "customCA configured but $ca_cert is not trusted by the system store; leaving token unchanged."
+    log WARN "customCA configured but $ca_cert is not trusted by the system store; leaving token unchanged." >&2
     printf '%s' "$trimmed"
     return 0
   fi
@@ -1647,13 +1647,13 @@ ensure_full_cluster_token() {
   local ca_hash=""
   ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
   if [[ -z "$ca_hash" ]]; then
-    log WARN "Failed to compute custom CA hash from $ca_cert; leaving token unchanged."
+    log WARN "Failed to compute custom CA hash from $ca_cert; leaving token unchanged." >&2
     printf '%s' "$trimmed"
     return 0
   fi
 
   AGENT_CA_CERT="$ca_cert"
-  log INFO "Derived full cluster token using CA hash $ca_hash from $ca_cert."
+  log INFO "Derived full cluster token using CA hash $ca_hash from $ca_cert." >&2
   printf 'K10%s::%s' "$ca_hash" "$trimmed"
 }
 
@@ -1672,7 +1672,20 @@ generate_first_server_token() {
   local ca_cert="" ca_hash="" passphrase=""
 
   # Generate the base passphrase shared by both token formats.
-  passphrase="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)"
+  passphrase="$(openssl rand -hex 20 2>/dev/null || true)"
+  passphrase="${passphrase//$'\n'/}"
+  passphrase="${passphrase//$'\r'/}"
+  if [[ -z "$passphrase" ]]; then
+    # Fallback: derive a hex string via /dev/urandom without triggering pipefail
+    passphrase="$(dd if=/dev/urandom bs=1 count=64 2>/dev/null | od -An -v -t x1 | tr -d ' \n' | cut -c1-40 || true)"
+    passphrase="${passphrase//$'\n'/}"
+    passphrase="${passphrase//$'\r'/}"
+  fi
+
+  if [[ -z "$passphrase" ]]; then
+    log ERROR "Failed to generate secure bootstrap passphrase via available entropy sources." >&2
+    return 1
+  fi
 
   # No custom CA context? Return the short token (Option A).
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
@@ -1689,19 +1702,19 @@ generate_first_server_token() {
 
   # If we cannot locate a CA file, revert to the short token.
   if [[ -z "$ca_cert" ]]; then
-    log WARN "Custom CA context detected but certificate file missing; using short bootstrap token."
+    log WARN "Custom CA context detected but certificate file missing; using short bootstrap token." >&2
     printf '%s' "$passphrase"
     return 0
   fi
 
   ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
   if [[ -z "$ca_hash" ]]; then
-    log WARN "Failed to derive custom CA hash from $ca_cert; using short bootstrap token."
+    log WARN "Failed to derive custom CA hash from $ca_cert; using short bootstrap token." >&2
     printf '%s' "$passphrase"
     return 0
   fi
 
-  log INFO "Generated secure first-server token using custom CA fingerprint $ca_hash from $ca_cert."
+  log INFO "Generated secure first-server token using custom CA fingerprint $ca_hash from $ca_cert." >&2
   printf 'K10%s::server:%s' "$ca_hash" "$passphrase"
 }
 
