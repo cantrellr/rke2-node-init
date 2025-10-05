@@ -80,6 +80,10 @@ case "$ARCH" in
   *) ARCH="amd64";;
 esac
 
+# Virtualization detection defaults
+VIRT_ENV="physical"
+HYPERVISOR=""
+
 DEFAULT_DNS="10.0.1.34,10.231.1.34"
 AUTO_YES=0                  # -y auto-confirm reboots *and* Docker removal if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
@@ -512,6 +516,102 @@ ensure_installed() {
     apt-get update -y >>"$LOG_FILE" 2>&1
     apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1
   }
+}
+
+# ---------- Virtualization detection & tooling --------------------------------------------------
+detect_virtual_environment() {
+  VIRT_ENV="physical"
+  HYPERVISOR=""
+
+  local virt_type=""
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    virt_type="$(systemd-detect-virt 2>/dev/null || true)"
+    if [[ -n "$virt_type" && "$virt_type" != "none" ]]; then
+      VIRT_ENV="virtual"
+      case "$virt_type" in
+        microsoft) HYPERVISOR="Hyper-V" ;;
+        vmware)    HYPERVISOR="VMware" ;;
+        kvm)       HYPERVISOR="KVM" ;;
+        qemu)      HYPERVISOR="QEMU" ;;
+        oracle)    HYPERVISOR="VirtualBox" ;;
+        xen)       HYPERVISOR="Xen" ;;
+        parallels) HYPERVISOR="Parallels" ;;
+        bhyve)     HYPERVISOR="bhyve" ;;
+        zvm)       HYPERVISOR="IBM z/VM" ;;
+        openvz)    HYPERVISOR="OpenVZ" ;;
+        lxc)       HYPERVISOR="LXC" ;;
+        uml)       HYPERVISOR="User-mode Linux" ;;
+        *)         HYPERVISOR="$(printf '%s' "$virt_type" | tr '[:lower:]' '[:upper:]')" ;;
+      esac
+    fi
+  fi
+
+  if [[ "$VIRT_ENV" == "physical" ]]; then
+    local vendor="" product="" bios=""
+    [[ -r /sys/class/dmi/id/sys_vendor     ]] && vendor="$(tr -d '\0' </sys/class/dmi/id/sys_vendor)"
+    [[ -r /sys/class/dmi/id/product_name   ]] && product="$(tr -d '\0' </sys/class/dmi/id/product_name)"
+    [[ -r /sys/class/dmi/id/bios_vendor    ]] && bios="$(tr -d '\0' </sys/class/dmi/id/bios_vendor)"
+    local fingerprint="$vendor $product $bios"
+
+    if [[ "$fingerprint" =~ [Vv][Mm][Ww][Aa][Rr][Ee] ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="VMware"
+    elif [[ "$fingerprint" =~ [Mm]icrosoft || "$fingerprint" =~ Hyper-V || $product =~ Virtual\ Machine ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="Hyper-V"
+    elif [[ "$fingerprint" =~ [Kk][Vv][Mm] ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="KVM"
+    elif [[ "$fingerprint" =~ [Qq][Ee][Mm][Uu] ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="QEMU"
+    elif [[ "$fingerprint" =~ [Vv]irtual[Bb]ox ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="VirtualBox"
+    elif [[ "$fingerprint" =~ [Xx]en ]]; then
+      VIRT_ENV="virtual"
+      HYPERVISOR="Xen"
+    fi
+  fi
+
+  if [[ "$VIRT_ENV" == "virtual" && -z "$HYPERVISOR" ]]; then
+    HYPERVISOR="Unknown"
+  fi
+}
+
+install_hypervisor_tools() {
+  local hypervisor="$1"
+  local packages=()
+  case "$hypervisor" in
+    "Hyper-V")
+      packages=(hyperv-daemons)
+      ;;
+    "VMware")
+      packages=(open-vm-tools)
+      ;;
+    *)
+      log INFO "No hypervisor-specific tooling required for $hypervisor."
+      return 0
+      ;;
+  esac
+
+  local missing=()
+  local pkg
+  for pkg in "${packages[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if (( ${#missing[@]} == 0 )); then
+    log INFO "$hypervisor tools already installed (${packages[*]})."
+    return 0
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  log INFO "Installing $hypervisor tools packages: ${missing[*]}"
+  spinner_run "Refreshing apt cache for $hypervisor tools" apt-get update -y
+  spinner_run "Installing $hypervisor tools" apt-get install -y "${missing[@]}"
 }
 
 # ---------- RKE2 version detection --------------------------------------------------------------
@@ -1776,6 +1876,21 @@ action_image() {
   [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
   # --- OS prereqs ------------------------------------------------------------
+  detect_virtual_environment
+  if [[ "$VIRT_ENV" == "virtual" ]]; then
+    log INFO "Detected virtual environment (hypervisor: $HYPERVISOR)"
+    case "$HYPERVISOR" in
+      "Hyper-V"|"VMware")
+        install_hypervisor_tools "$HYPERVISOR"
+        ;;
+      *)
+        log INFO "No VM tools installation routine for $HYPERVISOR; skipping."
+        ;;
+    esac
+  else
+    log INFO "Physical hardware detected; skipping hypervisor tools install."
+  fi
+
   install_rke2_prereqs
  # install_nerdctl
   fetch_rke2_ca_generator
