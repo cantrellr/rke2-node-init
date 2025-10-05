@@ -14,9 +14,8 @@ spec:
 
   write-kubeconfig-mode: "0640"
   tls-san:
-    - cotpa-ctrl01
-    - cotpa-ctrl01.cantrellcloud.net
-    - 172.16.15.131
+    - cotpa-cluster
+    - cotpa-cluster.cantrellcloud.net
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:

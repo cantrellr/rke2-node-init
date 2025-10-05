@@ -2851,7 +2851,7 @@ action_agent() {
   : > "$cfg"
   {
     if [[ -n "$URL" ]]; then
-      echo "serverURL: \"$URL\""
+      echo "server: \"$URL\""
     fi
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
@@ -2989,6 +2989,7 @@ action_add_server() {
       if [[ "$full_token" != "$TOKEN" ]]; then
         log INFO "Expanded server join token to full format (custom CA hash included)."
       fi
+	  log INFO "Using provided token for server join."
       TOKEN="$full_token"
     fi
   fi
@@ -2999,6 +3000,7 @@ action_add_server() {
       TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
       [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
       [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+	  log INFO "Using TLS SANs from YAML: $TLS_SANS"
     fi
     if [[ -z "$TLS_SANS" ]]; then
       TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
@@ -3017,7 +3019,7 @@ action_add_server() {
   fi
 
   {
-    echo "serverURL: \"$URL\""     # required
+    echo "server: \"$URL\""     # required
     if [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
     else
@@ -3031,7 +3033,6 @@ action_add_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
     [[ -n "$preserved_registry" ]] && printf '%s\n' "$preserved_registry"
   } > "$cfg"
