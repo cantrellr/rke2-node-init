@@ -64,7 +64,7 @@ esac
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
-# -----------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
 
 set -Eeuo pipefail
 trap 'rc=$?; echo "[ERROR] Unexpected failure (exit $rc) at line $LINENO"; exit $rc' ERR
@@ -1658,6 +1658,54 @@ ensure_full_cluster_token() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: generate_first_server_token
+# Purpose : Produce an appropriate bootstrap token for the very first RKE2
+#           server. When a custom CA is available (from action_image), emit a
+#           secure token that embeds the CA hash. Otherwise, fall back to the
+#           short random passphrase required when no CA exists yet.
+# Arguments:
+#   None (uses CUSTOM_CA_* context populated earlier)
+# Returns :
+#   Prints the generated token.
+# ------------------------------------------------------------------------------
+generate_first_server_token() {
+  local ca_cert="" ca_hash="" passphrase=""
+
+  # Generate the base passphrase shared by both token formats.
+  passphrase="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)"
+
+  # No custom CA context? Return the short token (Option A).
+  if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
+    printf '%s' "$passphrase"
+    return 0
+  fi
+
+  # Prefer the explicit root CA, otherwise fall back to an intermediate.
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" && -f "${CUSTOM_CA_ROOT_CRT}" ]]; then
+    ca_cert="${CUSTOM_CA_ROOT_CRT}"
+  elif [[ -n "${CUSTOM_CA_INT_CRT:-}" && -f "${CUSTOM_CA_INT_CRT}" ]]; then
+    ca_cert="${CUSTOM_CA_INT_CRT}"
+  fi
+
+  # If we cannot locate a CA file, revert to the short token.
+  if [[ -z "$ca_cert" ]]; then
+    log WARN "Custom CA context detected but certificate file missing; using short bootstrap token."
+    printf '%s' "$passphrase"
+    return 0
+  fi
+
+  ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$ca_hash" ]]; then
+    log WARN "Failed to derive custom CA hash from $ca_cert; using short bootstrap token."
+    printf '%s' "$passphrase"
+    return 0
+  fi
+
+  log INFO "Generated secure first-server token using custom CA fingerprint $ca_hash from $ca_cert."
+  printf 'K10%s::server:%s' "$ca_hash" "$passphrase"
+}
+
+# ------------------------------------------------------------------------------
 # Function: run_rke2_installer
 # Purpose : Execute the cached RKE2 installer script with environment variables
 #           pointing to staged artifacts for offline installation.
@@ -2631,6 +2679,13 @@ action_server() {
         log INFO "Expanded provided token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
+    fi
+  else
+    TOKEN="$(generate_first_server_token)"
+    if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
+      log INFO "Using generated secure first-server token (custom CA fingerprint embedded)."
+    else
+      log INFO "Using generated short first-server bootstrap token."
     fi
   fi
 
