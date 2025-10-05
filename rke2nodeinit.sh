@@ -2851,7 +2851,7 @@ action_agent() {
   : > "$cfg"
   {
     if [[ -n "$URL" ]]; then
-      echo "server: \"$URL\""
+      echo "serverURL: \"$URL\""
     fi
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
@@ -3017,7 +3017,7 @@ action_add_server() {
   fi
 
   {
-    echo "server: \"$URL\""     # required
+    echo "serverURL: \"$URL\""     # required
     if [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
     else
