@@ -2931,7 +2931,8 @@ action_add_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN_FILE="" TLS_SANS="" TOKEN=""
+  local URL="" TOKEN_FILE="" TOKEN=""
+  local TLS_SANS_IN="" TLS_SANS=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -2944,7 +2945,7 @@ action_add_server() {
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
-    ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
+    ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && { TLS_SANS_IN="$(normalize_list_csv "$ts")"; TLS_SANS="$TLS_SANS_IN"; }
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
@@ -2993,13 +2994,16 @@ action_add_server() {
   fi
 
   # Derive TLS SANs if not provided
-  local TLS_SANS_IN TLS_SANS
-  TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
-  if [[ -n "$TLS_SANS_IN" ]]; then
-    TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-  else
-    TLS_SANS="$(_autosan_csv "$HOSTNAME" "$IP" "$SEARCH")"
-    log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  if [[ -z "$TLS_SANS" ]]; then
+    if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
+      TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
+      [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
+      [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+    fi
+    if [[ -z "$TLS_SANS" ]]; then
+      TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+    fi
   fi
 
   # Write RKE2 config for join
@@ -3009,10 +3013,10 @@ action_add_server() {
     : > /etc/rancher/rke2/config.yaml
   fi
   {
-    echo "server: \"$SERVER_URL\""     # required
+    echo "server: \"$URL\""     # required
     echo "token: $TOKEN"           # required
     echo "node-ip: \"$IP\""
-    _emit_tls_san_yaml "$TLS_SANS"
+    emit_tls_sans "$TLS_SANS"
     echo "kubelet-arg:"
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
