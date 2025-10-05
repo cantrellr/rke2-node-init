@@ -790,6 +790,123 @@ ensure_installed() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: detect_virtualization
+# Purpose : Determine whether the current node is virtualized and, when it is,
+#           identify the hypervisor so the appropriate guest tools can be
+#           installed.
+# Arguments:
+#   None
+# Returns :
+#   Prints a pipe-delimited triple to stdout: class|type|hypervisor where class
+#   is "physical" or "virtual".
+# ------------------------------------------------------------------------------
+detect_virtualization() {
+  local class="physical" virt_type="" hypervisor="" vendor="" product=""
+
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    if systemd-detect-virt --quiet; then
+      virt_type="$(systemd-detect-virt 2>/dev/null || true)"
+      class="virtual"
+    else
+      virt_type="none"
+    fi
+  fi
+
+  if [[ "$class" == "virtual" ]]; then
+    vendor="$(tr '[:upper:]' '[:lower:]' </sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null || true)"
+    product="$(tr '[:upper:]' '[:lower:]' </sys/devices/virtual/dmi/id/product_name 2>/dev/null || true)"
+    case "$virt_type" in
+      vmware) hypervisor="vmware" ;;
+      microsoft|hyperv) hypervisor="hyperv" ;;
+      oracle) hypervisor="virtualbox" ;;
+      kvm|qemu)
+        if [[ "$vendor" == *"microsoft"* || "$product" == *"hyper-v"* ]]; then
+          hypervisor="hyperv"
+        elif [[ "$vendor" == *"vmware"* ]]; then
+          hypervisor="vmware"
+        else
+          hypervisor="kvm"
+        fi
+        ;;
+      xen) hypervisor="xen" ;;
+      parallels) hypervisor="parallels" ;;
+      *)
+        if [[ "$vendor" == *"vmware"* ]]; then
+          hypervisor="vmware"
+        elif [[ "$vendor" == *"microsoft"* ]]; then
+          hypervisor="hyperv"
+        elif [[ "$vendor" == *"innotek"* || "$vendor" == *"oracle"* || "$vendor" == *"virtualbox"* || "$product" == *"virtualbox"* ]]; then
+          hypervisor="virtualbox"
+        elif [[ "$vendor" == *"xen"* ]]; then
+          hypervisor="xen"
+        fi
+        ;;
+    esac
+    [[ -z "$hypervisor" && -n "$virt_type" ]] && hypervisor="$virt_type"
+  fi
+
+  printf '%s|%s|%s\n' "$class" "$virt_type" "$hypervisor"
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_vm_tools
+# Purpose : Install hypervisor-specific guest tools when running within a
+#           supported virtual environment.
+# Arguments:
+#   $1 - Canonical hypervisor identifier (e.g., vmware, hyperv, virtualbox)
+# Returns :
+#   Returns 0. Logs warnings when packages are unavailable or unsupported.
+# ------------------------------------------------------------------------------
+install_vm_tools() {
+  local hypervisor="$1"
+  local packages=()
+
+  case "$hypervisor" in
+    vmware)
+      packages+=(open-vm-tools)
+      ;;
+    hyperv)
+      packages+=(linux-cloud-tools-virtual linux-tools-virtual hyperv-daemons)
+      ;;
+    virtualbox)
+      packages+=(virtualbox-guest-utils)
+      ;;
+    kvm|qemu)
+      packages+=(qemu-guest-agent)
+      ;;
+    xen)
+      packages+=(qemu-guest-agent)
+      ;;
+    *)
+      if [[ -n "$hypervisor" ]]; then
+        log WARN "No guest tools installation routine defined for hypervisor: $hypervisor"
+      else
+        log WARN "Unable to determine hypervisor for VM tools installation"
+      fi
+      return 0
+  esac
+
+  local to_install=()
+  local pkg
+  for pkg in "${packages[@]}"; do
+    if dpkg -s "$pkg" &>/dev/null; then
+      log INFO "Package already installed: $pkg"
+    elif apt-cache show "$pkg" >/dev/null 2>&1; then
+      to_install+=("$pkg")
+    else
+      log WARN "Package not found in APT cache: $pkg (skipping)"
+    fi
+  done
+
+  if (( ${#to_install[@]} > 0 )); then
+    export DEBIAN_FRONTEND=noninteractive
+    spinner_run "Installing VM guest tools (${to_install[*]})" apt-get install -y "${to_install[@]}"
+  else
+    log INFO "No additional VM guest tools packages required."
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Function: detect_latest_rke2_version
 # Purpose : Query GitHub for the most recent RKE2 release tag when the operator
 #           does not supply an explicit version. The result populates the global
@@ -2333,7 +2450,17 @@ action_image() {
 
   # --- OS prereqs ------------------------------------------------------------
   install_rke2_prereqs
- # install_nerdctl
+
+  local virt_class virt_type hypervisor
+  IFS='|' read -r virt_class virt_type hypervisor <<<"$(detect_virtualization)"
+  if [[ "$virt_class" == "virtual" ]]; then
+    log INFO "Virtual environment detected (type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown})."
+    install_vm_tools "$hypervisor"
+  else
+    log INFO "Physical hardware detected; skipping VM tools installation."
+  fi
+
+  # install_nerdctl
   fetch_rke2_ca_generator
   cache_rke2_artifacts
   ca_trust_registries

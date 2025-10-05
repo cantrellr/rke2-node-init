@@ -9,7 +9,6 @@ spec:
   hostname: cotpa-ctrl02
   dns: ["172.16.69.71", "172.16.69.72"]
   searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
-  token: EhzZ9EKz0gt8Dz2zPRz9WnromnOQo5Ia4Smjw5zmtNY=
   serverURL: https://172.16.15.131:9345
 
   write-kubeconfig-mode: "0640"
@@ -26,8 +25,8 @@ spec:
     - audit-log-maxage=15
 
   
-  
-  
+    
+    
   
   # Optional: your CA handling
   customCA:
