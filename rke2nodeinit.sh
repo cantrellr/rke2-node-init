@@ -3008,15 +3008,23 @@ action_add_server() {
 
   # Write RKE2 config for join
   mkdir -p /etc/rancher/rke2
-  # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
+  local cfg="/etc/rancher/rke2/config.yaml"
+
+  # Preserve any registry defaults from previous runs before truncating
+  local preserved_registry=""
+  if [[ -f "$cfg" ]]; then
+    preserved_registry="$(grep -E '^[[:space:]]*(system-default-registry|private-registry):' "$cfg" || true)"
   fi
+
   {
     echo "server: \"$URL\""     # required
-    echo "token: $TOKEN"           # required
+    if [[ -n "$TOKEN_FILE" ]]; then
+      echo "token-file: \"$TOKEN_FILE\""
+    else
+      echo "token: $TOKEN"         # required when token file not supplied
+    fi
     echo "node-ip: \"$IP\""
-    #emit_tls_sans "$TLS_SANS"
+    emit_tls_sans "$TLS_SANS"
     echo "kubelet-arg:"
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
@@ -3025,8 +3033,9 @@ action_add_server() {
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
-  } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
+    [[ -n "$preserved_registry" ]] && printf '%s\n' "$preserved_registry"
+  } > "$cfg"
+  chmod 600 "$cfg"
 
   # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
   append_spec_config_extras "$CONFIG_FILE"
