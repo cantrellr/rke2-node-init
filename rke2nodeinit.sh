@@ -2775,7 +2775,7 @@ action_agent() {
   AGENT_CA_CERT=""
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN=""
+  local URL="" TOKEN="" TOKEN_FILE="" NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -2787,6 +2787,9 @@ action_agent() {
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
+    TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
+    NODE_IP_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-ip nodeIP || true)"
+    NODE_NAME_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-name nodeName || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
@@ -2812,6 +2815,9 @@ action_agent() {
   if [[ -n "$URL" && -z "$TOKEN" ]]; then
     read -rp "Enter cluster join token [optional]: " TOKEN || true
   fi
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
+  fi
 
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
@@ -2835,20 +2841,60 @@ action_agent() {
   ensure_staged_artifacts
   local SRC="$STAGE_DIR"
 
+  # Build desired RKE2 agent configuration before installation to preserve YAML intent
+  local cfg="/etc/rancher/rke2/config.yaml"
+  local node_ip_value="${NODE_IP_SPEC:-$IP}"
+  local node_name_value="${NODE_NAME_SPEC:-${HOSTNAME:-}}"
+
+  log INFO "Rendering /etc/rancher/rke2/config.yaml from gathered inputs..."
+  mkdir -p /etc/rancher/rke2
+  : > "$cfg"
+  {
+    if [[ -n "$URL" ]]; then
+      echo "server: \"$URL\""
+    fi
+    if [[ -n "$TOKEN" ]]; then
+      echo "token: $TOKEN"
+    elif [[ -n "$TOKEN_FILE" ]]; then
+      echo "token-file: \"$TOKEN_FILE\""
+    fi
+    if [[ -n "$node_ip_value" ]]; then
+      echo "node-ip: \"$node_ip_value\""
+    fi
+    if [[ -n "$node_name_value" ]]; then
+      echo "node-name: \"$node_name_value\""
+    fi
+    echo "kubelet-arg:"
+    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+    fi
+    echo "  - container-log-max-size=10Mi"
+    echo "  - container-log-max-files=5"
+    echo "write-kubeconfig-mode: \"0640\""
+  } >> "$cfg"
+
+  append_spec_config_extras "$CONFIG_FILE"
+  chmod 600 "$cfg"
+
   # Ensure local images and registries fallback chain are in place
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
-    if [[ -n "${RUN_OUT_DIR:-}" ]]; then
-    [[ -f /etc/rancher/rke2/config.yaml ]] && cp -f /etc/rancher/rke2/config.yaml "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml" && log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-    [[ -f /etc/rancher/rke2/registries.yaml ]] && cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml" && log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
-    if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"; fi
-  fi
 
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
-  mkdir -p /etc/rancher/rke2
-  if [[ -n "$URL" ]];   then echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml; fi
-  if [[ -n "$TOKEN" ]]; then echo "token: $TOKEN"  >> /etc/rancher/rke2/config.yaml; fi
+  if [[ -n "${RUN_OUT_DIR:-}" ]]; then
+    if [[ -f "$cfg" ]]; then
+      cp -f "$cfg" "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
+      log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
+    fi
+    if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
+      cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
+      log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
+    fi
+    if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then
+      cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"
+    fi
+  fi
 
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
