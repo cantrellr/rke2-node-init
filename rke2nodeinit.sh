@@ -1094,7 +1094,7 @@ load_site_defaults() {
     DEFAULT_DNS="${DEFAULT_DNS:-$DEFAULT_DNS}"
     DEFAULT_SEARCH="${DEFAULT_SEARCH:-}"
   else
-    DEFAULT_SEARCH=""
+    DEFAULT_SEARCH="cluster.local"
   fi
 }
 
@@ -1672,7 +1672,20 @@ generate_first_server_token() {
   local ca_cert="" ca_hash="" passphrase=""
 
   # Generate the base passphrase shared by both token formats.
-  passphrase="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)"
+  passphrase="$(openssl rand -hex 20 2>/dev/null || true)"
+  passphrase="${passphrase//$'\n'/}"
+  passphrase="${passphrase//$'\r'/}"
+  if [[ -z "$passphrase" ]]; then
+    # Fallback: derive a hex string via /dev/urandom without triggering pipefail
+    passphrase="$(dd if=/dev/urandom bs=1 count=64 2>/dev/null | od -An -v -t x1 | tr -d ' \n' | cut -c1-40 || true)"
+    passphrase="${passphrase//$'\n'/}"
+    passphrase="${passphrase//$'\r'/}"
+  fi
+
+  if [[ -z "$passphrase" ]]; then
+    log ERROR "Failed to generate secure bootstrap passphrase via available entropy sources."
+    return 1
+  fi
 
   # No custom CA context? Return the short token (Option A).
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
