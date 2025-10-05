@@ -1094,7 +1094,7 @@ load_site_defaults() {
     DEFAULT_DNS="${DEFAULT_DNS:-$DEFAULT_DNS}"
     DEFAULT_SEARCH="${DEFAULT_SEARCH:-}"
   else
-    DEFAULT_SEARCH=""
+    DEFAULT_SEARCH="cluster.local"
   fi
 }
 
