@@ -2723,16 +2723,16 @@ action_server() {
     log INFO "Setting debug..."
     echo "debug: true"
 
-    log INFO "Get token..." 2>&1
+    log INFO "Get token..." >&2
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
-	  log INFO "Using provided token..." 2>&1
+	  log INFO "Using provided token..." >&2
     elif [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." 2>&1
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
-    log INFO "Emit TLS SANs..." 2>&1
+    log INFO "Emit TLS SANs..." >&2
     emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
@@ -2743,7 +2743,6 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-   # echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
 	echo "disable:"
 	echo "  - rke2-ingress-nginx"
@@ -2759,6 +2758,7 @@ action_server() {
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
   
+  log INFO "Writing netplan configuration and applying network settings..."
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
@@ -3042,22 +3042,22 @@ action_add_server() {
 
   : > /etc/rancher/rke2/config.yaml
   {
-    log INFO "Setting debug..." 2>&1
+    log INFO "Setting debug..." >&2
     echo "debug: true"
 
-    log INFO "Setting server URL..." 2>&1
+    log INFO "Setting server URL..." >&2
     echo "server: \"$URL\""     # required
 
-    log INFO "Get token..." 2>&1
+    log INFO "Get token..." >&2
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
-	  log INFO "Using provided token..." 2>&1
+	  log INFO "Using provided token..." >&2
     elif [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." 2>&1
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
-    log INFO "Emit TLS SANs..." 2>&1
+    log INFO "Emit TLS SANs..." >&2
     emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
@@ -3068,7 +3068,6 @@ action_add_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-   # echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
 	echo "disable:"
 	echo "  - rke2-ingress-nginx"
@@ -3084,6 +3083,7 @@ action_add_server() {
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
 
+  log INFO "Writing netplan configuration and applying network settings..."
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
@@ -3092,7 +3092,6 @@ action_add_server() {
 
   echo
   echo "[READY] rke2-server installed. Reboot to initialize the control plane."
-  echo "        First server token: /var/lib/rancher/rke2/server/node-token"
   echo
   prompt_reboot
 }
