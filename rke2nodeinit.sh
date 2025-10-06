@@ -95,6 +95,7 @@ case "$ARCH" in
 esac
 
 DEFAULT_DNS="10.0.1.34,10.231.1.34"
+DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
@@ -2643,6 +2644,7 @@ action_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
+    TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
@@ -2656,7 +2658,9 @@ action_server() {
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
   fi
-  [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]] && SEARCH="$DEFAULT_SEARCH"
+  if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
+    SEARCH="$DEFAULT_SEARCH"
+  fi
 
   log INFO "Validating configuration..."
   # Validate
@@ -2668,11 +2672,18 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   # Auto-derive tls-sans if none provided in YAML
-  if [[ -n "$TLS_SANS_IN" ]]; then
-    TLS_SANS="$TLS_SANS_IN"
-  else
-    TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-    log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  log INFO "Determining TLS SANs..."
+  if [[ -z "$TLS_SANS" ]]; then
+    if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
+      TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
+      [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
+      [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+	  log INFO "TLS SANs from config: $TLS_SANS"
+    fi
+    if [[ -z "$TLS_SANS" ]]; then
+      TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+    fi
   fi
 
   log INFO "Ensuring staged artifacts for offline RKE2 server install..."
@@ -2682,8 +2693,10 @@ action_server() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
+  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
   setup_custom_cluster_ca || true
 
+  log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
@@ -2707,16 +2720,23 @@ action_server() {
 
   : > /etc/rancher/rke2/config.yaml
   {
+    log INFO "Setting debug..." >&2
     echo "debug: true"
-    #echo "cluster-init: $cluster_init_value"
 
-    # Optional but recommended: stable join secret for future nodes
+    log INFO "Get token..." >&2
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
+	  log INFO "Using provided token..." >&2
+    elif [[ -n "$TOKEN_FILE" ]]; then
+      echo "token-file: \"$TOKEN_FILE\""
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
-    echo "node-ip: \"$IP\""
-    emit_tls_sans "$TLS_SANS"
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    #log INFO "Emit TLS SANs..." >&2
+    #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
@@ -2726,22 +2746,17 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-   # echo "  - protect-kernel-defaults=true"
-    echo "write-kubeconfig-mode: \"0640\""
 	echo "disable:"
 	echo "  - rke2-ingress-nginx"
 	echo
 
   } >> /etc/rancher/rke2/config.yaml
-
-  log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
-  append_spec_config_extras "$CONFIG_FILE"
-
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
   
+  log INFO "Writing netplan configuration and applying network settings..."
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
@@ -2927,31 +2942,33 @@ action_agent() {
 # ------------------------------------------------------------------------------
 action_add_server() {
   initialize_action_context false "add-server"
+  log INFO "Ensure YAML has metadata.name..."
 
+  log INFO "Loading site defaults..."
   load_site_defaults
 
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN_FILE="" TOKEN=""
-  local TLS_SANS_IN="" TLS_SANS=""
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
+  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
+  local URL="" TOKEN_FILE=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
+    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     local d sd ts
     d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
-    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
-    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
+    ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && { TLS_SANS_IN="$(normalize_list_csv "$ts")"; TLS_SANS="$TLS_SANS_IN"; }
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
-    ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && { TLS_SANS_IN="$(normalize_list_csv "$ts")"; TLS_SANS="$TLS_SANS_IN"; }
+    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
   [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
   [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$HOSTNAME" ]] && read -rp "Enter hostname for this server node: " HOSTNAME
   [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
 
   if [[ -z "$DNS" ]]; then
@@ -2962,17 +2979,8 @@ action_add_server() {
     SEARCH="$DEFAULT_SEARCH"
   fi
 
-  # Cluster join info
-  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z "$TOKEN" ]]; then
-      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
-    fi
-  fi
-  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
-
-  # Validation
+  log INFO "Validating configuration..."
+  # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -2980,8 +2988,32 @@ action_add_server() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
+  # Auto-derive tls-sans if none provided in YAML
+  log INFO "Determining TLS SANs..."
+  if [[ -z "$TLS_SANS" ]]; then
+    if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
+      TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
+      [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
+      [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+	  log INFO "TLS SANs from config: $TLS_SANS"
+    fi
+    if [[ -z "$TLS_SANS" ]]; then
+      TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+    fi
+  fi
+
+  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
   ensure_staged_artifacts
 
+  log INFO "Setting new hostname: $HOSTNAME..."
+  hostnamectl set-hostname "$HOSTNAME"
+  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+
+  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
+  setup_custom_cluster_ca || true
+
+  log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
@@ -2993,61 +3025,71 @@ action_add_server() {
     fi
   fi
 
-  # Derive TLS SANs if not provided
-  if [[ -z "$TLS_SANS" ]]; then
-    if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
-      TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
-      [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
-      [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-    fi
-    if [[ -z "$TLS_SANS" ]]; then
-      TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  log INFO "Gathering cluster join information..."
+  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
+    if [[ -z "$TOKEN" ]]; then
+      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
     fi
   fi
+  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
-  # Write RKE2 config for join
+  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
-  # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
-  fi
+
+  : > /etc/rancher/rke2/config.yaml
   {
+    log INFO "Setting debug..." >&2
+    echo "debug: true"
+
+    log INFO "Setting server URL..." >&2
     echo "server: \"$URL\""     # required
-    echo "token: $TOKEN"           # required
-    echo "node-ip: \"$IP\""
+
+    log INFO "Get token..." >&2
+    if [[ -n "$TOKEN" ]]; then
+      echo "token: $TOKEN"
+	  log INFO "Using provided token..." >&2
+    elif [[ -n "$TOKEN_FILE" ]]; then
+      echo "token-file: \"$TOKEN_FILE\""
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
+    fi
+
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    #log INFO "Emit TLS SANs..." >&2
     #emit_tls_sans "$TLS_SANS"
+
+    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
+    # Prefer systemd-resolved if present
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "  - protect-kernel-defaults=true"
-    echo "write-kubeconfig-mode: \"0640\""
+	echo "disable:"
+	echo "  - rke2-ingress-nginx"
+	echo
+
   } >> /etc/rancher/rke2/config.yaml
+  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+
+  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
 
-  # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
-  append_spec_config_extras "$CONFIG_FILE"
-  log INFO "RKE2 join config written to /etc/rancher/rke2/config.yaml"
-  log INFO "server: $URL"
-  if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: (redacted)"; fi
-
-  # Install rke2-server using staged artifacts
-  local SRC="$STAGE_DIR"
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
-  setup_custom_cluster_ca || true
-  log INFO "Installing rke2-server (join existing control plane)..."
-  run_rke2_installer "$SRC" "server"
-  systemctl enable --now rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  # Basic hostname and /etc/hosts
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-
+  log INFO "Writing netplan configuration and applying network settings..."
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
+
+  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  run_rke2_installer "$STAGE_DIR" "server"
+  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+
+  echo
+  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+  echo
+  prompt_reboot
 }
 
 # ==================
