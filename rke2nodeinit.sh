@@ -37,6 +37,8 @@ esac
 #   4) agent  - Configure network/hostname and install rke2-agent  (offline)
 #   5) verify - Check that node prerequisites are in place
 #   6) airgap - Run 'image' without reboot and power off the machine for templating
+#   7) label-node - Apply Kubernetes labels to an RKE2 node
+#   8) taint-node - Apply Kubernetes taints to an RKE2 node
 #
 # Connectivity expectations:
 #   - image is the only action that requires Internet access in order to gather
@@ -99,6 +101,8 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+NODE_NAME=""
+ACTION_ARGS=()
 
 # Custom CA context (populated from site defaults or YAML when provided)
 CUSTOM_CA_ROOT_CRT=""
@@ -162,6 +166,8 @@ Options:
   -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
   -u USER     Registry username
   -p PASS     Registry password
+  -n NAME     Node name for label-node/taint-node actions (defaults to detected hostname)
+              (also available as --node-name NAME)
   -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
@@ -180,6 +186,8 @@ Image action:
 Actions:
   image        Prepare a base image for air-gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
   airgap       Run 'image' without reboot and power off the machine for templating
+  label-node   Apply Kubernetes labels to the specified (or local) node
+  taint-node   Apply Kubernetes taints to the specified (or local) node
 
 Outputs:
   - SBOM:    $OUT_DIR/../sbom/<metadata.name>-sbom.txt with sha256 + sizes of cached artifacts
@@ -256,6 +264,78 @@ spinner_run() {
     log ERROR "$label failed (rc=$rc). See $LOG_FILE"
     exit "$rc"
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: default_node_hostname
+# Purpose : Determine the hostname that should be used when a CLI override is
+#           not provided. Prefers the static hostname reported by hostnamectl
+#           and falls back to the classic hostname command.
+# Arguments:
+#   None
+# Returns :
+#   Prints the detected hostname to stdout.
+# ------------------------------------------------------------------------------
+default_node_hostname() {
+  local name
+  name="$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null || uname -n)"
+  echo "$name"
+}
+
+# ------------------------------------------------------------------------------
+# Function: find_kubectl_binary
+# Purpose : Locate the kubectl binary distributed with RKE2 or available in the
+#           PATH so node-level administrative commands can be executed.
+# Arguments:
+#   None
+# Returns :
+#   Prints the kubectl path when found. Returns 1 when unavailable.
+# ------------------------------------------------------------------------------
+find_kubectl_binary() {
+  if command -v kubectl >/dev/null 2>&1; then
+    command -v kubectl
+    return 0
+  fi
+
+  local candidate="/var/lib/rancher/rke2/bin/kubectl"
+  if [[ -x "$candidate" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: detect_kubeconfig
+# Purpose : Best-effort discovery of an RKE2 kubeconfig so kubectl invocations
+#           can communicate with the local cluster when KUBECONFIG is unset.
+# Arguments:
+#   None
+# Returns :
+#   Prints the kubeconfig path when found. Returns 1 if no candidate exists.
+# ------------------------------------------------------------------------------
+detect_kubeconfig() {
+  if [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]]; then
+    echo "$KUBECONFIG"
+    return 0
+  fi
+
+  local -a candidates=(
+    "/etc/rancher/rke2/rke2.yaml"
+    "/var/lib/rancher/rke2/agent/etc/rke2.yaml"
+    "$HOME/.kube/config"
+  )
+
+  local cfg
+  for cfg in "${candidates[@]}"; do
+    if [[ -f "$cfg" ]]; then
+      echo "$cfg"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -2634,6 +2714,7 @@ action_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
 
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
@@ -2648,12 +2729,13 @@ action_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
-  # Fill missing basics
-  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
-  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -2663,7 +2745,6 @@ action_server() {
   fi
 
   log INFO "Validating configuration..."
-  # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -2671,7 +2752,6 @@ action_server() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domains CSV. Re-enter: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
-  # Auto-derive tls-sans if none provided in YAML
   log INFO "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
@@ -2784,56 +2864,47 @@ action_server() {
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
+  log INFO "Ensure YAML has metadata.name..."
 
+  log INFO "Loading site defaults..."
   load_site_defaults
 
-  AGENT_CA_CERT=""
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
+  local TOKEN="" GW=""  URL="" TOKEN_FILE=""
+  local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN="" TOKEN_FILE="" NODE_IP_SPEC="" NODE_NAME_SPEC=""
-
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
+    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     local d sd
     d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
-    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
-    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
-    NODE_IP_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-ip nodeIP || true)"
-    NODE_NAME_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-name nodeName || true)"
+    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
-  log INFO "Gateway entered (agent): ${GW:-<none>}"
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for agent: $DNS"; fi
   fi
-
   if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for agent: $SEARCH"
   fi
 
-  if [[ -z "$URL" ]]; then
-    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
-  fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
-    read -rp "Enter cluster join token [optional]: " TOKEN || true
-  fi
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
-  fi
-
+  log INFO "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -2841,6 +2912,14 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
+  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
+  ensure_staged_artifacts
+
+  log INFO "Setting new hostname: $HOSTNAME..."
+  hostnamectl set-hostname "$HOSTNAME"
+  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+
+  log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
@@ -2852,84 +2931,72 @@ action_agent() {
     fi
   fi
 
-  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
-  ensure_staged_artifacts
-  local SRC="$STAGE_DIR"
+  log INFO "Gathering cluster join information..."
+  if [[ -z "$URL" ]]; then
+    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
+  fi
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+    read -rp "Enter cluster join token [optional]: " TOKEN || true
+  fi
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
+  fi
 
-  # Build desired RKE2 agent configuration before installation to preserve YAML intent
-  local cfg="/etc/rancher/rke2/config.yaml"
-  local node_ip_value="${NODE_IP_SPEC:-$IP}"
-  local node_name_value="${NODE_NAME_SPEC:-${HOSTNAME:-}}"
-
-  log INFO "Rendering /etc/rancher/rke2/config.yaml from gathered inputs..."
+  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
-  : > "$cfg"
+
+  : > /etc/rancher/rke2/config.yaml
   {
-    if [[ -n "$URL" ]]; then
-      echo "server: \"$URL\""
-    fi
+    log INFO "Setting debug..." >&2
+    echo "debug: true"
+
+    log INFO "Setting server URL..." >&2
+    echo "server: \"$URL\""     # required
+
+    log INFO "Get token..." >&2
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
+	  log INFO "Using provided token..." >&2
     elif [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
-    if [[ -n "$node_ip_value" ]]; then
-      echo "node-ip: \"$node_ip_value\""
-    fi
-    if [[ -n "$node_name_value" ]]; then
-      echo "node-name: \"$node_name_value\""
-    fi
+
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
+    # Prefer systemd-resolved if present
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "write-kubeconfig-mode: \"0640\""
-  } >> "$cfg"
+	echo "disable:"
+	echo "  - rke2-ingress-nginx"
+	echo
 
-  append_spec_config_extras "$CONFIG_FILE"
-  chmod 600 "$cfg"
+  } >> /etc/rancher/rke2/config.yaml
+  log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
-  # Ensure local images and registries fallback chain are in place
-  log INFO "Proceeding with offline RKE2 agent install..."
-  run_rke2_installer "$SRC" "agent"
+  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+  chmod 600 /etc/rancher/rke2/config.yaml
 
+  log INFO "Writing netplan configuration and applying network settings..."
+  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+
+  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  run_rke2_installer "$STAGE_DIR" "agent"
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
-  if [[ -n "${RUN_OUT_DIR:-}" ]]; then
-    if [[ -f "$cfg" ]]; then
-      cp -f "$cfg" "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-      log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-    fi
-    if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-      cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
-      log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
-    fi
-    if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then
-      cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"
-    fi
-  fi
-
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
-
-  if [[ "$AUTO_YES" -eq 1 ]]; then
-    log INFO "Auto-yes: rebooting now."
-    reboot
-  fi
-
-  read -rp "Reboot now? [y/N]: " confirm
-  case "$confirm" in
-    Y|y) log INFO "Rebooting..."; reboot ;;
-    *)   log WARN "Reboot deferred. Please reboot before using this node." ;;
-  esac
+  echo
+  echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  echo
+  prompt_reboot
 }
 
-# ================
+# ==================
 # Action: ADD_SERVER
 # ------------------------------------------------------------------------------
 # Function: action_add_server
@@ -2951,6 +3018,7 @@ action_add_server() {
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
 
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
@@ -2966,11 +3034,13 @@ action_add_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
-  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
-  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -2980,7 +3050,6 @@ action_add_server() {
   fi
 
   log INFO "Validating configuration..."
-  # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -3135,24 +3204,154 @@ action_airgap() {
   poweroff
 }
 
+# ------------------------------------------------------------------------------
+# Function: action_label_node
+# Purpose : Apply one or more Kubernetes labels to the targeted RKE2 node using
+#           kubectl. The node defaults to the detected hostname unless the user
+#           provides an override via CLI flag.
+# Arguments:
+#   Consumes ACTION_ARGS for the label specifications (e.g., key=value).
+# Returns :
+#   Exits when kubectl is unavailable or when no labels were provided.
+# ------------------------------------------------------------------------------
+action_label_node() {
+  initialize_action_context false "label-node"
+
+  local node="$NODE_NAME"
+  local -a label_args=( "${ACTION_ARGS[@]}" )
+  local -a display_args=( "${label_args[@]}" )
+
+  if (( ${#label_args[@]} == 0 )); then
+    log ERROR "No labels supplied. Provide at least one key=value pair."
+    exit 1
+  fi
+
+  local kubectl_bin
+  if ! kubectl_bin="$(find_kubectl_binary)"; then
+    log ERROR "kubectl not found. Ensure RKE2 is installed and kubectl is available in PATH."
+    exit 2
+  fi
+
+  local kubeconfig=""
+  if kubeconfig="$(detect_kubeconfig)"; then
+    log INFO "Using kubeconfig: $kubeconfig"
+  else
+    log WARN "No kubeconfig detected; relying on kubectl defaults."
+    kubeconfig=""
+  fi
+
+  local append_overwrite=1 arg
+  for arg in "${label_args[@]}"; do
+    if [[ "$arg" == --overwrite* ]]; then
+      append_overwrite=0
+      break
+    fi
+  done
+  if (( append_overwrite )); then
+    label_args+=( "--overwrite" )
+  fi
+
+  log INFO "Labeling node '$node' with: ${display_args[*]}"
+
+  local -a cmd=( "$kubectl_bin" )
+  if [[ -n "$kubeconfig" ]]; then
+    cmd+=( "--kubeconfig" "$kubeconfig" )
+  fi
+  cmd+=( label node "$node" )
+  cmd+=( "${label_args[@]}" )
+
+  spinner_run "Labeling node $node" "${cmd[@]}"
+}
+
+# ------------------------------------------------------------------------------
+# Function: action_taint_node
+# Purpose : Apply one or more taints to the targeted RKE2 node via kubectl. The
+#           node name is sourced from CLI or defaults to the detected hostname.
+# Arguments:
+#   Consumes ACTION_ARGS for taint specifications (e.g., key=value:Effect).
+# Returns :
+#   Exits when kubectl is unavailable or when no taints were provided.
+# ------------------------------------------------------------------------------
+action_taint_node() {
+  initialize_action_context false "taint-node"
+
+  local node="$NODE_NAME"
+  local -a taint_args=( "${ACTION_ARGS[@]}" )
+  local -a taint_display=( "${taint_args[@]}" )
+
+  if (( ${#taint_args[@]} == 0 )); then
+    log ERROR "No taints supplied. Provide one or more key=value:Effect entries."
+    exit 1
+  fi
+
+  local kubectl_bin
+  if ! kubectl_bin="$(find_kubectl_binary)"; then
+    log ERROR "kubectl not found. Ensure RKE2 is installed and kubectl is available in PATH."
+    exit 2
+  fi
+
+  local kubeconfig=""
+  if kubeconfig="$(detect_kubeconfig)"; then
+    log INFO "Using kubeconfig: $kubeconfig"
+  else
+    log WARN "No kubeconfig detected; relying on kubectl defaults."
+    kubeconfig=""
+  fi
+
+  local append_overwrite=1 arg
+  for arg in "${taint_args[@]}"; do
+    if [[ "$arg" == --overwrite* ]]; then
+      append_overwrite=0
+      break
+    fi
+  done
+  if (( append_overwrite )); then
+    taint_args+=( "--overwrite" )
+  fi
+
+  log INFO "Tainting node '$node' with: ${taint_display[*]}"
+
+  local -a cmd=( "$kubectl_bin" )
+  if [[ -n "$kubeconfig" ]]; then
+    cmd+=( "--kubeconfig" "$kubeconfig" )
+  fi
+  cmd+=( taint node "$node" )
+  cmd+=( "${taint_args[@]}" )
+
+  spinner_run "Tainting node $node" "${cmd[@]}"
+}
+
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
-    -f|-v|-r|-u|-p|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
+    --node-name)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --node-name requires an argument" >&2
+        exit 1
+      fi
+      NODE_NAME="$2"
+      shift 2
+      ;;
+    --node-name=*)
+      NODE_NAME="${1#*=}"
+      shift
+      ;;
+    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
     *) break;;
   esac
 done
 
-while getopts ":f:v:r:u:p:yPh" opt; do
+while getopts ":f:v:r:u:p:n:yPh" opt; do
   case ${opt} in
     f) CONFIG_FILE="$OPTARG";;
     v) RKE2_VERSION="$OPTARG";;
     r) REGISTRY="$OPTARG";;
     u) REG_USER="$OPTARG";;
     p) REG_PASS="$OPTARG";;
+    n) NODE_NAME="$OPTARG";;
     y) AUTO_YES=1;;
     P) PRINT_CONFIG=1;;
     h) print_help; exit 0;;
@@ -3164,7 +3363,9 @@ shift $((OPTIND-1))
 
 CLI_SUB="${1:-}"
 if [[ -z "$CONFIG_FILE" && -n "$CLI_SUB" && -f "$CLI_SUB" ]]; then
-  CONFIG_FILE="$CLI_SUB"; CLI_SUB=""
+  CONFIG_FILE="$CLI_SUB"
+  shift
+  CLI_SUB="${1:-}"
 fi
 
 YAML_KIND=""
@@ -3185,7 +3386,12 @@ if [[ -n "$CONFIG_FILE" ]]; then
 fi
 
 ACTION="${CLI_SUB:-}"
-if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
+if [[ -n "$ACTION" ]]; then
+  shift
+fi
+ACTION_ARGS=("$@")
+
+if [[ -n "$CONFIG_FILE" && -z "$ACTION" ]]; then
   case "$YAML_KIND" in
     Push|push)        ACTION="push"        ;;
     Image|image)      ACTION="image"       ;;
@@ -3198,6 +3404,8 @@ if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   esac
 fi
 
+NODE_NAME="${NODE_NAME:-$(default_node_hostname)}"
+
 case "${ACTION:-}" in
   image)       action_image  ;;
   server)      action_server ;;
@@ -3206,5 +3414,7 @@ case "${ACTION:-}" in
   AddServer|add-server|addServer|addserver|Addserver|add_server|Add_server|add_Server) action_add_server ;;
   airgap)      action_airgap ;;
   push)        action_push   ;;
+  label-node)  action_label_node ;;
+  taint-node)  action_taint_node ;;
   *) print_help; exit 1 ;;
 esac
