@@ -3008,15 +3008,40 @@ action_add_server() {
 
   # Write RKE2 config for join
   mkdir -p /etc/rancher/rke2
-  # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
+  local cfg="/etc/rancher/rke2/config.yaml"
+  local preserved_tmp=""
+  if [[ -f "$cfg" ]]; then
+    preserved_tmp="$(mktemp)"
+    awk '
+      BEGIN { skip = 0 }
+      /^[[:space:]]*server:[[:space:]]/ { next }
+      /^[[:space:]]*token(-file)?:[[:space:]]/ { next }
+      /^[[:space:]]*node-(ip|name):[[:space:]]/ { next }
+      /^[[:space:]]*write-kubeconfig-mode:[[:space:]]/ { next }
+      /^[[:space:]]*kubelet-arg:[[:space:]]*$/ { skip = 1; next }
+      skip == 1 {
+        if ($0 ~ /^[[:space:]]*-/) { next }
+        if ($0 ~ /^[[:space:]]*$/) { next }
+        skip = 0
+      }
+      { print }
+    ' "$cfg" > "$preserved_tmp"
   fi
+
+  : > "$cfg"
+  if [[ -n "$preserved_tmp" && -s "$preserved_tmp" ]]; then
+    cat "$preserved_tmp" >> "$cfg"
+    echo >> "$cfg"
+  fi
+
   {
     echo "server: \"$URL\""     # required
-    echo "token: $TOKEN"           # required
+    if [[ -n "$TOKEN" ]]; then
+      echo "token: $TOKEN"
+    elif [[ -n "$TOKEN_FILE" ]]; then
+      echo "token-file: \"$TOKEN_FILE\""
+    fi
     echo "node-ip: \"$IP\""
-    #emit_tls_sans "$TLS_SANS"
     echo "kubelet-arg:"
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
@@ -3025,8 +3050,9 @@ action_add_server() {
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
-  } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
+  } >> "$cfg"
+  chmod 600 "$cfg"
+  [[ -n "$preserved_tmp" ]] && rm -f "$preserved_tmp"
 
   # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
   append_spec_config_extras "$CONFIG_FILE"
