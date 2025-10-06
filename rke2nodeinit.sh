@@ -2732,8 +2732,9 @@ action_server() {
 	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
+    echo "TLS-SANs: $TLS_SANS"
     log INFO "Emit TLS SANs..." >&2
-    emit_tls_sans "$TLS_SANS"
+    #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
