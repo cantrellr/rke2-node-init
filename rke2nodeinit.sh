@@ -95,6 +95,7 @@ case "$ARCH" in
 esac
 
 DEFAULT_DNS="10.0.1.34,10.231.1.34"
+DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
