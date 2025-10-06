@@ -37,6 +37,8 @@ esac
 #   4) agent  - Configure network/hostname and install rke2-agent  (offline)
 #   5) verify - Check that node prerequisites are in place
 #   6) airgap - Run 'image' without reboot and power off the machine for templating
+#   7) label-node - Apply Kubernetes labels to an RKE2 node
+#   8) taint-node - Apply Kubernetes taints to an RKE2 node
 #
 # Connectivity expectations:
 #   - image is the only action that requires Internet access in order to gather
@@ -99,6 +101,8 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+NODE_NAME=""
+ACTION_ARGS=()
 
 # Custom CA context (populated from site defaults or YAML when provided)
 CUSTOM_CA_ROOT_CRT=""
@@ -162,6 +166,8 @@ Options:
   -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
   -u USER     Registry username
   -p PASS     Registry password
+  -n NAME     Node name for label-node/taint-node actions (defaults to detected hostname)
+              (also available as --node-name NAME)
   -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
@@ -180,6 +186,8 @@ Image action:
 Actions:
   image        Prepare a base image for air-gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
   airgap       Run 'image' without reboot and power off the machine for templating
+  label-node   Apply Kubernetes labels to the specified (or local) node
+  taint-node   Apply Kubernetes taints to the specified (or local) node
 
 Outputs:
   - SBOM:    $OUT_DIR/../sbom/<metadata.name>-sbom.txt with sha256 + sizes of cached artifacts
@@ -256,6 +264,78 @@ spinner_run() {
     log ERROR "$label failed (rc=$rc). See $LOG_FILE"
     exit "$rc"
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: default_node_hostname
+# Purpose : Determine the hostname that should be used when a CLI override is
+#           not provided. Prefers the static hostname reported by hostnamectl
+#           and falls back to the classic hostname command.
+# Arguments:
+#   None
+# Returns :
+#   Prints the detected hostname to stdout.
+# ------------------------------------------------------------------------------
+default_node_hostname() {
+  local name
+  name="$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null || uname -n)"
+  echo "$name"
+}
+
+# ------------------------------------------------------------------------------
+# Function: find_kubectl_binary
+# Purpose : Locate the kubectl binary distributed with RKE2 or available in the
+#           PATH so node-level administrative commands can be executed.
+# Arguments:
+#   None
+# Returns :
+#   Prints the kubectl path when found. Returns 1 when unavailable.
+# ------------------------------------------------------------------------------
+find_kubectl_binary() {
+  if command -v kubectl >/dev/null 2>&1; then
+    command -v kubectl
+    return 0
+  fi
+
+  local candidate="/var/lib/rancher/rke2/bin/kubectl"
+  if [[ -x "$candidate" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: detect_kubeconfig
+# Purpose : Best-effort discovery of an RKE2 kubeconfig so kubectl invocations
+#           can communicate with the local cluster when KUBECONFIG is unset.
+# Arguments:
+#   None
+# Returns :
+#   Prints the kubeconfig path when found. Returns 1 if no candidate exists.
+# ------------------------------------------------------------------------------
+detect_kubeconfig() {
+  if [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]]; then
+    echo "$KUBECONFIG"
+    return 0
+  fi
+
+  local -a candidates=(
+    "/etc/rancher/rke2/rke2.yaml"
+    "/var/lib/rancher/rke2/agent/etc/rke2.yaml"
+    "$HOME/.kube/config"
+  )
+
+  local cfg
+  for cfg in "${candidates[@]}"; do
+    if [[ -f "$cfg" ]]; then
+      echo "$cfg"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -3135,24 +3215,154 @@ action_airgap() {
   poweroff
 }
 
+# ------------------------------------------------------------------------------
+# Function: action_label_node
+# Purpose : Apply one or more Kubernetes labels to the targeted RKE2 node using
+#           kubectl. The node defaults to the detected hostname unless the user
+#           provides an override via CLI flag.
+# Arguments:
+#   Consumes ACTION_ARGS for the label specifications (e.g., key=value).
+# Returns :
+#   Exits when kubectl is unavailable or when no labels were provided.
+# ------------------------------------------------------------------------------
+action_label_node() {
+  initialize_action_context false "label-node"
+
+  local node="$NODE_NAME"
+  local -a label_args=( "${ACTION_ARGS[@]}" )
+  local -a display_args=( "${label_args[@]}" )
+
+  if (( ${#label_args[@]} == 0 )); then
+    log ERROR "No labels supplied. Provide at least one key=value pair."
+    exit 1
+  fi
+
+  local kubectl_bin
+  if ! kubectl_bin="$(find_kubectl_binary)"; then
+    log ERROR "kubectl not found. Ensure RKE2 is installed and kubectl is available in PATH."
+    exit 2
+  fi
+
+  local kubeconfig=""
+  if kubeconfig="$(detect_kubeconfig)"; then
+    log INFO "Using kubeconfig: $kubeconfig"
+  else
+    log WARN "No kubeconfig detected; relying on kubectl defaults."
+    kubeconfig=""
+  fi
+
+  local append_overwrite=1 arg
+  for arg in "${label_args[@]}"; do
+    if [[ "$arg" == --overwrite* ]]; then
+      append_overwrite=0
+      break
+    fi
+  done
+  if (( append_overwrite )); then
+    label_args+=( "--overwrite" )
+  fi
+
+  log INFO "Labeling node '$node' with: ${display_args[*]}"
+
+  local -a cmd=( "$kubectl_bin" )
+  if [[ -n "$kubeconfig" ]]; then
+    cmd+=( "--kubeconfig" "$kubeconfig" )
+  fi
+  cmd+=( label node "$node" )
+  cmd+=( "${label_args[@]}" )
+
+  spinner_run "Labeling node $node" "${cmd[@]}"
+}
+
+# ------------------------------------------------------------------------------
+# Function: action_taint_node
+# Purpose : Apply one or more taints to the targeted RKE2 node via kubectl. The
+#           node name is sourced from CLI or defaults to the detected hostname.
+# Arguments:
+#   Consumes ACTION_ARGS for taint specifications (e.g., key=value:Effect).
+# Returns :
+#   Exits when kubectl is unavailable or when no taints were provided.
+# ------------------------------------------------------------------------------
+action_taint_node() {
+  initialize_action_context false "taint-node"
+
+  local node="$NODE_NAME"
+  local -a taint_args=( "${ACTION_ARGS[@]}" )
+  local -a taint_display=( "${taint_args[@]}" )
+
+  if (( ${#taint_args[@]} == 0 )); then
+    log ERROR "No taints supplied. Provide one or more key=value:Effect entries."
+    exit 1
+  fi
+
+  local kubectl_bin
+  if ! kubectl_bin="$(find_kubectl_binary)"; then
+    log ERROR "kubectl not found. Ensure RKE2 is installed and kubectl is available in PATH."
+    exit 2
+  fi
+
+  local kubeconfig=""
+  if kubeconfig="$(detect_kubeconfig)"; then
+    log INFO "Using kubeconfig: $kubeconfig"
+  else
+    log WARN "No kubeconfig detected; relying on kubectl defaults."
+    kubeconfig=""
+  fi
+
+  local append_overwrite=1 arg
+  for arg in "${taint_args[@]}"; do
+    if [[ "$arg" == --overwrite* ]]; then
+      append_overwrite=0
+      break
+    fi
+  done
+  if (( append_overwrite )); then
+    taint_args+=( "--overwrite" )
+  fi
+
+  log INFO "Tainting node '$node' with: ${taint_display[*]}"
+
+  local -a cmd=( "$kubectl_bin" )
+  if [[ -n "$kubeconfig" ]]; then
+    cmd+=( "--kubeconfig" "$kubeconfig" )
+  fi
+  cmd+=( taint node "$node" )
+  cmd+=( "${taint_args[@]}" )
+
+  spinner_run "Tainting node $node" "${cmd[@]}"
+}
+
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
-    -f|-v|-r|-u|-p|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
+    --node-name)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --node-name requires an argument" >&2
+        exit 1
+      fi
+      NODE_NAME="$2"
+      shift 2
+      ;;
+    --node-name=*)
+      NODE_NAME="${1#*=}"
+      shift
+      ;;
+    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
     *) break;;
   esac
 done
 
-while getopts ":f:v:r:u:p:yPh" opt; do
+while getopts ":f:v:r:u:p:n:yPh" opt; do
   case ${opt} in
     f) CONFIG_FILE="$OPTARG";;
     v) RKE2_VERSION="$OPTARG";;
     r) REGISTRY="$OPTARG";;
     u) REG_USER="$OPTARG";;
     p) REG_PASS="$OPTARG";;
+    n) NODE_NAME="$OPTARG";;
     y) AUTO_YES=1;;
     P) PRINT_CONFIG=1;;
     h) print_help; exit 0;;
@@ -3164,7 +3374,9 @@ shift $((OPTIND-1))
 
 CLI_SUB="${1:-}"
 if [[ -z "$CONFIG_FILE" && -n "$CLI_SUB" && -f "$CLI_SUB" ]]; then
-  CONFIG_FILE="$CLI_SUB"; CLI_SUB=""
+  CONFIG_FILE="$CLI_SUB"
+  shift
+  CLI_SUB="${1:-}"
 fi
 
 YAML_KIND=""
@@ -3185,7 +3397,12 @@ if [[ -n "$CONFIG_FILE" ]]; then
 fi
 
 ACTION="${CLI_SUB:-}"
-if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
+if [[ -n "$ACTION" ]]; then
+  shift
+fi
+ACTION_ARGS=("$@")
+
+if [[ -n "$CONFIG_FILE" && -z "$ACTION" ]]; then
   case "$YAML_KIND" in
     Push|push)        ACTION="push"        ;;
     Image|image)      ACTION="image"       ;;
@@ -3198,6 +3415,8 @@ if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   esac
 fi
 
+NODE_NAME="${NODE_NAME:-$(default_node_hostname)}"
+
 case "${ACTION:-}" in
   image)       action_image  ;;
   server)      action_server ;;
@@ -3206,5 +3425,7 @@ case "${ACTION:-}" in
   AddServer|add-server|addServer|addserver|Addserver|add_server|Add_server|add_Server) action_add_server ;;
   airgap)      action_airgap ;;
   push)        action_push   ;;
+  label-node)  action_label_node ;;
+  taint-node)  action_taint_node ;;
   *) print_help; exit 1 ;;
 esac
