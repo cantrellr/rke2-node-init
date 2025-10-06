@@ -1733,7 +1733,7 @@ run_rke2_installer() {
   local itype="${2:-}"
   set +e
   if [[ -n "$itype" ]]; then
-    log INFO "RKE2 installing INSTALL_RKE2_TYPE..."
+    log INFO "RKE2 installing INSTALL_RKE2_TYPE ${itype}..."
     INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
   else
     log INFO "RKE2 installing INSTALL_RKE2_ARTIFACT_PATH..."

@@ -10,8 +10,6 @@ spec:
   hostname: cotpa-ctrl01
   dns: ["172.16.69.71", "172.16.69.72"]
   searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
-
-
   write-kubeconfig-mode: "0640"
   tls-san:
     - cotpa-cluster
@@ -27,7 +25,6 @@ spec:
   enable-servicelb: false
   kube-apiserver-arg:
     - audit-log-maxage=15
-
   # Optional: your CA handling
   customCA:
     rootCrt: certs/rke2ca-cert.crt
