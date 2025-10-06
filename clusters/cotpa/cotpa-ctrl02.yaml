@@ -11,26 +11,19 @@ spec:
   dns: ["172.16.69.71", "172.16.69.72"]
   searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
   serverURL: https://172.16.15.131:9345
-
   write-kubeconfig-mode: "0640"
   tls-san:
     - cotpa-ctrl02
-    - cotpa-ctrl02.cantrellcloud.net
+    - cotpa-ctrl02.k8.cantrellcloud.net
+    - cotpa-cluster
+    - cotpa-cluster.k8.cantrellcloud.net
     - 172.16.15.132
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
   - "env=preprod"
-
+  service-cidr: 10.96.0.0/12
+  cluster-cidr: 10.42.0.0/16
+  cluster-domain: cluster.local
   kube-apiserver-arg:
     - audit-log-maxage=15
-
-  
-    
-    
-  
-  # Optional: your CA handling
-  customCA:
-    rootCrt: certs/rke2ca-cert.crt
-    rootKey: certs/rke2ca-cert-key.pem
-    installToOSTrust: true
