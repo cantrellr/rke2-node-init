@@ -11,21 +11,6 @@ spec:
   dns: ["172.16.69.71", "172.16.69.72"]
   searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
   serverURL: https://172.16.15.131:9345
-
   node-label:
   - "role=worker"
   - "env=preprod"
-  
-  
-  
-  
-  
-  
-  
-    
-  
-  # Optional: your CA handling
-  customCA:
-    rootCrt: certs/rke2ca-cert.crt
-    rootKey: certs/rke2ca-cert-key.pem
-    installToOSTrust: true

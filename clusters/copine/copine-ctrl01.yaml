@@ -13,7 +13,7 @@ spec:
   write-kubeconfig-mode: "0640"
   tls-san:
     - copine-ctrl01
-    - copine-ctrl01.cantrellcloud.net
+    - copine-ctrl01.k8.cantrellcloud.net
     - 10.0.69.55
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
