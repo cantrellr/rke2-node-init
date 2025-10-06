@@ -3025,16 +3025,16 @@ action_add_server() {
     else
       echo "token: $TOKEN"         # required when token file not supplied
     fi
-    echo "node-ip: \"$IP\""
-    emit_tls_sans "$TLS_SANS"
-    echo "kubelet-arg:"
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-    echo "write-kubeconfig-mode: \"0640\""
-    [[ -n "$preserved_registry" ]] && printf '%s\n' "$preserved_registry"
+    #echo "node-ip: \"$IP\""
+    #emit_tls_sans "$TLS_SANS"
+    #echo "kubelet-arg:"
+    #if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+    #  echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+    #fi
+    #echo "  - container-log-max-size=10Mi"
+    #echo "  - container-log-max-files=5"
+    #echo "write-kubeconfig-mode: \"0640\""
+    #[[ -n "$preserved_registry" ]] && printf '%s\n' "$preserved_registry"
   } > "$cfg"
   chmod 600 "$cfg"
 
@@ -3042,7 +3042,7 @@ action_add_server() {
   append_spec_config_extras "$CONFIG_FILE"
   log INFO "RKE2 join config written to /etc/rancher/rke2/config.yaml"
   log INFO "server: $URL"
-  if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: (redacted)"; fi
+  if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: $TOKEN"; fi
 
   # Install rke2-server using staged artifacts
   local SRC="$STAGE_DIR"
@@ -3057,7 +3057,11 @@ action_add_server() {
   if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
+  #echo "A reboot is recommended to ensure clean state. Network is already applied."
+  echo
+  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+  echo
+  prompt_reboot
 }
 
 # ==================
