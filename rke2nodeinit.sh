@@ -2735,7 +2735,6 @@ action_server() {
     log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
     append_spec_config_extras "$CONFIG_FILE"
 
-    #echo "TLS-SANs: $TLS_SANS"
     #log INFO "Emit TLS SANs..." >&2
     #emit_tls_sans "$TLS_SANS"
 
@@ -2747,7 +2746,6 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "write-kubeconfig-mode: \"0640\""
 	echo "disable:"
 	echo "  - rke2-ingress-nginx"
 	echo
@@ -3057,8 +3055,11 @@ action_add_server() {
 	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
-    log INFO "Emit TLS SANs..." >&2
-    emit_tls_sans "$TLS_SANS"
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    #log INFO "Emit TLS SANs..." >&2
+    #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
@@ -3074,10 +3075,6 @@ action_add_server() {
 	echo
 
   } >> /etc/rancher/rke2/config.yaml
-
-  log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
-  append_spec_config_extras "$CONFIG_FILE"
-
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
