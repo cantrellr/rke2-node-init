@@ -2720,7 +2720,7 @@ action_server() {
 
   : > /etc/rancher/rke2/config.yaml
   {
-    log INFO "Setting debug..."
+    log INFO "Setting debug..." >&2
     echo "debug: true"
 
     log INFO "Get token..." >&2
@@ -2732,8 +2732,11 @@ action_server() {
 	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
 
-    echo "TLS-SANs: $TLS_SANS"
-    log INFO "Emit TLS SANs..." >&2
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    #echo "TLS-SANs: $TLS_SANS"
+    #log INFO "Emit TLS SANs..." >&2
     #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
@@ -2750,10 +2753,6 @@ action_server() {
 	echo
 
   } >> /etc/rancher/rke2/config.yaml
-
-  log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
-  append_spec_config_extras "$CONFIG_FILE"
-
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
