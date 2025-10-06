@@ -17,8 +17,8 @@ spec:
     - cotpa-cluster
     - cotpa-cluster.k8.cantrellcloud.net
     - 172.16.15.131
- # node-taint:
- # - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
   - "env=preprod"
   service-cidr: 10.96.0.0/12

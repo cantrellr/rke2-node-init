@@ -2714,6 +2714,7 @@ action_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
 
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
@@ -2728,12 +2729,13 @@ action_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
-  # Fill missing basics
-  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
-  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -2743,7 +2745,6 @@ action_server() {
   fi
 
   log INFO "Validating configuration..."
-  # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -2751,7 +2752,6 @@ action_server() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domains CSV. Re-enter: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
-  # Auto-derive tls-sans if none provided in YAML
   log INFO "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
@@ -2864,56 +2864,47 @@ action_server() {
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
+  log INFO "Ensure YAML has metadata.name..."
 
+  log INFO "Loading site defaults..."
   load_site_defaults
 
-  AGENT_CA_CERT=""
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
+  local TOKEN="" GW=""  URL="" TOKEN_FILE=""
+  local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN="" TOKEN_FILE="" NODE_IP_SPEC="" NODE_NAME_SPEC=""
-
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
+    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     local d sd
     d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
-    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
-    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
-    NODE_IP_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-ip nodeIP || true)"
-    NODE_NAME_SPEC="$(yaml_spec_get_any "$CONFIG_FILE" node-name nodeName || true)"
+    URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
-  log INFO "Gateway entered (agent): ${GW:-<none>}"
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for agent: $DNS"; fi
   fi
-
   if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for agent: $SEARCH"
   fi
 
-  if [[ -z "$URL" ]]; then
-    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
-  fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
-    read -rp "Enter cluster join token [optional]: " TOKEN || true
-  fi
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
-  fi
-
+  log INFO "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -2921,6 +2912,14 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
+  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
+  ensure_staged_artifacts
+
+  log INFO "Setting new hostname: $HOSTNAME..."
+  hostnamectl set-hostname "$HOSTNAME"
+  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+
+  log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
@@ -2932,84 +2931,72 @@ action_agent() {
     fi
   fi
 
-  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
-  ensure_staged_artifacts
-  local SRC="$STAGE_DIR"
+  log INFO "Gathering cluster join information..."
+  if [[ -z "$URL" ]]; then
+    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
+  fi
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+    read -rp "Enter cluster join token [optional]: " TOKEN || true
+  fi
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
+  fi
 
-  # Build desired RKE2 agent configuration before installation to preserve YAML intent
-  local cfg="/etc/rancher/rke2/config.yaml"
-  local node_ip_value="${NODE_IP_SPEC:-$IP}"
-  local node_name_value="${NODE_NAME_SPEC:-${HOSTNAME:-}}"
-
-  log INFO "Rendering /etc/rancher/rke2/config.yaml from gathered inputs..."
+  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
-  : > "$cfg"
+
+  : > /etc/rancher/rke2/config.yaml
   {
-    if [[ -n "$URL" ]]; then
-      echo "server: \"$URL\""
-    fi
+    log INFO "Setting debug..." >&2
+    echo "debug: true"
+
+    log INFO "Setting server URL..." >&2
+    echo "server: \"$URL\""     # required
+
+    log INFO "Get token..." >&2
     if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
+	  log INFO "Using provided token..." >&2
     elif [[ -n "$TOKEN_FILE" ]]; then
       echo "token-file: \"$TOKEN_FILE\""
+	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
     fi
-    if [[ -n "$node_ip_value" ]]; then
-      echo "node-ip: \"$node_ip_value\""
-    fi
-    if [[ -n "$node_name_value" ]]; then
-      echo "node-name: \"$node_name_value\""
-    fi
+
+    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+    append_spec_config_extras "$CONFIG_FILE"
+
+    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
+    # Prefer systemd-resolved if present
     if [[ -f /run/systemd/resolve/resolv.conf ]]; then
       echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "write-kubeconfig-mode: \"0640\""
-  } >> "$cfg"
+	echo "disable:"
+	echo "  - rke2-ingress-nginx"
+	echo
 
-  append_spec_config_extras "$CONFIG_FILE"
-  chmod 600 "$cfg"
+  } >> /etc/rancher/rke2/config.yaml
+  log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
-  # Ensure local images and registries fallback chain are in place
-  log INFO "Proceeding with offline RKE2 agent install..."
-  run_rke2_installer "$SRC" "agent"
+  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+  chmod 600 /etc/rancher/rke2/config.yaml
 
+  log INFO "Writing netplan configuration and applying network settings..."
+  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+
+  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  run_rke2_installer "$STAGE_DIR" "agent"
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
-  if [[ -n "${RUN_OUT_DIR:-}" ]]; then
-    if [[ -f "$cfg" ]]; then
-      cp -f "$cfg" "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-      log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-    fi
-    if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-      cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
-      log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
-    fi
-    if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then
-      cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"
-    fi
-  fi
-
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
-
-  if [[ "$AUTO_YES" -eq 1 ]]; then
-    log INFO "Auto-yes: rebooting now."
-    reboot
-  fi
-
-  read -rp "Reboot now? [y/N]: " confirm
-  case "$confirm" in
-    Y|y) log INFO "Rebooting..."; reboot ;;
-    *)   log WARN "Reboot deferred. Please reboot before using this node." ;;
-  esac
+  echo
+  echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  echo
+  prompt_reboot
 }
 
-# ================
+# ==================
 # Action: ADD_SERVER
 # ------------------------------------------------------------------------------
 # Function: action_add_server
@@ -3031,6 +3018,7 @@ action_add_server() {
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
 
+  log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
@@ -3046,11 +3034,13 @@ action_add_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
-  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
-  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+  log INFO "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
+  log INFO "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -3060,7 +3050,6 @@ action_add_server() {
   fi
 
   log INFO "Validating configuration..."
-  # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
