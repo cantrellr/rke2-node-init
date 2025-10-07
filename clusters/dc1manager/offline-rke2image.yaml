@@ -1,0 +1,14 @@
+apiVersion: rkeprep/v1
+kind: Network
+metadata:
+  name: offline-clone
+spec:
+  ip: 192.168.200.50
+  prefix: 24
+  gateway: 192.168.200.1
+  dns:
+    - 10.10.10.10
+    - 10.10.20.10
+  searchDomains:
+    - corp.local
+    - edge.local
