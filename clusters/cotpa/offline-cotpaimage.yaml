@@ -1,0 +1,15 @@
+apiVersion: rkeprep/v1
+kind: Network
+metadata:
+  name: cotpaimage-clone
+spec:
+  ip: 172.16.15.129
+  prefix: 24
+  gateway: 172.16.15.1
+  dns:
+    - 172.16.10.11
+    - 172.16.10.12
+  searchDomains:
+    - k8.cantrellcloud.net
+    - cantrellcloud.net
+    - cantrelloffice.cloud
