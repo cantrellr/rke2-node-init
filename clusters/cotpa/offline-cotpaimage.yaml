@@ -13,3 +13,7 @@ spec:
     - k8.cantrellcloud.net
     - cantrellcloud.net
     - cantrelloffice.cloud
+  customCA:
+    rootCrt: certs/rke2ca-cert.crt
+    rootKey: certs/rke2ca-cert-key.pem
+    installToOSTrust: true
