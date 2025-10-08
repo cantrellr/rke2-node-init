@@ -89,6 +89,7 @@ REGISTRY="rke2registry.dev.local"
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
+OFFLINE_NETWORK_FILE=""
 ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64) ARCH="amd64";;
@@ -171,6 +172,8 @@ Options:
   -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
+  --offline-network FILE
+              Pre-seed the offline clone network plan using a `kind: Network` manifest
   --dry-push  Do not actually push images to registry (simulate only)
 Image action:
   Does the full prep for an air-gapped base image:
@@ -2565,6 +2568,7 @@ action_image() {
   local defaultSearchCsv=""
   local offline_ip_plan="" offline_prefix_plan="" offline_gateway_plan=""
   local offline_dns_plan="" offline_search_plan=""
+  local offline_plan_from_yaml=0 offline_plan_from_cli=0
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -2593,6 +2597,71 @@ action_image() {
     on_search="$(yaml_spec_get "$CONFIG_FILE" offlineNetwork.searchDomains || true)"
     [[ -n "$on_dns" ]] && offline_dns_plan="$(normalize_list_csv "$on_dns")"
     [[ -n "$on_search" ]] && offline_search_plan="$(normalize_list_csv "$on_search")"
+    if [[ -n "$offline_ip_plan" || -n "$offline_prefix_plan" || -n "$offline_gateway_plan" || -n "$offline_dns_plan" || -n "$offline_search_plan" ]]; then
+      offline_plan_from_yaml=1
+    fi
+  fi
+
+  if [[ -n "$OFFLINE_NETWORK_FILE" ]]; then
+    local cli_manifest="$OFFLINE_NETWORK_FILE"
+    if [[ "${cli_manifest:0:1}" != "/" ]]; then
+      cli_manifest="$SCRIPT_DIR/$cli_manifest"
+    fi
+    if [[ ! -f "$cli_manifest" ]]; then
+      log WARN "Offline network manifest not found: $OFFLINE_NETWORK_FILE"
+    else
+      local cli_kind cli_api
+      cli_kind="$(yaml_get_kind "$cli_manifest" || true)"
+      cli_api="$(yaml_get_api "$cli_manifest" || true)"
+      if [[ -n "$cli_api" && "$cli_api" != "rkeprep/v1" ]]; then
+        log WARN "Offline network manifest '$OFFLINE_NETWORK_FILE' has apiVersion '${cli_api}', expected rkeprep/v1. Continuing anyway."
+      fi
+      if [[ "${cli_kind,,}" != "network" ]]; then
+        log WARN "Offline network manifest '$OFFLINE_NETWORK_FILE' is kind '${cli_kind:-<unset>}' (expected Network); ignoring."
+      else
+        local cli_used=0 cli_val=""
+        cli_val="$(yaml_spec_get "$cli_manifest" ip || true)"
+        if [[ -z "$offline_ip_plan" && -n "$cli_val" ]]; then
+          offline_ip_plan="$cli_val"
+          cli_used=1
+        fi
+        cli_val="$(yaml_spec_get "$cli_manifest" prefix || true)"
+        if [[ -z "$offline_prefix_plan" && -n "$cli_val" ]]; then
+          offline_prefix_plan="$cli_val"
+          cli_used=1
+        fi
+        cli_val="$(yaml_spec_get "$cli_manifest" gateway || true)"
+        if [[ -z "$offline_gateway_plan" && -n "$cli_val" ]]; then
+          offline_gateway_plan="$cli_val"
+          cli_used=1
+        fi
+        if [[ -z "$offline_dns_plan" ]]; then
+          local cli_dns_raw=""
+          cli_dns_raw="$(yaml_spec_get "$cli_manifest" dns || true)"
+          if [[ -z "$cli_dns_raw" ]] && yaml_spec_has_list "$cli_manifest" dns; then
+            cli_dns_raw="$(yaml_spec_list_csv "$cli_manifest" dns || true)"
+          fi
+          if [[ -n "$cli_dns_raw" ]]; then
+            offline_dns_plan="$(normalize_list_csv "$cli_dns_raw")"
+            cli_used=1
+          fi
+        fi
+        if [[ -z "$offline_search_plan" ]]; then
+          local cli_search_raw=""
+          cli_search_raw="$(yaml_spec_get "$cli_manifest" searchDomains || true)"
+          if [[ -z "$cli_search_raw" ]] && yaml_spec_has_list "$cli_manifest" searchDomains; then
+            cli_search_raw="$(yaml_spec_list_csv "$cli_manifest" searchDomains || true)"
+          fi
+          if [[ -n "$cli_search_raw" ]]; then
+            offline_search_plan="$(normalize_list_csv "$cli_search_raw")"
+            cli_used=1
+          fi
+        fi
+        if (( cli_used )); then
+          offline_plan_from_cli=1
+        fi
+      fi
+    fi
   fi
 
   # Resolve cert paths relative to script dir if not absolute
@@ -2601,7 +2670,7 @@ action_image() {
   [[ -n "$CA_INTCRT" && "${CA_INTCRT:0:1}" != "/" ]] && CA_INTCRT="$SCRIPT_DIR/$CA_INTCRT"
   [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
-  # Sanitize offline network values pulled from YAML (if any)
+  # Sanitize offline network values gathered so far
   if [[ -n "$offline_ip_plan" ]]; then
     if ! valid_ipv4 "$offline_ip_plan"; then
       log WARN "Ignoring invalid offlineNetwork.ip value from YAML: $offline_ip_plan"
@@ -2661,102 +2730,113 @@ action_image() {
 
   # --- Offline network planning ---------------------------------------------
   local offline_network_template=""
+  local offline_plan_has_values=0
+  if [[ -n "$offline_ip_plan" || -n "$offline_prefix_plan" || -n "$offline_gateway_plan" || -n "$offline_dns_plan" || -n "$offline_search_plan" ]]; then
+    offline_plan_has_values=1
+  fi
+  local offline_plan_source_label="non-interactive input"
+  if (( offline_plan_from_yaml && offline_plan_from_cli )); then
+    offline_plan_source_label="YAML + CLI inputs"
+  elif (( offline_plan_from_yaml )); then
+    offline_plan_source_label="YAML input"
+  elif (( offline_plan_from_cli )); then
+    offline_plan_source_label="CLI flag (--offline-network)"
+  fi
+  local offline_plan_missing=0
+  if [[ -z "$offline_ip_plan" || -z "$offline_prefix_plan" || -z "$offline_gateway_plan" || -z "$offline_dns_plan" || -z "$offline_search_plan" ]]; then
+    offline_plan_missing=1
+  fi
+  local offline_plan_from_prompt=0
+
   if (( AUTO_YES )); then
-    if [[ -n "$offline_ip_plan" || -n "$offline_prefix_plan" || -n "$offline_gateway_plan" || -n "$offline_dns_plan" || -n "$offline_search_plan" ]]; then
-      log INFO "Using offline network values supplied via YAML for documentation."
+    if (( offline_plan_has_values )); then
+      log INFO "Using offline network values supplied via ${offline_plan_source_label} for documentation."
     else
       log INFO "Auto-confirm enabled (-y); skipping interactive offline network planning prompts."
     fi
   else
-    echo
-    echo "Offline network planning (optional). Provide the static IP details the cloned node will use once moved into the air-gapped environment."
-    if [[ -n "$offline_ip_plan" ]]; then
-      local _tmp_ip=""
-      read -rp "Offline IPv4 for reference [$offline_ip_plan]: " _tmp_ip || true
-      [[ -n "$_tmp_ip" ]] && offline_ip_plan="$_tmp_ip"
-    else
-      read -rp "Offline IPv4 for reference [blank to skip]: " offline_ip_plan || true
-    fi
-    if [[ -n "$offline_prefix_plan" ]]; then
-      local _tmp_prefix=""
-      read -rp "Offline subnet prefix length [$offline_prefix_plan]: " _tmp_prefix || true
-      [[ -n "$_tmp_prefix" ]] && offline_prefix_plan="$_tmp_prefix"
-    else
-      read -rp "Offline subnet prefix length (0-32) [blank=24]: " offline_prefix_plan || true
-    fi
-    if [[ -n "$offline_gateway_plan" ]]; then
-      local _tmp_gw=""
-      read -rp "Offline default gateway [$offline_gateway_plan]: " _tmp_gw || true
-      [[ -n "$_tmp_gw" ]] && offline_gateway_plan="$_tmp_gw"
-    else
-      read -rp "Offline default gateway [blank to skip]: " offline_gateway_plan || true
+    if (( offline_plan_has_values && !offline_plan_missing )); then
+      log INFO "Offline network values supplied via ${offline_plan_source_label}; no additional prompts required."
     fi
 
-    if [[ -n "$offline_dns_plan" ]]; then
-      local _tmp_dns=""
-      read -rp "Offline DNS servers CSV [$offline_dns_plan]: " _tmp_dns || true
-      [[ -n "$_tmp_dns" ]] && offline_dns_plan="$_tmp_dns"
-    else
-      read -rp "Offline DNS servers CSV [blank to skip]: " offline_dns_plan || true
-    fi
-
-    if [[ -n "$offline_search_plan" ]]; then
-      local _tmp_search=""
-      read -rp "Offline search domains CSV [$offline_search_plan]: " _tmp_search || true
-      [[ -n "$_tmp_search" ]] && offline_search_plan="$_tmp_search"
-    else
-      read -rp "Offline search domains CSV [blank to skip]: " offline_search_plan || true
-    fi
-
-    offline_ip_plan="$(echo "$offline_ip_plan" | xargs)"
-    offline_prefix_plan="$(echo "$offline_prefix_plan" | xargs)"
-    offline_gateway_plan="$(echo "$offline_gateway_plan" | xargs)"
-    offline_dns_plan="$(echo "$offline_dns_plan" | xargs)"
-    offline_search_plan="$(echo "$offline_search_plan" | xargs)"
-
-    while [[ -n "$offline_ip_plan" ]]; do
-      if valid_ipv4 "$offline_ip_plan"; then
-        break
+    if (( offline_plan_missing )); then
+      echo
+      echo "Offline network planning (optional). Provide the static IP details the cloned node will use once moved into the air-gapped environment."
+      if [[ -z "$offline_ip_plan" ]]; then
+        read -rp "Offline IPv4 for reference [blank to skip]: " offline_ip_plan || true
       fi
-      read -rp "Invalid IPv4. Re-enter offline IPv4 [blank to skip]: " offline_ip_plan || true
+      if [[ -z "$offline_prefix_plan" ]]; then
+        read -rp "Offline subnet prefix length (0-32) [blank=24]: " offline_prefix_plan || true
+      fi
+      if [[ -z "$offline_gateway_plan" ]]; then
+        read -rp "Offline default gateway [blank to skip]: " offline_gateway_plan || true
+      fi
+      if [[ -z "$offline_dns_plan" ]]; then
+        read -rp "Offline DNS servers CSV [blank to skip]: " offline_dns_plan || true
+      fi
+      if [[ -z "$offline_search_plan" ]]; then
+        read -rp "Offline search domains CSV [blank to skip]: " offline_search_plan || true
+      fi
+
       offline_ip_plan="$(echo "$offline_ip_plan" | xargs)"
-      [[ -z "$offline_ip_plan" ]] && break
-    done
-    while [[ -n "$offline_prefix_plan" ]]; do
-      if valid_prefix "$offline_prefix_plan"; then
-        break
-      fi
-      read -rp "Invalid prefix (0-32). Re-enter offline prefix [blank=24]: " offline_prefix_plan || true
       offline_prefix_plan="$(echo "$offline_prefix_plan" | xargs)"
-      [[ -z "$offline_prefix_plan" ]] && break
-    done
-    while [[ -n "$offline_gateway_plan" ]]; do
-      if valid_ipv4_or_blank "$offline_gateway_plan"; then
-        break
-      fi
-      read -rp "Invalid gateway IPv4. Re-enter offline gateway [blank to skip]: " offline_gateway_plan || true
       offline_gateway_plan="$(echo "$offline_gateway_plan" | xargs)"
-      [[ -z "$offline_gateway_plan" ]] && break
-    done
-    while [[ -n "$offline_dns_plan" ]]; do
-      if valid_csv_dns "$offline_dns_plan"; then
-        break
-      fi
-      read -rp "Invalid DNS CSV. Re-enter offline DNS list [blank to skip]: " offline_dns_plan || true
       offline_dns_plan="$(echo "$offline_dns_plan" | xargs)"
-      [[ -z "$offline_dns_plan" ]] && break
-    done
-    while [[ -n "$offline_search_plan" ]]; do
-      if valid_search_domains_csv "$offline_search_plan"; then
-        break
-      fi
-      read -rp "Invalid search domain CSV. Re-enter offline search domains [blank to skip]: " offline_search_plan || true
       offline_search_plan="$(echo "$offline_search_plan" | xargs)"
-      [[ -z "$offline_search_plan" ]] && break
-    done
 
-    [[ -n "$offline_dns_plan" ]] && offline_dns_plan="$(normalize_list_csv "$offline_dns_plan")"
-    [[ -n "$offline_search_plan" ]] && offline_search_plan="$(normalize_list_csv "$offline_search_plan")"
+      while [[ -n "$offline_ip_plan" ]]; do
+        if valid_ipv4 "$offline_ip_plan"; then
+          break
+        fi
+        read -rp "Invalid IPv4. Re-enter offline IPv4 [blank to skip]: " offline_ip_plan || true
+        offline_ip_plan="$(echo "$offline_ip_plan" | xargs)"
+        [[ -z "$offline_ip_plan" ]] && break
+      done
+      while [[ -n "$offline_prefix_plan" ]]; do
+        if valid_prefix "$offline_prefix_plan"; then
+          break
+        fi
+        read -rp "Invalid prefix (0-32). Re-enter offline prefix [blank=24]: " offline_prefix_plan || true
+        offline_prefix_plan="$(echo "$offline_prefix_plan" | xargs)"
+        [[ -z "$offline_prefix_plan" ]] && break
+      done
+      while [[ -n "$offline_gateway_plan" ]]; do
+        if valid_ipv4_or_blank "$offline_gateway_plan"; then
+          break
+        fi
+        read -rp "Invalid gateway IPv4. Re-enter offline gateway [blank to skip]: " offline_gateway_plan || true
+        offline_gateway_plan="$(echo "$offline_gateway_plan" | xargs)"
+        [[ -z "$offline_gateway_plan" ]] && break
+      done
+      while [[ -n "$offline_dns_plan" ]]; do
+        if valid_csv_dns "$offline_dns_plan"; then
+          break
+        fi
+        read -rp "Invalid DNS CSV. Re-enter offline DNS list [blank to skip]: " offline_dns_plan || true
+        offline_dns_plan="$(echo "$offline_dns_plan" | xargs)"
+        [[ -z "$offline_dns_plan" ]] && break
+      done
+      while [[ -n "$offline_search_plan" ]]; do
+        if valid_search_domains_csv "$offline_search_plan"; then
+          break
+        fi
+        read -rp "Invalid search domain CSV. Re-enter offline search domains [blank to skip]: " offline_search_plan || true
+        offline_search_plan="$(echo "$offline_search_plan" | xargs)"
+        [[ -z "$offline_search_plan" ]] && break
+      done
+
+      [[ -n "$offline_dns_plan" ]] && offline_dns_plan="$(normalize_list_csv "$offline_dns_plan")"
+      [[ -n "$offline_search_plan" ]] && offline_search_plan="$(normalize_list_csv "$offline_search_plan")"
+
+      if [[ -n "$offline_ip_plan" || -n "$offline_prefix_plan" || -n "$offline_gateway_plan" || -n "$offline_dns_plan" || -n "$offline_search_plan" ]]; then
+        offline_plan_has_values=1
+        offline_plan_from_prompt=1
+      fi
+    fi
+
+    if (( offline_plan_from_prompt )); then
+      log INFO "Captured offline network values via interactive prompts."
+    fi
   fi
 
   if [[ -n "$offline_ip_plan" && -z "$offline_prefix_plan" ]]; then
@@ -3631,6 +3711,18 @@ action_taint_node() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
+    --offline-network)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --offline-network requires a manifest path" >&2
+        exit 1
+      fi
+      OFFLINE_NETWORK_FILE="$2"
+      shift 2
+      ;;
+    --offline-network=*)
+      OFFLINE_NETWORK_FILE="${1#*=}"
+      shift
+      ;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2

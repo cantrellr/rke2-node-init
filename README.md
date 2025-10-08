@@ -55,7 +55,7 @@
 
 ## Workflow Overview
 
-1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, prompt for the static IP plan that offline clones will use, and reboot so the VM can be templated. The collected network data is written to the run README along with an optional `kind: Network` manifest under `outputs/<metadata.name>/` so that clones can reuse those values. This step downloads supplemental content and therefore requires Internet access.
+1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and gather the static IP plan that offline clones will use. The image action first looks for `spec.offlineNetwork.*` values in the `kind: Image` manifest, then for a CLI-supplied `--offline-network` `kind: Network` manifest, and only prompts for any missing fields. The collected network data is written to the run README along with an optional `kind: Network` manifest under `outputs/<metadata.name>/` so that clones can reuse those values. This step downloads supplemental content and therefore requires Internet access.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
@@ -178,6 +178,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-u/-p` | Registry credentials |
 | `-y` | Auto-confirm prompts (reboots, legacy runtime cleanup) |
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
+| `--offline-network FILE` | Provide offline clone network defaults via a `kind: Network` manifest (image action) |
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `-h` | Display built-in help |
 
