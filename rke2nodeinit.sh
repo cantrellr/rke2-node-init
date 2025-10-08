@@ -711,6 +711,174 @@ normalize_list_csv() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: parse_action_cli_args
+# Purpose : Parse residual CLI arguments passed after the action name so that
+#           actions can honor flag-style overrides without requiring YAML.
+# Arguments:
+#   $1 - Name of an associative array to populate with parsed values
+#   $2 - Action label (used for error reporting)
+#   $3+ - CLI arguments to parse
+# Returns :
+#   Populates the referenced associative array with any recognized values.
+# ------------------------------------------------------------------------------
+parse_action_cli_args() {
+  local -n _dest="$1"
+  local action_label="$2"
+  shift 2 || true
+
+  _dest=()
+  local -a args=("$@")
+  local tls_value="" tls_csv=""
+
+  while (( ${#args[@]} )); do
+    local arg="${args[0]}"
+    args=("${args[@]:1}")
+
+    case "$arg" in
+      --)
+        break
+        ;;
+      --hostname)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --hostname requires a value"; exit 1
+        fi
+        _dest[hostname]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --hostname=*)
+        _dest[hostname]="${arg#*=}"
+        ;;
+      --ip)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --ip requires a value"; exit 1
+        fi
+        _dest[ip]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --ip=*)
+        _dest[ip]="${arg#*=}"
+        ;;
+      --prefix)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --prefix requires a value"; exit 1
+        fi
+        _dest[prefix]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --prefix=*)
+        _dest[prefix]="${arg#*=}"
+        ;;
+      --gateway)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --gateway requires a value"; exit 1
+        fi
+        _dest[gateway]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --gateway=*)
+        _dest[gateway]="${arg#*=}"
+        ;;
+      --dns)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --dns requires a value"; exit 1
+        fi
+        _dest[dns]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --dns=*)
+        _dest[dns]="${arg#*=}"
+        ;;
+      --search-domains)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --search-domains requires a value"; exit 1
+        fi
+        _dest[search_domains]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --search-domains=*)
+        _dest[search_domains]="${arg#*=}"
+        ;;
+      --token)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --token requires a value"; exit 1
+        fi
+        _dest[token]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --token=*)
+        _dest[token]="${arg#*=}"
+        ;;
+      --token-file)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --token-file requires a value"; exit 1
+        fi
+        _dest[token_file]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --token-file=*)
+        _dest[token_file]="${arg#*=}"
+        ;;
+      --server-url)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --server-url requires a value"; exit 1
+        fi
+        _dest[server_url]="${args[0]}"
+        args=("${args[@]:1}")
+        ;;
+      --server-url=*)
+        _dest[server_url]="${arg#*=}"
+        ;;
+      --tls-san)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --tls-san requires a value"; exit 1
+        fi
+        tls_value="${args[0]}"
+        args=("${args[@]:1}")
+        if [[ -n "${_dest[tls_sans]:-}" ]]; then
+          _dest[tls_sans]+=",${tls_value}"
+        else
+          _dest[tls_sans]="${tls_value}"
+        fi
+        ;;
+      --tls-san=*)
+        tls_value="${arg#*=}"
+        if [[ -n "${_dest[tls_sans]:-}" ]]; then
+          _dest[tls_sans]+=",${tls_value}"
+        else
+          _dest[tls_sans]="${tls_value}"
+        fi
+        ;;
+      --tls-sans)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --tls-sans requires a value"; exit 1
+        fi
+        tls_csv="${args[0]}"
+        args=("${args[@]:1}")
+        if [[ -n "${_dest[tls_sans]:-}" ]]; then
+          _dest[tls_sans]+=",${tls_csv}"
+        else
+          _dest[tls_sans]="${tls_csv}"
+        fi
+        ;;
+      --tls-sans=*)
+        tls_csv="${arg#*=}"
+        if [[ -n "${_dest[tls_sans]:-}" ]]; then
+          _dest[tls_sans]+=",${tls_csv}"
+        else
+          _dest[tls_sans]="${tls_csv}"
+        fi
+        ;;
+      --*)
+        log WARN "[$action_label] Ignoring unrecognized CLI flag: $arg"
+        ;;
+      *)
+        log WARN "[$action_label] Ignoring unexpected CLI argument: $arg"
+        ;;
+    esac
+  done
+}
+
+# ------------------------------------------------------------------------------
 # Function: normalize_bool_value
 # Purpose : Normalize boolean-like user input into lowercase true/false strings
 #           for safe YAML emission.
@@ -1515,19 +1683,61 @@ resolve_custom_ca_path() {
 #           load them into global variables for later trust operations.
 # Arguments:
 #   $1 - Path to YAML configuration
+#   $2 - Optional section override (defaults to spec.customCA/spec.customca)
+#   $3 - Optional flag (1) to restrict lookups to spec.<section> keys only
 # Returns :
 #   Populates CUSTOM_CA_* globals when entries are present.
 # ------------------------------------------------------------------------------
 load_custom_ca_from_config() {
   local file="$1"
+  local section_override="${2:-}"
+  local spec_only="${3:-0}"
   [[ -n "$file" ]] || return 0
 
+  CUSTOM_CA_ROOT_CRT=""
+  CUSTOM_CA_ROOT_KEY=""
+  CUSTOM_CA_INT_CRT=""
+  CUSTOM_CA_INT_KEY=""
+  CUSTOM_CA_INSTALL_TO_OS_TRUST=1
+
+  local -a sections=()
+  if [[ -n "$section_override" ]]; then
+    sections=("$section_override")
+  else
+    sections=("customCA" "customca")
+  fi
+
+  local -a root_keys=()
+  local -a key_keys=()
+  local -a intcrt_keys=()
+  local -a intkey_keys=()
+  local -a install_keys=()
+
+  local sec
+  for sec in "${sections[@]}"; do
+    root_keys+=("${sec}.rootCrt" "${sec}.rootcrt" "${sec}.root-crt")
+    key_keys+=("${sec}.rootKey" "${sec}.rootkey" "${sec}.root-key")
+    intcrt_keys+=("${sec}.intermediateCrt" "${sec}.intermediatecrt" "${sec}.intermediate-crt")
+    intkey_keys+=("${sec}.intermediateKey" "${sec}.intermediatekey" "${sec}.intermediate-key")
+    install_keys+=("${sec}.installToOSTrust" "${sec}.installtoosstrust" "${sec}.install-to-os-trust")
+  done
+
+  # When no override is supplied, also consider the legacy section name so that
+  # existing YAMLs continue to function while newer specs can use lowercase keys.
+  if (( ! spec_only )) && [[ -z "$section_override" ]]; then
+    root_keys+=("customca.rootcrt" "customca.root-crt")
+    key_keys+=("customca.rootkey" "customca.root-key")
+    intcrt_keys+=("customca.intermediatecrt" "customca.intermediate-crt")
+    intkey_keys+=("customca.intermediatekey" "customca.intermediate-key")
+    install_keys+=("customca.installtoosstrust" "customca.install-to-os-trust")
+  fi
+
   local root="" key="" intcrt="" intkey="" install=""
-  root="$(yaml_spec_get "$file" customCA.rootCrt || true)"
-  key="$(yaml_spec_get "$file" customCA.rootKey || true)"
-  intcrt="$(yaml_spec_get "$file" customCA.intermediateCrt || true)"
-  intkey="$(yaml_spec_get "$file" customCA.intermediateKey || true)"
-  install="$(yaml_spec_get "$file" customCA.installToOSTrust || true)"
+  root="$(yaml_spec_get_any "$file" "${root_keys[@]}" || true)"
+  key="$(yaml_spec_get_any "$file" "${key_keys[@]}" || true)"
+  intcrt="$(yaml_spec_get_any "$file" "${intcrt_keys[@]}" || true)"
+  intkey="$(yaml_spec_get_any "$file" "${intkey_keys[@]}" || true)"
+  install="$(yaml_spec_get_any "$file" "${install_keys[@]}" || true)"
 
   if [[ -n "$root" ]]; then
     CUSTOM_CA_ROOT_CRT="$(resolve_custom_ca_path "$root")"
@@ -2729,6 +2939,38 @@ action_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  local -A server_cli=()
+  parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
+
+  if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
+    HOSTNAME="${server_cli[hostname]}"
+  fi
+  if [[ -z "$IP" && -n "${server_cli[ip]:-}" ]]; then
+    IP="${server_cli[ip]}"
+  fi
+  if [[ -z "$PREFIX" && -n "${server_cli[prefix]:-}" ]]; then
+    PREFIX="${server_cli[prefix]}"
+  fi
+  if [[ -z "$GW" && -n "${server_cli[gateway]:-}" ]]; then
+    GW="${server_cli[gateway]}"
+  fi
+  if [[ -z "$DNS" && -n "${server_cli[dns]:-}" ]]; then
+    DNS="$(normalize_list_csv "${server_cli[dns]}")"
+  fi
+  if [[ -z "$SEARCH" && -n "${server_cli[search_domains]:-}" ]]; then
+    SEARCH="$(normalize_list_csv "${server_cli[search_domains]}")"
+  fi
+  if [[ -z "$TOKEN" && -n "${server_cli[token]:-}" ]]; then
+    TOKEN="${server_cli[token]}"
+  fi
+  if [[ -z "$TOKEN_FILE" && -n "${server_cli[token_file]:-}" ]]; then
+    TOKEN_FILE="${server_cli[token_file]}"
+  fi
+  if [[ -z "$TLS_SANS_IN" && -n "${server_cli[tls_sans]:-}" ]]; then
+    TLS_SANS_IN="${server_cli[tls_sans]}"
+    TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+  fi
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -2888,6 +3130,37 @@ action_agent() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  local -A agent_cli=()
+  parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
+
+  if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
+    HOSTNAME="${agent_cli[hostname]}"
+  fi
+  if [[ -z "$IP" && -n "${agent_cli[ip]:-}" ]]; then
+    IP="${agent_cli[ip]}"
+  fi
+  if [[ -z "$PREFIX" && -n "${agent_cli[prefix]:-}" ]]; then
+    PREFIX="${agent_cli[prefix]}"
+  fi
+  if [[ -z "$GW" && -n "${agent_cli[gateway]:-}" ]]; then
+    GW="${agent_cli[gateway]}"
+  fi
+  if [[ -z "$DNS" && -n "${agent_cli[dns]:-}" ]]; then
+    DNS="$(normalize_list_csv "${agent_cli[dns]}")"
+  fi
+  if [[ -z "$SEARCH" && -n "${agent_cli[search_domains]:-}" ]]; then
+    SEARCH="$(normalize_list_csv "${agent_cli[search_domains]}")"
+  fi
+  if [[ -z "$TOKEN" && -n "${agent_cli[token]:-}" ]]; then
+    TOKEN="${agent_cli[token]}"
+  fi
+  if [[ -z "$TOKEN_FILE" && -n "${agent_cli[token_file]:-}" ]]; then
+    TOKEN_FILE="${agent_cli[token_file]}"
+  fi
+  if [[ -z "$URL" && -n "${agent_cli[server_url]:-}" ]]; then
+    URL="${agent_cli[server_url]}"
+  fi
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3032,6 +3305,41 @@ action_add_server() {
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+  fi
+
+  local -A add_server_cli=()
+  parse_action_cli_args add_server_cli "add-server" "${ACTION_ARGS[@]}"
+
+  if [[ -z "$HOSTNAME" && -n "${add_server_cli[hostname]:-}" ]]; then
+    HOSTNAME="${add_server_cli[hostname]}"
+  fi
+  if [[ -z "$IP" && -n "${add_server_cli[ip]:-}" ]]; then
+    IP="${add_server_cli[ip]}"
+  fi
+  if [[ -z "$PREFIX" && -n "${add_server_cli[prefix]:-}" ]]; then
+    PREFIX="${add_server_cli[prefix]}"
+  fi
+  if [[ -z "$GW" && -n "${add_server_cli[gateway]:-}" ]]; then
+    GW="${add_server_cli[gateway]}"
+  fi
+  if [[ -z "$DNS" && -n "${add_server_cli[dns]:-}" ]]; then
+    DNS="$(normalize_list_csv "${add_server_cli[dns]}")"
+  fi
+  if [[ -z "$SEARCH" && -n "${add_server_cli[search_domains]:-}" ]]; then
+    SEARCH="$(normalize_list_csv "${add_server_cli[search_domains]}")"
+  fi
+  if [[ -z "$TOKEN" && -n "${add_server_cli[token]:-}" ]]; then
+    TOKEN="${add_server_cli[token]}"
+  fi
+  if [[ -z "$TOKEN_FILE" && -n "${add_server_cli[token_file]:-}" ]]; then
+    TOKEN_FILE="${add_server_cli[token_file]}"
+  fi
+  if [[ -z "$URL" && -n "${add_server_cli[server_url]:-}" ]]; then
+    URL="${add_server_cli[server_url]}"
+  fi
+  if [[ -z "$TLS_SANS_IN" && -n "${add_server_cli[tls_sans]:-}" ]]; then
+    TLS_SANS_IN="${add_server_cli[tls_sans]}"
+    TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
   fi
 
   log INFO "Prompting for any missing configuration values..."
@@ -3335,8 +3643,25 @@ action_taint_node() {
 action_custom_ca() {
   initialize_action_context false "custom-ca"
 
+  if [[ -z "${CONFIG_FILE:-}" ]]; then
+    log ERROR "custom-ca action requires a YAML file (-f <file>)"
+    exit 5
+  fi
+
+  local kind_folded="${YAML_KIND:-}"
+  kind_folded="${kind_folded,,}"
+  if [[ "${kind_folded//-/}" != "customca" ]]; then
+    log ERROR "custom-ca action expects kind: CustomCA (found: ${YAML_KIND:-<none>})"
+    exit 5
+  fi
+
   log INFO "Loading custom CA from YAML..."
-  load_custom_ca_from_config "$CONFIG_FILE"
+  load_custom_ca_from_config "$CONFIG_FILE" "" 1
+
+  if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
+    log ERROR "spec.customCA must define at least rootCrt or intermediateCrt"
+    exit 5
+  fi
 
   log INFO "Generating first server token from custom CA..."
   local TOKEN
