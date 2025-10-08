@@ -3321,6 +3321,43 @@ action_taint_node() {
   spinner_run "Tainting node $node" "${cmd[@]}"
 }
 
+# ==================
+# Action: CUSTOM-CA
+# ------------------------------------------------------------------------------
+# Function: action_custom_ca
+# Purpose : Generate the first server token from the custom CA specified in the YAML
+#           and save it to the outputs directory, log it, and print to screen.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure.
+# ------------------------------------------------------------------------------
+action_custom_ca() {
+  initialize_action_context false "custom-ca"
+
+  log INFO "Loading custom CA from YAML..."
+  load_custom_ca_from_config "$CONFIG_FILE"
+
+  log INFO "Generating first server token from custom CA..."
+  local TOKEN
+  TOKEN="$(generate_first_server_token)"
+
+  if [[ -z "$TOKEN" ]]; then
+    log ERROR "Failed to generate first server token."
+    exit 1
+  fi
+
+  local token_file="$OUT_DIR/first-server-token.txt"
+  echo "$TOKEN" > "$token_file"
+  chmod 600 "$token_file"
+
+  log INFO "First server token generated and saved to $token_file"
+  log INFO "Token: $TOKEN"
+
+  echo "First server token: $TOKEN"
+  echo "Saved to: $token_file"
+}
+
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
@@ -3400,6 +3437,7 @@ if [[ -n "$CONFIG_FILE" && -z "$ACTION" ]]; then
     AddServer|add-server|addServer|addserver|Addserver|add_server|Add_server|add_Server) ACTION="add-server" ;;
     Agent|agent)      ACTION="agent"       ;;
     Verify|verify)    ACTION="verify"      ;;
+    CustomCA|custom-ca|customca) ACTION="custom-ca" ;;
     *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
   esac
 fi
@@ -3416,5 +3454,6 @@ case "${ACTION:-}" in
   push)        action_push   ;;
   label-node)  action_label_node ;;
   taint-node)  action_taint_node ;;
+  custom-ca)   action_custom_ca ;;
   *) print_help; exit 1 ;;
 esac
