@@ -62,7 +62,7 @@ esac
 #   - strong input validation for IP/prefix/DNS/search
 #
 # YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, ClusterCA|cluster-ca
+#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, CustomCA|custom-ca|customca
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
