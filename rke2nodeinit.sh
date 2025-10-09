@@ -1961,6 +1961,7 @@ ensure_full_cluster_token() {
 # ------------------------------------------------------------------------------
 generate_bootstrap_token() {
   local ca_cert="" ca_hash="" passphrase=""
+        token=""
 
   # Generate the base passphrase shared by both token formats.
   passphrase="$(openssl rand -hex 20 2>/dev/null || true)"
@@ -2005,8 +2006,19 @@ generate_bootstrap_token() {
     return 0
   fi
 
-  log INFO "Generated secure server token using custom CA fingerprint $ca_hash from $ca_cert." >&2
-  printf 'K10%s::server:%s' "$ca_hash" "$passphrase" >&2
+  token=$(printf 'K10%s::server:%s' "$ca_hash" "$passphrase")
+  if [[ -z "$token" ]]; then
+    log ERROR "Failed to construct full bootstrap token despite having CA context." >&2
+    return 1
+  else
+  #  printf '%s' "$token"
+   # echo $token
+    log INFO "Generated secure server token" >&2
+    log INFO "CustomCA:" >&2
+    log INFO "     Fingerprint: $ca_hash" >&2
+    log INFO "  CA Certificate: $ca_cert" >&2
+    return 0
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -3663,22 +3675,23 @@ action_custom_ca() {
     exit 5
   fi
 
-  log INFO "Generating first server token from custom CA..."
-  local TOKEN
-  TOKEN="$(generate_bootstrap_token)"
+  log INFO "Generating bootstrap token from custom CA..."
+  generate_bootstrap_token
 
-  if [[ -n "$TOKEN" ]]; then
-    log ERROR "Failed to generate first server token."
+  local TOKEN="" TOKEN_FILE=""
+  TOKEN=$token
+  
+  if [[ -z "$TOKEN" ]]; then
+    log ERROR "Failed to generate bootstrap token."
     exit 1
+  else
+    TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
+    echo "$TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    log INFO "Token saved to $TOKEN_FILE"
   fi
 
-  log INFO "Token: $TOKEN"
-  echo "First server token: $TOKEN"
-
-  local token_file="$OUT_DIR/first-server-token.txt"
-  echo "$TOKEN" > "$token_file"
-  chmod 600 "$token_file"
-  log INFO "Token saved to $token_file"
+  log INFO "Generated bootstrap token successfully."  
 }
 
 # ================================================================================================
