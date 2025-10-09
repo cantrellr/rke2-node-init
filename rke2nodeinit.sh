@@ -3680,8 +3680,6 @@ action_custom_ca() {
   generate_bootstrap_token
   TOKEN=$token
   
-  echo "The token is: ${TOKEN}"
-
   if [[ -z "$TOKEN" ]]; then
     log ERROR "Failed to generate bootstrap token."
     exit 1
