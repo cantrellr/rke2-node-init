@@ -3689,7 +3689,7 @@ action_custom_ca() {
     log INFO "Token saved to $TOKEN_FILE"
   fi
 
-  log INFO "Generated bootstrap token successfully."  
+  log INFO "Generated bootstrap token successfully."
 }
 
 # ================================================================================================
