@@ -3675,10 +3675,9 @@ action_custom_ca() {
   fi
 
   log INFO "Generating bootstrap token from custom CA..."
-  generate_bootstrap_token
 
   local TOKEN="" TOKEN_FILE=""
-  TOKEN=$token
+  TOKEN=$(generate_bootstrap_token)
   
   if [[ -z "$TOKEN" ]]; then
     log ERROR "Failed to generate bootstrap token."
