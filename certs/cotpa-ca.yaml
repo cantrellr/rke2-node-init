@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v1
-kind: ClusterCA
+kind: CustomCA
 metadata:
   name: cotpa-cluster-ca
 spec:
