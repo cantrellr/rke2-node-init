@@ -2014,8 +2014,8 @@ generate_bootstrap_token() {
   #  printf '%s' "$token"
     log INFO "Generated secure server token" >&2
     log INFO "CustomCA:" >&2
-    log INFO "     Fingerprint: $ca_hash" >&2
-    log INFO "  CA Certificate: $ca_cert" >&2
+    log INFO "  Fingerprint: $ca_hash" >&2
+    log INFO "  Certificate: $ca_cert" >&2
     return 0
   fi
 }
