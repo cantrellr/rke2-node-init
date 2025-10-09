@@ -62,7 +62,7 @@ esac
 #   - strong input validation for IP/prefix/DNS/search
 #
 # YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, ClusterCA|cluster-ca
+#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, CustomCA|Custom-CA|customca|custom-CA|custom-ca
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
@@ -1949,7 +1949,7 @@ ensure_full_cluster_token() {
 }
 
 # ------------------------------------------------------------------------------
-# Function: generate_first_server_token
+# Function: generate_bootstrap_token
 # Purpose : Produce an appropriate bootstrap token for the very first RKE2
 #           server. When a custom CA is available (from action_image), emit a
 #           secure token that embeds the CA hash. Otherwise, fall back to the
@@ -1959,7 +1959,7 @@ ensure_full_cluster_token() {
 # Returns :
 #   Prints the generated token.
 # ------------------------------------------------------------------------------
-generate_first_server_token() {
+generate_bootstrap_token() {
   local ca_cert="" ca_hash="" passphrase=""
 
   # Generate the base passphrase shared by both token formats.
@@ -2005,8 +2005,8 @@ generate_first_server_token() {
     return 0
   fi
 
-  log INFO "Generated secure first-server token using custom CA fingerprint $ca_hash from $ca_cert." >&2
-  printf 'K10%s::server:%s' "$ca_hash" "$passphrase"
+  log INFO "Generated secure server token using custom CA fingerprint $ca_hash from $ca_cert." >&2
+  printf 'K10%s::server:%s' "$ca_hash" "$passphrase" >&2
 }
 
 # ------------------------------------------------------------------------------
@@ -3029,7 +3029,7 @@ action_server() {
       TOKEN="$full_token"
     fi
   else
-    TOKEN="$(generate_first_server_token)"
+    TOKEN="$(generate_bootstrap_token)"
     if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
       log INFO "Using generated secure first-server token (custom CA fingerprint embedded)."
     else
@@ -3644,14 +3644,14 @@ action_custom_ca() {
   initialize_action_context false "custom-ca"
 
   if [[ -z "${CONFIG_FILE:-}" ]]; then
-    log ERROR "custom-ca action requires a YAML file (-f <file>)"
+    log ERROR "Custom-CA action requires a YAML file (-f <file>)"
     exit 5
   fi
 
   local kind_folded="${YAML_KIND:-}"
   kind_folded="${kind_folded,,}"
   if [[ "${kind_folded//-/}" != "customca" ]]; then
-    log ERROR "custom-ca action expects kind: CustomCA (found: ${YAML_KIND:-<none>})"
+    log ERROR "Custom-CA action expects kind: CustomCA|Custom-CA|customca|custom-CA|custom-ca (found: ${YAML_KIND:-<none>})"
     exit 5
   fi
 
@@ -3665,22 +3665,20 @@ action_custom_ca() {
 
   log INFO "Generating first server token from custom CA..."
   local TOKEN
-  TOKEN="$(generate_first_server_token)"
+  TOKEN="$(generate_bootstrap_token)"
 
-  if [[ -z "$TOKEN" ]]; then
+  if [[ -n "$TOKEN" ]]; then
     log ERROR "Failed to generate first server token."
     exit 1
   fi
 
+  log INFO "Token: $TOKEN"
+  echo "First server token: $TOKEN"
+
   local token_file="$OUT_DIR/first-server-token.txt"
   echo "$TOKEN" > "$token_file"
   chmod 600 "$token_file"
-
-  log INFO "First server token generated and saved to $token_file"
-  log INFO "Token: $TOKEN"
-
-  echo "First server token: $TOKEN"
-  echo "Saved to: $token_file"
+  log INFO "Token saved to $token_file"
 }
 
 # ================================================================================================
