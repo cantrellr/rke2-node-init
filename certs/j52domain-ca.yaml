@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v1
-kind: ClusterCA
+kind: CustomCA
 metadata:
   name: j52domain-ca
 spec:
