@@ -2012,7 +2012,6 @@ generate_bootstrap_token() {
     return 1
   else
   #  printf '%s' "$token"
-   # echo $token
     log INFO "Generated secure server token" >&2
     log INFO "CustomCA:" >&2
     log INFO "     Fingerprint: $ca_hash" >&2
