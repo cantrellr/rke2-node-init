@@ -1961,7 +1961,7 @@ ensure_full_cluster_token() {
 # ------------------------------------------------------------------------------
 generate_bootstrap_token() {
   local ca_cert="" ca_hash="" passphrase=""
-        token=""
+  declare -g token=""
 
   # Generate the base passphrase shared by both token formats.
   passphrase="$(openssl rand -hex 20 2>/dev/null || true)"
@@ -3677,8 +3677,11 @@ action_custom_ca() {
   log INFO "Generating bootstrap token from custom CA..."
 
   local TOKEN="" TOKEN_FILE=""
-  TOKEN=$(generate_bootstrap_token)
+  generate_bootstrap_token
+  TOKEN=$token
   
+  echo "The token is: ${TOKEN}"
+
   if [[ -z "$TOKEN" ]]; then
     log ERROR "Failed to generate bootstrap token."
     exit 1
