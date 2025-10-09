@@ -10,7 +10,7 @@ spec:
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
   serverURL: https://10.0.4.141:9345
-  tokenFile: outputs/j64domain-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/j64domain-ca-bootstrap-token.txt
   node-label:
   - "role=worker"
   - "env=preprod"
