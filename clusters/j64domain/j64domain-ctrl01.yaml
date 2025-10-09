@@ -22,12 +22,10 @@ spec:
   cluster-cidr: 10.244.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
- # system-default-registry: altregistry.dev.kube
- # private-registry: /etc/rancher/rke2/registries.yaml
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-
+  tokenFile: outputs/j64domain-ca-bootstrap-token.txt
   customCA:
-    rootCrt: /opt/rke2/certs/dev-certa001-ca-dev-local.crt
-    rootKey: /opt/rke2/certs/dev-certa001-ca-dev-local-key.pem
+    rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
+    rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
     installToOSTrust: true
