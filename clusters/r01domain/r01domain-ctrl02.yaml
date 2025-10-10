@@ -15,6 +15,7 @@ spec:
   - "env=preprod"
   tls-san:
     - r01domain-ctrl02
+    - r01domain-ctrl02.dev.kube
     - r01domain-cluster
     - r01domain-cluster.dev.kube
     - 10.0.4.182
@@ -30,3 +31,5 @@ spec:
     rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
     rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
     installToOSTrust: true
+  disable:
+  - rke2-ingress-nginx

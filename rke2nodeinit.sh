@@ -3079,9 +3079,7 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+  	echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
@@ -3257,9 +3255,7 @@ action_agent() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+  	echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
@@ -3457,9 +3453,7 @@ action_add_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+    echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"

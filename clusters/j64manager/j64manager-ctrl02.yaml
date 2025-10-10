@@ -15,6 +15,7 @@ spec:
   - "env=preprod"
   tls-san:
     - j64manager-ctrl02
+    - j64manager-ctrl02.dev.kube
     - j64manager-cluster
     - j64manager-cluster.dev.kube
     - 10.0.4.132
@@ -30,3 +31,5 @@ spec:
     rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
     rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
     installToOSTrust: true
+  disable:
+  - rke2-ingress-nginx
