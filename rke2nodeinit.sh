@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.7b (prelease)
+#       Version: 0.7d (preprod)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -2950,9 +2950,11 @@ action_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
     HOSTNAME="${server_cli[hostname]}"
   fi
@@ -3026,7 +3028,7 @@ action_server() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
+  log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
 
   log INFO "Validating/expanding provided token (if any)..."
@@ -3067,9 +3069,6 @@ action_server() {
 
     log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
     append_spec_config_extras "$CONFIG_FILE"
-
-    #log INFO "Emit TLS SANs..." >&2
-    #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
@@ -3139,9 +3138,11 @@ action_agent() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
     HOSTNAME="${agent_cli[hostname]}"
   fi
@@ -3201,6 +3202,17 @@ action_agent() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
+  log INFO "Gathering cluster join information..."
+  if [[ -z "$URL" ]]; then
+    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
+  fi
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+    read -rp "Enter cluster join token [optional]: " TOKEN || true
+  fi
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
+  fi
+
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
@@ -3211,17 +3223,6 @@ action_agent() {
       fi
       TOKEN="$full_token"
     fi
-  fi
-
-  log INFO "Gathering cluster join information..."
-  if [[ -z "$URL" ]]; then
-    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
-  fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
-    read -rp "Enter cluster join token [optional]: " TOKEN || true
-  fi
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
   fi
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
@@ -3314,9 +3315,11 @@ action_add_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A add_server_cli=()
   parse_action_cli_args add_server_cli "add-server" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${add_server_cli[hostname]:-}" ]]; then
     HOSTNAME="${add_server_cli[hostname]}"
   fi
@@ -3394,8 +3397,18 @@ action_add_server() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
+  log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  log INFO "Gathering cluster join information..."
+  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
+    if [[ -z "$TOKEN" ]]; then
+      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
+    fi
+  fi
+  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
@@ -3408,16 +3421,6 @@ action_add_server() {
       TOKEN="$full_token"
     fi
   fi
-
-  log INFO "Gathering cluster join information..."
-  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z "$TOKEN" ]]; then
-      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
-    fi
-  fi
-  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
@@ -3441,9 +3444,6 @@ action_add_server() {
 
     log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
     append_spec_config_extras "$CONFIG_FILE"
-
-    #log INFO "Emit TLS SANs..." >&2
-    #emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
