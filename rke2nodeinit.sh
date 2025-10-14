@@ -2702,9 +2702,7 @@ ExecStart=/usr/sbin/ethtool -K flannel.1 tx-checksum-ip-generic off
 EOF
 
     log INFO "Enabling ethtool helper service."
-    #systemctl daemon-reload
     systemctl enable ethtool-patch-flannel.1-checksum.service 2>&1 || true
-    systemctl start ethtool-patch-flannel.1-checksum.service 
 
   fi
 }
