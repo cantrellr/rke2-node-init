@@ -2684,66 +2684,29 @@ prompt_reboot() {
 install_flannel_txcsum_fix() {
   set -euo pipefail
 
-  # 0) Ensure ethtool exists (best-effort, safe if offline)
+  log INFO "Installing flannel TX checksum offload fix (ethtool + systemd service)."
   if ! command -v ethtool >/dev/null 2>&1 && [[ -x /usr/bin/apt-get ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ethtool >/dev/null 2>&1 || true
-  fi
-
-  mkdir -p /usr/local/sbin
-
-  # 1) Helper that turns off TX checksum on the first flannel.* interface found
-  cat >/usr/local/sbin/flannel-txcsum.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-shopt -s nullglob
-ifaces=(/sys/class/net/flannel.*)
-if [[ ${#ifaces[@]} -eq 0 ]]; then
-  # Path unit should only trigger when it exists, but bail gracefully if it disappears
-  exit 0
-fi
-DEV="$(basename "${ifaces[0]}")"
-# Try a short wait in case the interface is present-but-not-ready
-for i in {1..60}; do
-  ip link show "$DEV" &>/dev/null && break
-  sleep 1
-done
-# Apply the fix (don’t fail the unit if NIC/driver doesn’t support it)
-if command -v ethtool >/dev/null 2>&1; then
-  /usr/sbin/ethtool -K "$DEV" tx-checksum-ip-generic off || true
-fi
-exit 0
-EOF
-  chmod +x /usr/local/sbin/flannel-txcsum.sh
-
-  # 2) Service that runs the helper
-  cat >/etc/systemd/system/flannel-txcsum.service <<'EOF'
+    log WARM "ethtool not installed. Please re-run Image."
+	exit 2
+  else
+    log INFO "Creating ethtool helper script."
+    cat >/etc/systemd/system/ethtool-patch-flannel.1-checksum.service <<'EOF'
 [Unit]
-Description=Disable TX checksum offload on flannel.* (VXLAN)
-After=network-online.target rke2-server.service rke2-agent.service
-Wants=network-online.target
-
+Description=Turn off checkdum on flannel.1
+After=sys-subsystem-net-devices-flannel.1.device
+[Install]
+WantedBy=sys-subsystem-net-devices-flannel.1.device
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/flannel-txcsum.sh
-RemainAfterExit=yes
+ExecStart=/usr/sbin/ethtool -K flannel.1 tx-checksum-ip-generic off
 EOF
 
-  # 3) Path unit: trigger when flannel interface appears
-  cat >/etc/systemd/system/flannel-txcsum.path <<'EOF'
-[Unit]
-Description=Watch for flannel.* and disable TX checksum offload
+    log INFO "Enabling ethtool helper service."
+    systemctl daemon-reload
+    systemctl enable ethtool-patch-flannel.1-checksum.service 2>&1 || true
+    systemctl start ethtool-patch-flannel.1-checksum.service 
 
-[Path]
-PathExistsGlob=/sys/class/net/flannel.*
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # 4) Enable now; it will auto-run on next boot and whenever flannel.* is created
-  systemctl daemon-reload
-  systemctl enable --now flannel-txcsum.path >/dev/null 2>&1 || true
+  fi
 }
 
 # ================================================================================================
