@@ -59,6 +59,13 @@ function Get-IntOrDefault {
   return $Default
 }
 
+function Get-ClusterRootResourcePool {
+  param($Cluster)
+  if (-not $Cluster) { return $null }
+  if (-not $Cluster.ExtensionData -or -not $Cluster.ExtensionData.ResourcePool) { return $null }
+  return Get-ResourcePool -Id $Cluster.ExtensionData.ResourcePool -ErrorAction SilentlyContinue
+}
+
 foreach ($vmRow in $vmDefinitions) {
   $vmName = Get-StringOrNull $vmRow.VMName
   if (-not $vmName) {
@@ -94,8 +101,12 @@ foreach ($vmRow in $vmDefinitions) {
     $template     = if ($templateName)  { Get-Template -Name $templateName -ErrorAction Stop }      else { $null }
     $oscSpec      = if ($oscSpecName)   { Get-OSCustomizationSpec -Name $oscSpecName -ErrorAction Stop } else { $null }
 
-    if (-not $template -and -not $cluster) {
-      throw "Cluster is required when not cloning from a template."
+    if (-not $resourcePool -and $cluster) {
+      $resourcePool = Get-ClusterRootResourcePool $cluster
+    }
+
+    if (-not $template -and -not $resourcePool) {
+      throw "ResourcePool (or Cluster resolving to a resource pool) is required when not cloning from a template."
     }
 
     $params = @{
@@ -106,15 +117,15 @@ foreach ($vmRow in $vmDefinitions) {
 
     if ($template) {
       $params['Template'] = $template
-    } elseif ($cluster) {
-      $params['Cluster'] = $cluster
+      if ($datastore) { $params['Datastore'] = $datastore }
+    } else {
+      if (-not $datastore) {
+        throw "Datastore is required when creating a VM without a template."
+      }
       $params['Datastore'] = $datastore
       $params['DiskGB'] = $diskGb
     }
 
-    if ($datastore -and -not $params.ContainsKey('Datastore')) {
-      $params['Datastore'] = $datastore
-    }
     if ($folder)       { $params['Location'] = $folder }
     if ($resourcePool) { $params['ResourcePool'] = $resourcePool }
     if ($guestId)      { $params['GuestId'] = $guestId }
