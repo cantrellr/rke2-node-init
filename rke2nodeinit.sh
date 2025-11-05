@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.7b (prelease)
+#       Version: 0.7d (preprod)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -2681,6 +2681,32 @@ prompt_reboot() {
   fi
 }
 
+install_flannel_txcsum_fix() {
+  set -euo pipefail
+
+  log INFO "Installing flannel TX checksum offload fix (ethtool + systemd service)."
+  if ! command -v ethtool >/dev/null 2>&1 && [[ -x /usr/bin/apt-get ]]; then
+    log WARM "ethtool not installed. Please re-run Image."
+	exit 2
+  else
+    log INFO "Creating ethtool helper script."
+    cat >/etc/systemd/system/ethtool-patch-flannel.1-checksum.service <<'EOF'
+[Unit]
+Description=Turn off checkdum on flannel.1
+After=sys-subsystem-net-devices-flannel.1.device
+[Install]
+WantedBy=sys-subsystem-net-devices-flannel.1.device
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -K flannel.1 tx-checksum-ip-generic off
+EOF
+
+    log INFO "Enabling ethtool helper service."
+    systemctl enable ethtool-patch-flannel.1-checksum.service 2>&1 || true
+
+  fi
+}
+
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
@@ -2950,9 +2976,11 @@ action_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
     HOSTNAME="${server_cli[hostname]}"
   fi
@@ -3026,7 +3054,7 @@ action_server() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
+  log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
 
   log INFO "Validating/expanding provided token (if any)..."
@@ -3068,9 +3096,6 @@ action_server() {
     log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
     append_spec_config_extras "$CONFIG_FILE"
 
-    #log INFO "Emit TLS SANs..." >&2
-    #emit_tls_sans "$TLS_SANS"
-
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
     # Prefer systemd-resolved if present
@@ -3079,9 +3104,7 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+  	echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
@@ -3095,6 +3118,9 @@ action_server() {
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
   systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+
+  log INFO "Deploying flannel TX checksum offload fix..."
+  install_flannel_txcsum_fix
 
   echo
   echo "[READY] rke2-server installed. Reboot to initialize the control plane."
@@ -3141,9 +3167,11 @@ action_agent() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
     HOSTNAME="${agent_cli[hostname]}"
   fi
@@ -3203,6 +3231,17 @@ action_agent() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
+  log INFO "Gathering cluster join information..."
+  if [[ -z "$URL" ]]; then
+    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
+  fi
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+    read -rp "Enter cluster join token [optional]: " TOKEN || true
+  fi
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
+  fi
+
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
@@ -3213,17 +3252,6 @@ action_agent() {
       fi
       TOKEN="$full_token"
     fi
-  fi
-
-  log INFO "Gathering cluster join information..."
-  if [[ -z "$URL" ]]; then
-    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
-  fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
-    read -rp "Enter cluster join token [optional]: " TOKEN || true
-  fi
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
   fi
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
@@ -3257,9 +3285,7 @@ action_agent() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+  	echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
@@ -3273,6 +3299,9 @@ action_agent() {
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "agent"
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
+
+  log INFO "Deploying flannel TX checksum offload fix..."
+  install_flannel_txcsum_fix
 
   echo
   echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
@@ -3318,9 +3347,11 @@ action_add_server() {
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
+  log INFO "Reading configuration from CLI args (if provided)..."
   local -A add_server_cli=()
   parse_action_cli_args add_server_cli "add-server" "${ACTION_ARGS[@]}"
 
+  log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${add_server_cli[hostname]:-}" ]]; then
     HOSTNAME="${add_server_cli[hostname]}"
   fi
@@ -3398,8 +3429,18 @@ action_add_server() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
+  log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  log INFO "Gathering cluster join information..."
+  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
+    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
+    if [[ -z "$TOKEN" ]]; then
+      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
+    fi
+  fi
+  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
@@ -3412,16 +3453,6 @@ action_add_server() {
       TOKEN="$full_token"
     fi
   fi
-
-  log INFO "Gathering cluster join information..."
-  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z "$TOKEN" ]]; then
-      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
-    fi
-  fi
-  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
@@ -3446,9 +3477,6 @@ action_add_server() {
     log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
     append_spec_config_extras "$CONFIG_FILE"
 
-    #log INFO "Emit TLS SANs..." >&2
-    #emit_tls_sans "$TLS_SANS"
-
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
     # Prefer systemd-resolved if present
@@ -3457,9 +3485,7 @@ action_add_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-	echo "disable:"
-	echo "  - rke2-ingress-nginx"
-	echo
+    echo
 
   } >> /etc/rancher/rke2/config.yaml
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
@@ -3473,6 +3499,9 @@ action_add_server() {
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
   systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+
+  log INFO "Deploying flannel TX checksum offload fix..."
+  install_flannel_txcsum_fix
 
   echo
   echo "[READY] rke2-server installed. Reboot to initialize the control plane."

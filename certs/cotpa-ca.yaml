@@ -1,9 +1,0 @@
-apiVersion: rkeprep/v1
-kind: CustomCA
-metadata:
-  name: cotpa-cluster-ca
-spec:
-  customCA:
-    rootCrt: certs/rke2ca-cert.crt
-    rootKey: certs/rke2ca-cert-key.pem
-    installToOSTrust: true
