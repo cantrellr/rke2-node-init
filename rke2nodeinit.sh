@@ -172,6 +172,11 @@ Options:
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
   --dry-push  Do not actually push images to registry (simulate only)
+  --interface name=eth1 ip=10.0.0.5 prefix=24 [gateway=...] [dns=...] [search=...]
+              Repeatable. Defines one network interface for server/agent/add-server
+              actions. Supply multiple key=value tokens after the flag; omit name
+              on the first interface to auto-detect the primary NIC. Use
+              "dhcp4=true" for DHCP-based interfaces.
 Image action:
   Does the full prep for an air-gapped base image:
     - Installs OS prerequisites and disables swap
@@ -711,6 +716,442 @@ normalize_list_csv() {
 }
 
 # ------------------------------------------------------------------------------
+# Section: Network Interface Helpers
+# Purpose: Provide encoding/decoding utilities for multi-interface support that
+#          allow YAML, CLI, and interactive prompts to share a common format.
+# ------------------------------------------------------------------------------
+
+# Trim leading and trailing whitespace without relying on external utilities.
+trim_whitespace() {
+  local _s="$1"
+  _s="${_s#${_s%%[![:space:]]*}}"
+  _s="${_s%${_s##*[![:space:]]}}"
+  printf '%s' "$_s"
+}
+
+# Encode an associative array describing a NIC into a pipe-delimited string.
+interface_encode_assoc() {
+  local -n _nic="$1"
+  local -a _order=(name dhcp4 cidr ip prefix gateway dns search addresses mtu metric)
+  local -a _parts=()
+
+  local _key
+  for _key in "${_order[@]}"; do
+    if [[ -n "${_nic[${_key}]:-}" ]]; then
+      _parts+=("${_key}=${_nic[${_key}]}")
+    fi
+  done
+
+  for _key in "${!_nic[@]}"; do
+    local _normalized="${_key,,}"
+    if [[ " ${_order[*]} " == *" ${_normalized} "* ]]; then
+      continue
+    fi
+    _parts+=("${_normalized}=${_nic[$_key]}")
+  done
+
+  (IFS='|'; echo "${_parts[*]}")
+}
+
+# Decode a pipe-delimited NIC string into an associative array supplied by name.
+interface_decode_entry() {
+  local _entry="$1"
+  local -n _dest="$2"
+  _dest=()
+
+  IFS='|' read -r -a _pairs <<<"$_entry"
+  local _pair _key _value
+  for _pair in "${_pairs[@]}"; do
+    [[ -z "$_pair" ]] && continue
+    _key="${_pair%%=*}"; _value="${_pair#*=}"
+    _key="${_key,,}"
+    case "$_key" in
+      interface|nic) _key="name" ;;
+      address) _key="ip" ;;
+      cidrprefix) _key="prefix" ;;
+      gw) _key="gateway" ;;
+      nameservers) _key="dns" ;;
+      searchdomains) _key="search" ;;
+      dhcp) _key="dhcp4" ;;
+    esac
+    _dest["$_key"]="$_value"
+  done
+}
+
+# Convert CLI tokens (key=value pairs) into an encoded NIC string.
+interface_cli_tokens_to_entry() {
+  local -a _tokens=("$@")
+  local -A _nic=()
+  local _token _key _value
+  for _token in "${_tokens[@]}"; do
+    if [[ "$_token" != *=* ]]; then
+      log ERROR "Interface tokens must be key=value (got '$_token')."
+      exit 1
+    fi
+    _key="${_token%%=*}"; _value="${_token#*=}"
+    _key="${_key,,}"
+    case "$_key" in
+      interface|nic) _key="name" ;;
+      address) _key="ip" ;;
+      cidrprefix) _key="prefix" ;;
+      gw) _key="gateway" ;;
+      nameservers) _key="dns" ;;
+      searchdomains) _key="search" ;;
+      dhcp) _key="dhcp4" ;;
+    esac
+    _nic["$_key"]="$_value"
+  done
+  interface_encode_assoc _nic
+}
+
+# Produce a comma-separated list suitable for YAML inline arrays.
+format_inline_list() {
+  local _raw="$1"
+  [[ -z "$_raw" ]] && return
+  local _clean
+  _clean="${_raw#[}"; _clean="${_clean%]}"
+  _clean="${_clean//;/,}"
+  local -a _items=()
+  IFS=',' read -r -a _tmp <<<"$_clean"
+  local _item
+  for _item in "${_tmp[@]}"; do
+    _item="$(trim_whitespace "$_item")"
+    [[ -n "$_item" ]] && _items+=("$_item")
+  done
+  (IFS=', '; echo "${_items[*]}")
+}
+
+# Detect the most likely primary network interface for the host.
+detect_primary_interface() {
+  local _nic
+  _nic="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n1 || true)"
+  if [[ -z "$_nic" ]]; then
+    local _path _candidate
+    for _path in /sys/class/net/*; do
+      _candidate="${_path##*/}"
+      if [[ "$_candidate" =~ ^(lo|docker|cni|flannel|kube|veth|virbr|br-) ]]; then
+        continue
+      fi
+      _nic="$_candidate"
+      break
+    done
+  fi
+  echo "$_nic"
+}
+
+# Extract spec.interfaces entries from YAML as encoded NIC strings.
+yaml_spec_interfaces() {
+  local _file="$1"
+  [[ -z "$_file" || ! -f "$_file" ]] && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not available; skipping spec.interfaces parsing for $_file"
+    return 0
+  fi
+  python3 - "$_file" <<'PY'
+import re
+import sys
+
+file_path = sys.argv[1]
+try:
+    with open(file_path, encoding='utf-8') as fh:
+        lines = fh.readlines()
+except FileNotFoundError:
+    sys.exit(0)
+
+def strip_quotes(value: str) -> str:
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return value[1:-1]
+    if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+items = []
+in_spec = False
+interfaces_indent = None
+current = None
+current_indent = None
+last_list_key = None
+last_list_indent = None
+
+def flush_current():
+    global current
+    if current is not None:
+        items.append(current)
+        current = None
+
+for raw in lines:
+    line = raw.rstrip('\n')
+    if not in_spec:
+        if re.match(r'^\s*spec\s*:\s*$', line):
+            in_spec = True
+        continue
+
+    if interfaces_indent is None:
+        if re.match(r'^\s*interfaces\s*:\s*$', line):
+            interfaces_indent = len(line) - len(line.lstrip(' '))
+        elif re.match(r'^\S', line):
+            break
+        continue
+
+    if re.match(r'^\S', line) and len(line) - len(line.lstrip(' ')) <= interfaces_indent:
+        flush_current()
+        break
+
+    if not line.strip() or line.lstrip().startswith('#'):
+        continue
+
+    indent = len(line) - len(line.lstrip(' '))
+
+    dash_match = re.match(r'^\s*-\s*(.*)$', line)
+    if dash_match:
+        rest = dash_match.group(1).strip()
+        if current is not None and indent > (current_indent or interfaces_indent) and last_list_key:
+            value = strip_quotes(rest)
+            current.setdefault(last_list_key, []).append(value)
+            continue
+        flush_current()
+        current = {}
+        current_indent = indent
+        last_list_key = None
+        if rest:
+            key, _, value = rest.partition(':')
+            key = key.strip()
+            value = value.strip()
+            value = re.sub(r'\s+#.*$', '', value)
+            if value == '':
+                last_list_key = key
+                last_list_indent = indent
+                current.setdefault(key, [])
+            else:
+                value = strip_quotes(value)
+                if value.startswith('[') and value.endswith(']'):
+                    inner = value[1:-1]
+                    if inner.strip():
+                        current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                    else:
+                        current[key] = []
+                else:
+                    current[key] = value
+        continue
+
+    if current is None:
+        continue
+
+    key_value = re.match(r'^\s*([^:#]+):\s*(.*)$', line)
+    if key_value:
+        key = key_value.group(1).strip()
+        value = key_value.group(2).strip()
+        value = re.sub(r'\s+#.*$', '', value)
+        if value == '':
+            last_list_key = key
+            last_list_indent = indent
+            current.setdefault(key, [])
+        else:
+            last_list_key = None
+            value = strip_quotes(value)
+            if value.startswith('[') and value.endswith(']'):
+                inner = value[1:-1]
+                if inner.strip():
+                    current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                else:
+                    current[key] = []
+            else:
+                current[key] = value
+        continue
+
+    list_item = re.match(r'^\s*-\s*(.*)$', line)
+    if list_item and last_list_key and indent > (last_list_indent or interfaces_indent):
+        value = strip_quotes(list_item.group(1).strip())
+        current.setdefault(last_list_key, []).append(value)
+        continue
+
+flush_current()
+
+for item in items:
+    parts = []
+    for key, value in item.items():
+        if isinstance(value, list):
+            parts.append(f"{key}=" + ",".join(value))
+        else:
+            parts.append(f"{key}={value}")
+    if parts:
+        print("|".join(parts))
+PY
+}
+
+# Merge interfaces defined in YAML and CLI blobs into an array supplied by name.
+collect_interface_specs() {
+  local -n _dest="$1"
+  local _config="$2"
+  local _cli_blob="$3"
+  _dest=()
+
+  if [[ -n "$_config" ]]; then
+    mapfile -t _dest < <(yaml_spec_interfaces "$_config" || true)
+  fi
+
+  if [[ -n "$_cli_blob" ]]; then
+    while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      _dest+=("$_line")
+    done <<<"$_cli_blob"
+  fi
+}
+
+# Normalize the first interface entry and propagate values back to legacy vars.
+merge_primary_interface_fields() {
+  local -n _ifaces="$1"
+  local -n _ip_ref="$2"
+  local -n _prefix_ref="$3"
+  local -n _gw_ref="$4"
+  local -n _dns_ref="$5"
+  local -n _search_ref="$6"
+
+  local -A _primary=()
+  local _has_entry=0
+  if (( ${#_ifaces[@]} )); then
+    interface_decode_entry "${_ifaces[0]}" _primary
+    _has_entry=1
+  fi
+
+  local _dhcp="${_primary[dhcp4]:-}"
+  _dhcp="${_dhcp,,}"
+
+  if [[ "$_dhcp" != "true" ]]; then
+    if [[ -n "${_primary[cidr]:-}" ]]; then
+      local _cidr="${_primary[cidr]}"
+      if [[ -z "$_ip_ref" && "$_cidr" == */* ]]; then
+        _ip_ref="${_cidr%/*}"
+        [[ -z "$_prefix_ref" ]] && _prefix_ref="${_cidr#*/}"
+      fi
+    fi
+    if [[ -z "$_ip_ref" && -n "${_primary[ip]:-}" ]]; then
+      local _ipvalue="${_primary[ip]}"
+      if [[ "$_ipvalue" == */* ]]; then
+        _ip_ref="${_ipvalue%/*}"
+        [[ -z "$_prefix_ref" ]] && _prefix_ref="${_ipvalue#*/}"
+      else
+        _ip_ref="$_ipvalue"
+      fi
+    fi
+    if [[ -z "$_prefix_ref" && -n "${_primary[prefix]:-}" ]]; then
+      _prefix_ref="${_primary[prefix]}"
+    fi
+    if [[ -z "$_gw_ref" && -n "${_primary[gateway]:-}" ]]; then
+      _gw_ref="${_primary[gateway]}"
+    fi
+  fi
+
+  if [[ -z "$_dns_ref" && -n "${_primary[dns]:-}" ]]; then
+    _dns_ref="${_primary[dns]}"
+  fi
+  if [[ -z "$_search_ref" && -n "${_primary[search]:-}" ]]; then
+    _search_ref="${_primary[search]}"
+  fi
+
+  if [[ -n "$_ip_ref" && -z "$_prefix_ref" ]]; then
+    _prefix_ref=24
+  fi
+
+  if [[ "$_dhcp" != "true" ]]; then
+    [[ -n "$_ip_ref" ]] && _primary[ip]="$_ip_ref"
+    [[ -n "$_prefix_ref" ]] && _primary[prefix]="$_prefix_ref"
+    [[ -n "$_gw_ref" ]] && _primary[gateway]="$_gw_ref"
+  fi
+  [[ -n "$_dns_ref" ]] && _primary[dns]="$(normalize_list_csv "$_dns_ref")"
+  [[ -n "$_search_ref" ]] && _primary[search]="$(normalize_list_csv "$_search_ref")"
+
+  local _encoded="$(interface_encode_assoc _primary)"
+  if (( _has_entry )); then
+    _ifaces[0]="$_encoded"
+  elif [[ -n "$_encoded" ]]; then
+    _ifaces=("$_encoded")
+  fi
+}
+
+# Interactive helper to append extra interfaces when the operator opts in.
+prompt_additional_interfaces() {
+  local -n _ifaces="$1"
+  local _default_dns="$2"
+  local _prompt_label="$3"
+
+  while true; do
+    local _resp=""
+    read -rp "Add another network interface${_prompt_label:+ for $_prompt_label}? [y/N]: " _resp || break
+    [[ "$_resp" =~ ^[Yy]$ ]] || break
+
+    local _name=""
+    while [[ -z "$_name" ]]; do
+      read -rp "Interface name (e.g., eth1): " _name || return
+      _name="$(trim_whitespace "$_name")"
+    done
+
+    local _dhcp_resp=""
+    read -rp "Use DHCP for $_name? [y/N]: " _dhcp_resp || return
+    local -A _nic=( [name]="$_name" )
+    if [[ "$_dhcp_resp" =~ ^[Yy]$ ]]; then
+      _nic[dhcp4]="true"
+    else
+      local _ip="" _prefix="" _gw="" _dns="" _search=""
+      while [[ -z "$_ip" ]]; do
+        read -rp "Static IPv4 for $_name: " _ip || return
+        _ip="$(trim_whitespace "$_ip")"
+        valid_ipv4 "$_ip" || { echo "Invalid IPv4."; _ip=""; }
+      done
+      read -rp "Prefix length for $_name [default 24]: " _prefix || true
+      _prefix="$(trim_whitespace "$_prefix")"
+      while [[ -n "$_prefix" ]]; do
+        if valid_prefix "$_prefix"; then
+          break
+        fi
+        read -rp "Invalid prefix. Re-enter [default 24]: " _prefix || true
+        _prefix="$(trim_whitespace "$_prefix")"
+      done
+      [[ -z "$_prefix" ]] && _prefix=24
+      read -rp "Default gateway for $_name [optional]: " _gw || true
+      _gw="$(trim_whitespace "$_gw")"
+      while [[ -n "$_gw" ]]; do
+        if valid_ipv4_or_blank "$_gw"; then
+          break
+        fi
+        read -rp "Invalid gateway. Re-enter (blank to skip): " _gw || true
+        _gw="$(trim_whitespace "$_gw")"
+      done
+      read -rp "DNS servers for $_name (comma-separated) [optional]: " _dns || true
+      _dns="$(trim_whitespace "$_dns")"
+      while [[ -n "$_dns" ]]; do
+        if valid_csv_dns "$_dns"; then
+          break
+        fi
+        read -rp "Invalid DNS list. Re-enter for $_name: " _dns || true
+        _dns="$(trim_whitespace "$_dns")"
+      done
+      read -rp "Search domains for $_name (comma-separated) [optional]: " _search || true
+      _search="$(trim_whitespace "$_search")"
+      while [[ -n "$_search" ]]; do
+        if valid_search_domains_csv "$_search"; then
+          break
+        fi
+        read -rp "Invalid search domain list. Re-enter for $_name: " _search || true
+        _search="$(trim_whitespace "$_search")"
+      done
+
+      _nic[ip]="$_ip"
+      _nic[prefix]="$_prefix"
+      [[ -n "$_gw" ]] && _nic[gateway]="$_gw"
+      if [[ -n "$_dns" ]]; then
+        _nic[dns]="$(normalize_list_csv "$_dns")"
+      elif [[ -n "$_default_dns" ]]; then
+        _nic[dns]="$(normalize_list_csv "$_default_dns")"
+      fi
+      [[ -n "$_search" ]] && _nic[search]="$(normalize_list_csv "$_search")"
+    fi
+
+    _ifaces+=("$(interface_encode_assoc _nic)")
+  done
+}
+
+# ------------------------------------------------------------------------------
 # Function: parse_action_cli_args
 # Purpose : Parse residual CLI arguments passed after the action name so that
 #           actions can honor flag-style overrides without requiring YAML.
@@ -737,6 +1178,29 @@ parse_action_cli_args() {
     case "$arg" in
       --)
         break
+        ;;
+      --interface)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --interface requires key=value tokens (e.g., --interface name=eth1 ip=10.0.0.5 prefix=24)"; exit 1
+        fi
+        local -a _if_tokens=()
+        while (( ${#args[@]} )) && [[ "${args[0]}" != --* ]]; do
+          _if_tokens+=("${args[0]}")
+          args=("${args[@]:1}")
+        done
+        if (( ${#_if_tokens[@]} == 0 )); then
+          log ERROR "[$action_label] --interface must be followed by key=value tokens"; exit 1
+        fi
+        local _if_entry
+        _if_entry="$(interface_cli_tokens_to_entry "${_if_tokens[@]}")"
+        if [[ -n "${_dest[interfaces]:-}" ]]; then
+          _dest[interfaces]+=$'\n'"${_if_entry}"
+        else
+          _dest[interfaces]="${_if_entry}"
+        fi
+        ;;
+      --interface=*)
+        log ERROR "[$action_label] --interface expects key=value tokens separated by spaces (e.g., --interface name=eth1 ip=10.0.0.5 prefix=24)"; exit 1
         ;;
       --hostname)
         if (( ${#args[@]} == 0 )); then
@@ -1244,85 +1708,175 @@ apply_netplan_now() {
 
 # ------------------------------------------------------------------------------
 # Function: write_netplan
-# Purpose : Author the authoritative static netplan file using the supplied
-#           addressing information and apply it immediately.
+# Purpose : Author the authoritative static netplan file using one or more
+#           interface definitions and apply it immediately.
 # Arguments:
-#   $1 - IPv4 address
-#   $2 - Prefix length
-#   $3 - Default gateway (optional)
-#   $4 - CSV DNS servers (optional)
-#   $5 - CSV search domains (optional)
+#   Legacy mode retains positional arguments for backward compatibility.
+#   Modern mode: write_netplan --interfaces <encoded-entry> [...]
 # Returns :
 #   Returns 0 on success, exits with status 2 when interface detection fails.
 # ------------------------------------------------------------------------------
-write_netplan() {
-  local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
-
-  # Detect primary NIC
-  local nic
-  local nic_path nic_candidate
-  nic="$(ip -o -4 route show to default | awk '{print $5}' || true)"
-  if [[ -z "$nic" ]]; then
-    for nic_path in /sys/class/net/*; do
-      nic_candidate="${nic_path##*/}"
-      if [[ ! $nic_candidate =~ ^(lo|docker|cni|flannel|kube|veth|virbr|br-) ]]; then
-        nic="$nic_candidate"
-        break
-      fi
-    done
-  fi
-  [[ -z "$nic" ]] && { log ERROR "Failed to detect a primary network interface"; exit 2; }
-
-  export NETPLAN_LAST_NIC="$nic"
+write_netplan_multi() {
+  local -a _entries=("$@")
+  (( ${#_entries[@]} )) || { log ERROR "write_netplan: no interface definitions supplied"; exit 2; }
 
   disable_cloud_init_net
   purge_old_netplan
 
-  local tmp="/etc/netplan/99-rke-static.yaml"
-  : > "$tmp"
+  local _tmp="/etc/netplan/99-rke-static.yaml"
+  : > "$_tmp"
 
   {
     echo "network:"
     echo "  version: 2"
     echo "  renderer: networkd"
     echo "  ethernets:"
-    echo "    $nic:"
-    echo "      dhcp4: false"
-    echo "      addresses:"
-    echo "        - $ip/${prefix:-24}"
-    if [[ -n "$gw" ]]; then
-      echo "      routes:"
-      echo "        - to: default"
-      echo "          via: $gw"
-    fi
-    echo "      nameservers:"
-    if [[ -n "$dns_csv" ]]; then
-      local dns_sp arr joined
-      dns_sp="$(echo "$dns_csv" | sed 's/,/ /g')"
-      read -r -a arr <<<"$dns_sp"
-      joined="$(printf ', %s' "${arr[@]}")"; joined="${joined:2}"
-      echo "        addresses: [$joined]"
-    else
-      echo "        addresses: [8.8.8.8]"
-    fi
-    if [[ -n "$search_csv" ]]; then
-      local sd_sp arr2 joined2
-      sd_sp="$(echo "$search_csv" | sed 's/,/ /g')"
-      read -r -a arr2 <<<"$sd_sp"
-      joined2="$(printf ', %s' "${arr2[@]}")"; joined2="${joined2:2}"
-      echo "        search: [$joined2]"
-    fi
-  } >> "$tmp"
+  } >> "$_tmp"
 
-  chmod 600 "$tmp"
-  log INFO "Netplan written to $tmp for $nic (IP=$ip/${prefix:-24}, GW=${gw:-<none>}, DNS=${dns_csv:-<default>}, SEARCH=${search_csv:-<none>})"
+  local _idx=0 _primary_nic="" _summary=""; local -a _ifaces=()
+  local _entry
+  for _entry in "${_entries[@]}"; do
+    local -A _nic=()
+    interface_decode_entry "$_entry" _nic
 
-  # Apply immediately (and persists after reboot because other YAMLs are purged and cloud-init is disabled)
+    local _name="${_nic[name]:-}"
+    if [[ -z "$_name" ]]; then
+      if (( _idx == 0 )); then
+        _name="$(detect_primary_interface)"
+        if [[ -z "$_name" ]]; then
+          log ERROR "Failed to detect a primary network interface"; exit 2
+        fi
+        _nic[name]="$_name"
+      else
+        log ERROR "Interface #$((_idx+1)) is missing a 'name' field"; exit 2
+      fi
+    fi
+
+    [[ -n "$_primary_nic" ]] || _primary_nic="$_name"
+  _ifaces+=("$_name")
+
+    local _dhcp="${_nic[dhcp4]:-}"
+    _dhcp="${_dhcp,,}"
+
+    {
+      echo "    $_name:"
+      if [[ "$_dhcp" == "true" ]]; then
+        echo "      dhcp4: true"
+      else
+        echo "      dhcp4: false"
+
+        local -a _addresses=()
+        if [[ -n "${_nic[cidr]:-}" ]]; then
+          local _addr_list
+          _addr_list="$(format_inline_list "${_nic[cidr]}")"
+          local -a _addr_tmp=()
+          IFS=',' read -r -a _addr_tmp <<<"$_addr_list"
+          local _a
+          for _a in "${_addr_tmp[@]}"; do
+            _a="$(trim_whitespace "$_a")"
+            [[ -n "$_a" ]] && _addresses+=("$_a")
+          done
+        fi
+        if [[ -n "${_nic[ip]:-}" ]]; then
+          local _ip="${_nic[ip]}"
+          if [[ "$_ip" == */* ]]; then
+            _addresses+=("$_ip")
+          else
+            local _pref="${_nic[prefix]:-24}"
+            [[ -z "$_pref" ]] && _pref=24
+            _addresses+=("${_ip}/${_pref}")
+          fi
+        fi
+        if [[ -n "${_nic[addresses]:-}" ]]; then
+          local _addr_list
+          _addr_list="$(format_inline_list "${_nic[addresses]}")"
+          local -a _addr_tmp=()
+          IFS=',' read -r -a _addr_tmp <<<"$_addr_list"
+          local _a
+          for _a in "${_addr_tmp[@]}"; do
+            _a="$(trim_whitespace "$_a")"
+            [[ -n "$_a" ]] && _addresses+=("$_a")
+          done
+        fi
+        if (( ${#_addresses[@]} == 0 )); then
+          log ERROR "Interface '$_name' is missing static addresses"; exit 2
+        fi
+        echo "      addresses:"
+        local _addr
+        for _addr in "${_addresses[@]}"; do
+          echo "        - $_addr"
+        done
+
+        if [[ -n "${_nic[gateway]:-}" ]]; then
+          echo "      routes:"
+          echo "        - to: default"
+          echo "          via: ${_nic[gateway]}"
+          if [[ -n "${_nic[metric]:-}" ]]; then
+            echo "          metric: ${_nic[metric]}"
+          fi
+        fi
+      fi
+
+      local _dns_block="$(format_inline_list "${_nic[dns]:-}")"
+      local _search_block="$(format_inline_list "${_nic[search]:-}")"
+      if [[ -n "$_dns_block" || -n "$_search_block" ]]; then
+        echo "      nameservers:"
+        if [[ -n "$_dns_block" ]]; then
+          echo "        addresses: [${_dns_block}]"
+        fi
+        if [[ -n "$_search_block" ]]; then
+          echo "        search: [${_search_block}]"
+        fi
+      fi
+
+      if [[ -n "${_nic[mtu]:-}" ]]; then
+        echo "      mtu: ${_nic[mtu]}"
+      fi
+    } >> "$_tmp"
+
+    local _desc="${_nic[ip]:-}${_nic[cidr]:+ (${_nic[cidr]})}"
+    if [[ "$_dhcp" == "true" ]]; then
+      _desc="dhcp4"
+    elif [[ -z "$_desc" ]]; then
+      _desc="${_addresses[*]}"
+    fi
+    _summary+="$([[ -n "$_summary" ]] && echo '; ')$_name=$_desc"
+
+    (( _idx++ ))
+  done
+
+  export NETPLAN_LAST_NIC="$_primary_nic"
+  chmod 600 "$_tmp"
+  log INFO "Netplan written to $_tmp (primary=$_primary_nic; interfaces=${_summary})"
+
   apply_netplan_now || true
 
-  # Quick verification snapshot
-  ip -4 addr show dev "$nic"   | sed 's/^/IFACE: /'  >>"$LOG_FILE" 2>&1 || true
-  ip route show default        | sed 's/^/ROUTE: /'  >>"$LOG_FILE" 2>&1 || true
+  local _iface
+  for _iface in "${_ifaces[@]}"; do
+    [[ -z "$_iface" ]] && continue
+    ip -4 addr show dev "$_iface" | sed 's/^/IFACE: /' >>"$LOG_FILE" 2>&1 || true
+  done
+  ip route show default | sed 's/^/ROUTE: /' >>"$LOG_FILE" 2>&1 || true
+}
+
+write_netplan() {
+  if [[ "$1" == "--interfaces" ]]; then
+    shift
+    write_netplan_multi "$@"
+    return
+  fi
+
+  local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
+  local -A _legacy_nic=()
+  [[ -n "$ip" ]] && _legacy_nic[ip]="$ip"
+  [[ -n "$prefix" ]] && _legacy_nic[prefix]="$prefix"
+  [[ -n "$gw" ]] && _legacy_nic[gateway]="$(trim_whitespace "$gw")"
+  if [[ -z "$dns_csv" ]]; then
+    dns_csv="8.8.8.8"
+  fi
+  [[ -n "$dns_csv" ]] && _legacy_nic[dns]="$(normalize_list_csv "$dns_csv")"
+  [[ -n "$search_csv" ]] && _legacy_nic[search]="$(normalize_list_csv "$search_csv")"
+  write_netplan_multi "$(interface_encode_assoc _legacy_nic)"
 }
 
 # ------------------------------------------------------------------------------
@@ -2960,6 +3514,7 @@ action_server() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
+  local -a NET_INTERFACES=()
 
   log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -3010,6 +3565,9 @@ action_server() {
     TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
   fi
 
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${server_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3032,6 +3590,8 @@ action_server() {
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domains CSV. Re-enter: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
+
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
   log INFO "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
@@ -3056,6 +3616,32 @@ action_server() {
 
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "server"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      interface_decode_entry "$_encoded" _nic_dbg
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
 
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
@@ -3113,7 +3699,11 @@ action_server() {
   chmod 600 /etc/rancher/rke2/config.yaml
   
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
@@ -3150,6 +3740,7 @@ action_agent() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
+  local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
   log INFO "Reading configuration from YAML (if provided)..."
@@ -3200,6 +3791,9 @@ action_agent() {
     URL="${agent_cli[server_url]}"
   fi
 
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${agent_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3224,12 +3818,40 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
   ensure_staged_artifacts
 
   log INFO "Setting new hostname: $HOSTNAME..."
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+
+  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "agent"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      interface_decode_entry "$_encoded" _nic_dbg
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
 
   log INFO "Gathering cluster join information..."
   if [[ -z "$URL" ]]; then
@@ -3294,7 +3916,11 @@ action_agent() {
   chmod 600 /etc/rancher/rke2/config.yaml
 
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "agent"
@@ -3330,6 +3956,7 @@ action_add_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
+  local -a NET_INTERFACES=()
 
   log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -3384,6 +4011,9 @@ action_add_server() {
     TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
   fi
 
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${add_server_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3431,6 +4061,32 @@ action_add_server() {
 
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "add-server"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      interface_decode_entry "$_encoded" _nic_dbg
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
 
   log INFO "Gathering cluster join information..."
   [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
@@ -3494,7 +4150,11 @@ action_add_server() {
   chmod 600 /etc/rancher/rke2/config.yaml
 
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
