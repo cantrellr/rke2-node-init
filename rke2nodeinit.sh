@@ -85,6 +85,8 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Defaults & tunables ----------------------------------------------------------------
 RKE2_VERSION=""                                       # auto-detect if empty
+# WARNING: These are EXAMPLE defaults only. Override with -r/-u/-p or via YAML config.
+#          DO NOT use these default credentials in production environments.
 REGISTRY="rke2registry.dev.local"
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
@@ -723,9 +725,14 @@ normalize_list_csv() {
 # ------------------------------------------------------------------------------
 
 # Trim leading and trailing whitespace without relying on external utilities.
+# Handles edge cases: empty strings and whitespace-only strings safely.
 trim_whitespace() {
   local _s="$1"
+  # Handle empty or whitespace-only strings
+  [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
+  # Strip leading whitespace: remove chars until first non-space
   _s="${_s#${_s%%[![:space:]]*}}"
+  # Strip trailing whitespace: remove chars after last non-space
   _s="${_s%${_s##*[![:space:]]}}"
   printf '%s' "$_s"
 }
@@ -755,12 +762,22 @@ interface_encode_assoc() {
 }
 
 # Decode a pipe-delimited NIC string into an associative array supplied by name.
+# Returns 0 on success, 1 if the entry is empty or invalid.
 interface_decode_entry() {
   local _entry="$1"
   local -n _dest="$2"
   _dest=()
 
+  # Validate entry is not empty
+  [[ -z "$_entry" ]] && return 1
+
   IFS='|' read -r -a _pairs <<<"$_entry"
+  
+  # Validate we have at least one pair
+  if (( ${#_pairs[@]} == 0 )); then
+    return 1
+  fi
+  
   local _pair _key _value
   for _pair in "${_pairs[@]}"; do
     [[ -z "$_pair" ]] && continue
@@ -777,6 +794,8 @@ interface_decode_entry() {
     esac
     _dest["$_key"]="$_value"
   done
+  
+  return 0
 }
 
 # Convert CLI tokens (key=value pairs) into an encoded NIC string.
@@ -857,6 +876,10 @@ try:
     with open(file_path, encoding='utf-8') as fh:
         lines = fh.readlines()
 except FileNotFoundError:
+    sys.exit(0)
+except Exception as e:
+    # Log error to stderr and exit gracefully
+    print(f"Error reading YAML file: {e}", file=sys.stderr)
     sys.exit(0)
 
 def strip_quotes(value: str) -> str:
@@ -974,16 +997,21 @@ for raw in lines:
 
 flush_current()
 
-for item in items:
-    parts = []
-    for key, value in item.items():
-        if isinstance(value, list):
-            if value:  # Only include non-empty lists
-                parts.append(f"{key}=" + ",".join(value))
-        else:
-            parts.append(f"{key}={value}")
-    if parts:
-        print("|".join(parts))
+try:
+    for item in items:
+        parts = []
+        for key, value in item.items():
+            if isinstance(value, list):
+                if value:  # Only include non-empty lists
+                    parts.append(f"{key}=" + ",".join(value))
+            else:
+                parts.append(f"{key}={value}")
+        if parts:
+            print("|".join(parts))
+except Exception as e:
+    # Log error to stderr and exit gracefully without breaking the shell script
+    print(f"Error processing interface data: {e}", file=sys.stderr)
+    sys.exit(0)
 PY
 }
 
@@ -1018,8 +1046,11 @@ merge_primary_interface_fields() {
   local -A _primary=()
   local _has_entry=0
   if (( ${#_ifaces[@]} )); then
-    interface_decode_entry "${_ifaces[0]}" _primary
-    _has_entry=1
+    if ! interface_decode_entry "${_ifaces[0]}" _primary; then
+      log WARN "Failed to decode primary interface entry; using empty defaults"
+    else
+      _has_entry=1
+    fi
   fi
 
   local _dhcp="${_primary[dhcp4]:-}"
@@ -1745,7 +1776,9 @@ write_netplan_multi() {
   local _entry
   for _entry in "${_entries[@]}"; do
     local -A _nic=()
-    interface_decode_entry "$_entry" _nic
+    if ! interface_decode_entry "$_entry" _nic; then
+      log ERROR "Failed to decode interface entry #$((_idx+1))"; exit 2
+    fi
 
     local _name="${_nic[name]:-}"
     if [[ -z "$_name" ]]; then
@@ -3661,7 +3694,10 @@ action_server() {
     local _encoded
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
-      interface_decode_entry "$_encoded" _nic_dbg
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
       local _desc_dbg=""
       if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
@@ -3889,7 +3925,10 @@ action_agent() {
     local _encoded
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
-      interface_decode_entry "$_encoded" _nic_dbg
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
       local _desc_dbg=""
       if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
@@ -4142,7 +4181,10 @@ action_add_server() {
     local _encoded
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
-      interface_decode_entry "$_encoded" _nic_dbg
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
       local _desc_dbg=""
       if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
