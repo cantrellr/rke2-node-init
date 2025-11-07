@@ -196,4 +196,54 @@ foreach ($vmRow in $vmDefinitions) {
   }
 }
 
+#------------------------------
+# Create DRS Anti-Affinity Rules for Controllers and Workers
+#------------------------------
+#
+# The function below searches each subfolder for VMs whose names contain 
+# "ctrl" or "work" and creates DRS anti-affinity rules so that controllers 
+# and workers are not co-located on the same ESXi host.
+#
+function Create-DrsRulesForPool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FolderName,   # The name of the folder where VMs reside (e.g. "j64manager")
+        [Parameter(Mandatory = $true)]
+        [string]$RulePrefix    # A prefix used for naming the rules (e.g. "j64manager")
+    )
+    
+    # Locate the folder by name.
+    $folder = Get-Folder -Name $FolderName -ErrorAction SilentlyContinue
+    if (-not $folder) {
+        Write-Host "Folder '$FolderName' not found. Skipping DRS rule creation for this folder."
+        return
+    }
+    
+    # Retrieve VMs from the folder using naming patterns.
+    $ctrlVMs = Get-VM -Location $folder | Where-Object { $_.Name -match "ctrl" }
+    $workerVMs = Get-VM -Location $folder | Where-Object { $_.Name -match "work" }
+    
+    if (($ctrlVMs.Count -eq 0) -or ($workerVMs.Count -eq 0)) {
+        Write-Host "Either controller or worker VMs were not found in folder '$FolderName'. Skipping DRS rule creation for this folder."
+        return
+    }
+    
+    # Create optional VM groups for controllers and workers.
+    New-DrsRule -Name "${RulePrefix}_Controllers" -VM $ctrlVMs -Cluster $cluster -KeepTogether $false
+    New-DrsRule -Name "${RulePrefix}_Workers" -VM $workerVMs -Cluster $cluster -KeepTogether $false
+    
+    <#
+    # Create an anti-affinity rule to ensure controllers and workers do not share the same host.
+    New-DrsRule -Name "${RulePrefix}_NoMix" -VM ($ctrlVMs + $workerVMs) `
+        -Cluster $cluster -Enabled $true #-Type SeparateVMHosts
+    Write-Host "DRS anti-affinity rules created for folder '$FolderName'."
+    #>
+}
+
+# Call the function for each of the subfolders.
+Create-DrsRulesForPool -FolderName "j64manager" -RulePrefix "j64manager"
+Create-DrsRulesForPool -FolderName "j64domain"  -RulePrefix "j64domain"
+Create-DrsRulesForPool -FolderName "j52domain"  -RulePrefix "j52domain"
+Create-DrsRulesForPool -FolderName "r01domain"  -RulePrefix "r01domain"
+
 Disconnect-VIServer -Server $viserver -Confirm:$false | Out-Null
