@@ -1849,7 +1849,11 @@ write_netplan_multi() {
       _desc="${_addresses[*]:-}"
     fi
     [[ -z "$_desc" ]] && _desc="configured"
-    _summary+="$([[ -n "$_summary" ]] && echo '; ')$_name=$_desc"
+    if [[ -n "$_summary" ]]; then
+      _summary+="; $_name=$_desc"
+    else
+      _summary="$_name=$_desc"
+    fi
 
     (( _idx++ ))
   done
