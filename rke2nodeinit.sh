@@ -1846,8 +1846,9 @@ write_netplan_multi() {
     if [[ "$_dhcp" == "true" ]]; then
       _desc="dhcp4"
     elif [[ -z "$_desc" ]]; then
-      _desc="${_addresses[*]}"
+      _desc="${_addresses[*]:-}"
     fi
+    [[ -z "$_desc" ]] && _desc="configured"
     _summary+="$([[ -n "$_summary" ]] && echo '; ')$_name=$_desc"
 
     (( _idx++ ))
