@@ -1770,8 +1770,10 @@ write_netplan_multi() {
       echo "    $_name:"
       if [[ "$_dhcp" == "true" ]]; then
         echo "      dhcp4: true"
+        echo "      dhcp6: false"
       else
         echo "      dhcp4: false"
+        echo "      dhcp6: false"
 
         local -a _addresses=()
         if [[ -n "${_nic[cidr]:-}" ]]; then
@@ -1840,6 +1842,10 @@ write_netplan_multi() {
       if [[ -n "${_nic[mtu]:-}" ]]; then
         echo "      mtu: ${_nic[mtu]}"
       fi
+      
+      # Disable IPv6 on all interfaces
+      echo "      accept-ra: false"
+      echo "      link-local: []"
     } >> "$_tmp"
 
     local _desc="${_nic[ip]:-}${_nic[cidr]:+ (${_nic[cidr]})}"
@@ -3906,7 +3912,7 @@ action_agent() {
   if [[ -z "$URL" ]]; then
     read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
   fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+  if [[ -n "$URL" && -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
     read -rp "Enter cluster join token [optional]: " TOKEN || true
   fi
   if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
