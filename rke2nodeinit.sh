@@ -392,6 +392,9 @@ yaml_get_api() {
 #   $1 - Path to the YAML file to inspect
 # Returns :
 #   Prints the kind string to stdout.
+# Implementation:
+#   Uses grep to match 'kind:' line, awk to split on colon and extract value,
+#   xargs to trim whitespace. Fast and sufficient for single-value extraction.
 # ------------------------------------------------------------------------------
 yaml_get_kind() {
   grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
@@ -416,17 +419,18 @@ import re
 import sys
 
 file_path, key_path = sys.argv[1:3]
-parts = key_path.split('.')
+parts = key_path.split('.')  # Split dotted path: "customCA.rootCrt" -> ["customCA", "rootCrt"]
 target_depth = len(parts)
 
 try:
     with open(file_path, encoding='utf-8') as fh:
         in_spec = False
-        stack = []
-        indent_stack = []
+        stack = []        # Current nested key path as we parse the YAML structure
+        indent_stack = [] # Parallel indentation levels to track when to pop from stack
         for raw_line in fh:
             line = raw_line.rstrip('\n')
             if not in_spec:
+                # Skip everything until we find the 'spec:' section
                 if re.match(r'^\s*spec:\s*$', line):
                     in_spec = True
                 continue
@@ -436,8 +440,11 @@ try:
 
             indent = len(line) - len(line.lstrip(' '))
             if indent < 1:
-                break
+                break  # Left the spec: section (back to top level)
 
+            # Pop stack when we dedent (moving back to shallower nesting level)
+            # Example: if we go from "    key:" (indent=4) to "  key:" (indent=2),
+            # we pop the deeper keys from our tracking stack
             while indent_stack and indent <= indent_stack[-1]:
                 stack.pop()
                 indent_stack.pop()
@@ -446,17 +453,21 @@ try:
             if not match:
                 continue
 
+            # Add current key to stack and track its indentation level
             stack.append(match.group(1).strip())
             indent_stack.append(indent)
 
+            # Check if current stack path matches the requested key path
+            # Example: if looking for "customCA.rootCrt", stack must be ["customCA", "rootCrt"]
             if stack[:len(parts)] != parts[:len(stack)]:
                 continue
 
             value = match.group(2).strip()
             if len(stack) == target_depth and value:
-                value = re.sub(r'\s+#.*$', '', value).strip()
+                # Found exact match at correct depth - extract and return value
+                value = re.sub(r'\s+#.*$', '', value).strip()  # Remove inline comments
                 if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
+                    value = value[1:-1]  # Strip quotes
                 print(value)
                 sys.exit(0)
 except FileNotFoundError:
@@ -766,30 +777,40 @@ trim_whitespace() {
 }
 
 # Encode an associative array describing a NIC into a pipe-delimited string.
+# Format: "key1=value1|key2=value2|key3=value3"
+# This allows passing complex interface configuration through simple strings.
+# Ordered fields are emitted first for consistency, then any extra fields.
 interface_encode_assoc() {
   local -n _nic="$1"
+  # Define canonical field order for consistent output
   local -a _order=(name dhcp4 cidr ip prefix gateway dns search addresses mtu metric)
   local -a _parts=()
 
   local _key
+  # First pass: emit known fields in defined order
   for _key in "${_order[@]}"; do
     if [[ -n "${_nic[${_key}]:-}" ]]; then
       _parts+=("${_key}=${_nic[${_key}]}")
     fi
   done
 
+  # Second pass: append any extra fields not in the canonical order
   for _key in "${!_nic[@]}"; do
     local _normalized="${_key,,}"
     if [[ " ${_order[*]} " == *" ${_normalized} "* ]]; then
-      continue
+      continue  # Already handled in first pass
     fi
     _parts+=("${_normalized}=${_nic[$_key]}")
   done
 
+  # Join all parts with pipe delimiter
   (IFS='|'; echo "${_parts[*]}")
 }
 
 # Decode a pipe-delimited NIC string into an associative array supplied by name.
+# Input format: "name=eth0|ip=10.0.0.5|prefix=24|gateway=10.0.0.1"
+# Output: Populates the associative array referenced by $2 with normalized keys.
+# Normalizes legacy/alias field names (e.g., "address" -> "ip", "gw" -> "gateway").
 # Returns 0 on success, 1 if the entry is empty or invalid.
 interface_decode_entry() {
   local _entry="$1"
@@ -799,6 +820,7 @@ interface_decode_entry() {
   # Validate entry is not empty
   [[ -z "$_entry" ]] && return 1
 
+  # Split on pipe delimiter into array of key=value pairs
   IFS='|' read -r -a _pairs <<<"$_entry"
   
   # Validate we have at least one pair
@@ -810,7 +832,8 @@ interface_decode_entry() {
   for _pair in "${_pairs[@]}"; do
     [[ -z "$_pair" ]] && continue
     _key="${_pair%%=*}"; _value="${_pair#*=}"
-    _key="${_key,,}"
+    _key="${_key,,}"  # Normalize to lowercase
+    # Map legacy/alias field names to canonical names
     case "$_key" in
       interface|nic) _key="name" ;;
       address) _key="ip" ;;
@@ -1782,17 +1805,25 @@ apply_netplan_now() {
 #   Modern mode: write_netplan --interfaces <encoded-entry> [...]
 # Returns :
 #   Returns 0 on success, exits with status 2 when interface detection fails.
+# Strategy:
+#   1. Disable cloud-init networking and remove old netplan files
+#   2. Create fresh /etc/netplan/99-rke-static.yaml with networkd renderer
+#   3. Process each interface entry: decode, validate, and write YAML stanza
+#   4. Support both DHCP and static configurations with optional routes/DNS
+#   5. Apply netplan immediately and log interface/route state for verification
 # ------------------------------------------------------------------------------
 write_netplan_multi() {
   local -a _entries=("$@")
   (( ${#_entries[@]} )) || { log ERROR "write_netplan: no interface definitions supplied"; exit 2; }
 
+  # Remove conflicting network config sources
   disable_cloud_init_net
   purge_old_netplan
 
   local _tmp="/etc/netplan/99-rke-static.yaml"
   : > "$_tmp"
 
+  # Write netplan header
   {
     echo "network:"
     echo "  version: 2"
@@ -1802,6 +1833,7 @@ write_netplan_multi() {
 
   local _idx=0 _primary_nic="" _summary=""; local -a _ifaces=()
   local _entry
+  # Process each interface definition
   for _entry in "${_entries[@]}"; do
     local -A _nic=()
     if ! interface_decode_entry "$_entry" _nic; then
