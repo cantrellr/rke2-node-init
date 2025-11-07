@@ -225,6 +225,25 @@ log() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: warn_default_credentials
+# Purpose : Emit a warning if the script is using hardcoded default credentials.
+#           This helps prevent accidental use of example values in production.
+# Arguments:
+#   $1 - Registry host
+#   $2 - Registry username
+#   $3 - Registry password
+# Returns : Always returns 0
+# ------------------------------------------------------------------------------
+warn_default_credentials() {
+  local reg="$1" user="$2" pass="$3"
+  # Check if using the exact default values from the script header
+  if [[ "$reg" == "rke2registry.dev.local" && "$user" == "admin" && "$pass" == "ZAQwsx!@#123" ]]; then
+    log WARN "Using EXAMPLE default credentials! These should be overridden for production use."
+    log WARN "Override with: -r <registry> -u <username> -p <password> or via YAML config."
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Function: spinner_run
 # Purpose : Execute a long-running command while providing an inline progress
 #           spinner on stdout. All command output is streamed to the logfile so
@@ -726,13 +745,22 @@ normalize_list_csv() {
 
 # Trim leading and trailing whitespace without relying on external utilities.
 # Handles edge cases: empty strings and whitespace-only strings safely.
+# Uses bash parameter expansion pattern matching:
+#   ${var#pattern}  - remove shortest match from beginning
+#   ${var%pattern}  - remove shortest match from end
+#   ${var%%pattern} - remove longest match from beginning (greedy)
+#   ${var##pattern} - remove longest match from end (greedy)
 trim_whitespace() {
   local _s="$1"
   # Handle empty or whitespace-only strings
   [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
-  # Strip leading whitespace: remove chars until first non-space
+  # Strip leading whitespace: 
+  #   ${_s%%[![:space:]]*} finds everything up to first non-space
+  #   ${_s#...} removes that prefix, leaving string from first non-space onward
   _s="${_s#${_s%%[![:space:]]*}}"
-  # Strip trailing whitespace: remove chars after last non-space
+  # Strip trailing whitespace:
+  #   ${_s##*[![:space:]]} finds everything after last non-space
+  #   ${_s%...} removes that suffix, leaving string up to last non-space
   _s="${_s%${_s##*[![:space:]]}}"
   printf '%s' "$_s"
 }
@@ -3338,6 +3366,9 @@ action_push() {
     log WARN "Using YAML values; CLI flags may be overridden (push)."
   fi
 
+  # Warn if using example default credentials
+  warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+
   ensure_installed zstd
 
   local work="$DOWNLOADS_DIR"
@@ -3436,6 +3467,9 @@ action_image() {
     CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
     CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
   fi
+
+  # Warn if using example default credentials
+  warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
 
   # Resolve cert paths relative to script dir if not absolute
   [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
@@ -3556,6 +3590,10 @@ action_image() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot when complete.
+# Note    : This is a large orchestration function (~200+ lines). For future
+#           maintainability, consider extracting repeated validation/prompt
+#           patterns into helper functions like validate_network_config(),
+#           prompt_for_network_settings(), or generate_rke2_config().
 # ------------------------------------------------------------------------------
 action_server() {
   initialize_action_context false "server"
@@ -3803,6 +3841,9 @@ action_server() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot upon success.
+# Note    : Similar to action_server, this orchestrates multiple concerns.
+#           Consider refactoring shared network validation, YAML parsing,
+#           and config generation logic into reusable helpers.
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
@@ -4039,6 +4080,9 @@ action_agent() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot upon success.
+# Note    : Shares substantial logic with action_server. Future refactoring
+#           could extract common patterns (YAML parsing, validation, config
+#           generation) to reduce duplication and improve maintainability.
 # ------------------------------------------------------------------------------
 action_add_server() {
   initialize_action_context false "add-server"
