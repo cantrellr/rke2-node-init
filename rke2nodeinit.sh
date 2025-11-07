@@ -1855,7 +1855,7 @@ write_netplan_multi() {
       _summary="$_name=$_desc"
     fi
 
-    (( _idx++ ))
+    _idx=$((_idx + 1))
   done
 
   export NETPLAN_LAST_NIC="$_primary_nic"
