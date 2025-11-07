@@ -511,6 +511,7 @@ yaml_spec_has_list() {
       if (found==1) {
         if ($0 ~ "^[[:space:]]*-[[:space:]]+") { print "YES"; exit }
         else if ($0 ~ "^[[:space:]]*$") { next } # skip blanks
+        else if ($0 ~ "^[[:space:]]*#") { next } # skip comments
         else { exit } # not a list
       }
     }
@@ -893,7 +894,7 @@ for raw in lines:
             break
         continue
 
-    if re.match(r'^\S', line) and len(line) - len(line.lstrip(' ')) <= interfaces_indent:
+    if re.match(r'^\S', line):
         flush_current()
         break
 
@@ -901,6 +902,12 @@ for raw in lines:
         continue
 
     indent = len(line) - len(line.lstrip(' '))
+    
+    # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
+    # This must be checked before dash_match to avoid treating sibling list items as interface items
+    if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
+        flush_current()
+        break
 
     dash_match = re.match(r'^\s*-\s*(.*)$', line)
     if dash_match:
@@ -971,7 +978,8 @@ for item in items:
     parts = []
     for key, value in item.items():
         if isinstance(value, list):
-            parts.append(f"{key}=" + ",".join(value))
+            if value:  # Only include non-empty lists
+                parts.append(f"{key}=" + ",".join(value))
         else:
             parts.append(f"{key}={value}")
     if parts:
