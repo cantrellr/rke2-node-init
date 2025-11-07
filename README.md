@@ -35,7 +35,7 @@
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
-- **Multi-NIC Aware** – Accepts multiple network interface definitions via YAML, CLI flags, or interactive prompts and renders a consolidated netplan configuration for complex topologies.
+- **Multi-NIC Aware** – Accepts multiple network interface definitions via YAML, CLI flags, or interactive prompts, skips questions when interfaces are already defined, and renders a consolidated netplan configuration for complex topologies.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
 - **Operational Transparency** – Streams all steps to `logs/` with timestamps and hostnames. Long-running tasks show CLI spinners while stdout remains concise.
 - **Reusable Defaults** – Persistently stores DNS/search defaults and custom CA information so subsequent server/agent runs reuse the captured site context.
@@ -163,6 +163,12 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 # With a manifest
 sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
 
+# Control plane using manifest-provided interfaces (no additional NIC prompt)
+sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-ctrl01.yaml server
+
+# Worker join pulling networking from YAML and overriding the token file via CLI
+sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-work01.yaml agent --token-file /rke2-node-init/outputs/j64manager-ca-bootstrap-token.txt
+
 # Direct action without YAML
 sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
 
@@ -266,7 +272,7 @@ When `spec.interfaces` is supplied, the first entry is treated as the primary ad
   ```
 
 - **CLI:** Repeat `--interface` to add additional adapters. Each occurrence consumes key=value tokens until the next flag. Keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`.
-- **Runtime prompts:** After the primary interface is confirmed, the script offers to collect definitions for extra NICs interactively. Decline to keep a single-interface configuration.
+- **Runtime prompts:** When neither YAML nor CLI flags supply interface definitions, the script offers to collect extra NICs interactively. Manifests that already include `spec.interfaces` (or CLI `--interface` entries) run non-interactively with no additional prompts.
 - Netplan output combines all collected interfaces, so `server`, `add-server`, and `agent` modes can stage trunk, storage, or management links in one pass.
 
 ---

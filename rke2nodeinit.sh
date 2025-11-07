@@ -3535,6 +3535,11 @@ action_server() {
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
 
+  local yaml_has_interfaces=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces=1
+  fi
+
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
     HOSTNAME="${server_cli[hostname]}"
@@ -3617,7 +3622,20 @@ action_server() {
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
 
-  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "server"
+  local prompt_extra_ifaces=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces )); then
+      prompt_extra_ifaces=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${server_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "server"
+  fi
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
   if (( ${#NET_INTERFACES[@]} )); then
     local _iface_summary=""
@@ -3762,6 +3780,11 @@ action_agent() {
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
 
+  local yaml_has_interfaces_agent=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces_agent=1
+  fi
+
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
     HOSTNAME="${agent_cli[hostname]}"
@@ -3827,7 +3850,20 @@ action_agent() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
-  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "agent"
+  local prompt_extra_ifaces_agent=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces_agent )); then
+      prompt_extra_ifaces_agent=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${agent_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces_agent=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces_agent )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "agent"
+  fi
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
   if (( ${#NET_INTERFACES[@]} )); then
     local _iface_summary=""
@@ -3978,6 +4014,11 @@ action_add_server() {
   local -A add_server_cli=()
   parse_action_cli_args add_server_cli "add-server" "${ACTION_ARGS[@]}"
 
+  local yaml_has_interfaces_add_server=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces_add_server=1
+  fi
+
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${add_server_cli[hostname]:-}" ]]; then
     HOSTNAME="${add_server_cli[hostname]}"
@@ -4062,7 +4103,20 @@ action_add_server() {
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
 
-  prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "add-server"
+  local prompt_extra_ifaces_add_server=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces_add_server )); then
+      prompt_extra_ifaces_add_server=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${add_server_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces_add_server=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces_add_server )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "add-server"
+  fi
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
   if (( ${#NET_INTERFACES[@]} )); then
     local _iface_summary=""
