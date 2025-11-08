@@ -35,8 +35,7 @@
 Import-Module VMware.PowerCLI -ErrorAction Stop
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
-#$vCenter = Read-Host -Prompt "Enter the vCenter FQDN or IP address"
-$vCenter = "vcsa001.dev.local"
+$vCenter = Read-Host -Prompt "Enter the vCenter FQDN or IP address"
 $cred = Get-Credential
 #$vcUser  = Read-Host -Prompt "Enter your vCenter username"
 #$vcPass  = Read-Host -Prompt "Enter your vCenter password" -AsSecureString
