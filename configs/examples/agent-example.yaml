@@ -1,0 +1,252 @@
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: rke2-worker-01
+  description: RKE2 worker (agent) node joining cluster
+
+spec:
+  # Hostname for this worker node
+  hostname: rke2-worker-01
+  
+  # Network configuration
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.50
+      prefix: 24
+      gateway: 10.0.100.1
+      dns:
+        - 10.0.0.10
+        - 10.0.0.11
+      searchDomains:
+        - cluster.local
+        - example.com
+      mtu: 1500
+  
+  # Cluster join information
+  cluster:
+    # Server URL (use load balancer or any control-plane node)
+    serverUrl: https://10.0.100.10:9345
+    
+    # Agent join token (obtain from server)
+    # Get token from server: sudo cat /var/lib/rancher/rke2/server/node-token
+    token: K10abcdef1234567890::server:abc123def456
+    
+    # Optional: CA certificate fingerprint
+    # tlsCertFingerprint: sha256:abcdef1234567890...
+  
+  # RKE2 version (should match cluster)
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  # Registry configuration
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  # Custom CA certificate
+  caCertPath: /path/to/ca.crt
+  
+  # Optional: Node labels
+  labels:
+    node-role.kubernetes.io/worker: "true"
+    workload-type: general
+    zone: az1
+  
+  # Optional: Node taints
+  taints:
+    - key: node.example.com/special
+      value: "true"
+      effect: NoSchedule
+
+---
+# Multi-interface worker node
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: rke2-worker-multi-01
+  description: Worker with multiple network interfaces
+
+spec:
+  hostname: rke2-worker-multi-01
+  
+  interfaces:
+    # Management interface
+    - name: eth0
+      ip: 10.0.100.51
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [10.0.0.10, 10.0.0.11]
+      metric: 100
+    
+    # Pod network interface
+    - name: eth1
+      ip: 192.168.1.51
+      prefix: 24
+      mtu: 9000
+      metric: 200
+    
+    # Storage network interface
+    - name: eth2
+      ip: 172.16.0.51
+      prefix: 24
+      mtu: 9000
+      metric: 300
+  
+  cluster:
+    serverUrl: https://192.168.1.10:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+    nodeIp: 192.168.1.51  # Use pod network interface
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  labels:
+    topology.kubernetes.io/zone: zone-a
+    node.kubernetes.io/instance-type: worker
+
+---
+# GPU worker node
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: rke2-gpu-worker-01
+  description: GPU-enabled worker node
+
+spec:
+  hostname: rke2-gpu-worker-01
+  
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.60
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [10.0.0.10, 10.0.0.11]
+      searchDomains: [cluster.local, example.com]
+  
+  cluster:
+    serverUrl: https://rke2-api.example.com:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  # Label for GPU workloads
+  labels:
+    accelerator: nvidia-tesla-v100
+    gpu-count: "4"
+    workload-type: ml-training
+  
+  # Taint to dedicate node to GPU workloads
+  taints:
+    - key: nvidia.com/gpu
+      value: "true"
+      effect: NoSchedule
+
+---
+# Storage-focused worker node
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: rke2-storage-worker-01
+  description: Worker optimized for storage workloads
+
+spec:
+  hostname: rke2-storage-worker-01
+  
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.70
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [10.0.0.10]
+      searchDomains: [cluster.local, example.com]
+      mtu: 9000  # Jumbo frames for storage
+  
+  cluster:
+    serverUrl: https://10.0.100.10:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  labels:
+    node-role.kubernetes.io/storage: "true"
+    storage-type: nvme
+    longhorn-node: "true"
+
+---
+# Edge location worker
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: rke2-edge-worker-01
+  description: Worker at edge location
+
+spec:
+  hostname: rke2-edge-worker-01
+  
+  interfaces:
+    - name: eth0
+      ip: 10.10.1.10
+      prefix: 24
+      gateway: 10.10.1.1
+      dns: [10.10.1.2]
+      searchDomains: [edge.example.com, cluster.local]
+  
+  cluster:
+    # Connect to central cluster via WAN
+    serverUrl: https://rke2-api.central.example.com:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  labels:
+    topology.kubernetes.io/region: edge-west
+    topology.kubernetes.io/zone: edge-west-1
+    node.example.com/location: edge
+
+---
+# Minimal worker configuration
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: simple-worker
+
+spec:
+  hostname: rke2-worker-simple
+  
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.80
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [8.8.8.8]
+  
+  cluster:
+    serverUrl: https://10.0.100.10:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1

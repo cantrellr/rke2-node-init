@@ -1,0 +1,124 @@
+apiVersion: rkeprep/v1
+kind: Verify
+metadata:
+  name: verify-prerequisites
+  description: Verify system prerequisites and existing RKE2 installation
+
+spec:
+  # What to verify (all checks run by default)
+  checks:
+    - os              # Operating system compatibility
+    - disk            # Available disk space
+    - memory          # Available memory
+    - network         # Network connectivity
+    - binaries        # Required binaries present
+    - artifacts       # Cached RKE2 artifacts
+    - registry        # Registry connectivity
+    - certificates    # Certificate validity
+    - configuration   # RKE2 configuration files
+    - services        # RKE2 services status
+  
+  # Optional: Registry to verify connectivity
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  # Optional: Custom CA to verify
+  caCertPath: /path/to/ca.crt
+  
+  # Optional: Expected RKE2 version
+  rke2:
+    version: v1.34.1+rke2r1
+
+---
+# Minimal verification (checks all with defaults)
+apiVersion: rkeprep/v1
+kind: Verify
+metadata:
+  name: basic-verify
+  description: Basic prerequisite verification
+
+spec:
+  # Run all default checks
+  checks: []
+
+---
+# Verify specific components
+apiVersion: rkeprep/v1
+kind: Verify
+metadata:
+  name: verify-network-registry
+  description: Verify network and registry access only
+
+spec:
+  checks:
+    - network
+    - registry
+    - certificates
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  caCertPath: /etc/ssl/certs/company-ca.crt
+
+---
+# Pre-deployment verification
+apiVersion: rkeprep/v1
+kind: Verify
+metadata:
+  name: pre-deployment-verify
+  description: Comprehensive pre-deployment checks
+
+spec:
+  checks:
+    - os
+    - disk
+    - memory
+    - network
+    - binaries
+    - artifacts
+    - registry
+    - certificates
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  caCertPath: /etc/ssl/certs/company-ca.crt
+  
+  # Expected minimum requirements
+  requirements:
+    diskSpaceGB: 50
+    memoryGB: 8
+    cpuCores: 4
+
+---
+# Post-installation verification
+apiVersion: rkeprep/v1
+kind: Verify
+metadata:
+  name: post-install-verify
+  description: Verify RKE2 installation and services
+
+spec:
+  checks:
+    - configuration
+    - services
+    - certificates
+    - network
+  
+  rke2:
+    version: v1.34.1+rke2r1
+  
+  # Verify specific configuration exists
+  expectedFiles:
+    - /etc/rancher/rke2/config.yaml
+    - /etc/rancher/rke2/registries.yaml
+    - /var/lib/rancher/rke2/server/node-token

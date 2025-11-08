@@ -1,0 +1,52 @@
+apiVersion: rkeprep/v1
+kind: Airgap
+metadata:
+  name: rke2-airgap-template
+  description: Prepare air-gapped VM template (powers off instead of reboot)
+
+spec:
+  # RKE2 version to download and cache
+  rke2Version: v1.34.1+rke2r1
+  
+  # DNS servers for artifact download and template defaults
+  dns:
+    - 8.8.8.8
+    - 8.8.4.4
+  
+  # Search domains
+  searchDomains:
+    - example.com
+    - cluster.local
+
+---
+# Enterprise example with custom CA
+apiVersion: rkeprep/v1
+kind: Airgap
+metadata:
+  name: enterprise-rke2-template
+  description: Enterprise VM template with custom CA trust
+
+spec:
+  rke2Version: v1.34.1+rke2r1
+  
+  # Custom CA certificate for registry trust
+  caCertPath: /path/to/enterprise-ca.crt
+  
+  # DNS configuration
+  dns:
+    - 10.50.0.10
+    - 10.50.0.11
+  
+  searchDomains:
+    - corp.enterprise.com
+    - k8s.enterprise.com
+
+---
+# Minimal airgap template
+apiVersion: rkeprep/v1
+kind: Airgap
+metadata:
+  name: minimal-airgap-template
+
+spec:
+  rke2Version: v1.34.1+rke2r1

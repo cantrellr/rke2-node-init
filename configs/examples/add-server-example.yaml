@@ -1,0 +1,182 @@
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: rke2-server-02
+  description: Additional control-plane server joining existing cluster
+
+spec:
+  # Hostname for this node
+  hostname: rke2-server-02
+  
+  # Network configuration
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.12
+      prefix: 24
+      gateway: 10.0.100.1
+      dns:
+        - 10.0.0.10
+        - 10.0.0.11
+      searchDomains:
+        - cluster.local
+        - example.com
+  
+  # Existing cluster join information
+  cluster:
+    # Address of existing server (can be LB or any control-plane node)
+    serverUrl: https://10.0.100.10:9345
+    
+    # Cluster join token (obtain from first server)
+    # Get token from first server: sudo cat /var/lib/rancher/rke2/server/node-token
+    token: K10abcdef1234567890::server:abc123def456
+    
+    # Optional: CA certificate fingerprint for verification
+    # Get from first server or use the CA cert directly
+    # tlsCertFingerprint: sha256:abcdef1234567890...
+  
+  # RKE2 configuration (must match cluster settings)
+  rke2:
+    version: v1.34.1+rke2r1
+    
+    # TLS SANs (should match those on first server)
+    tlsSans:
+      - rke2-api.example.com
+      - 10.0.100.10
+      - 10.0.100.11
+      - 10.0.100.12
+      - 10.0.100.100  # VIP
+    
+    # Network settings (must match cluster)
+    clusterCidr: 10.42.0.0/16
+    serviceCidr: 10.43.0.0/16
+    clusterDns: 10.43.0.10
+    clusterDomain: cluster.local
+  
+  # Registry configuration (must match cluster)
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+  
+  # CA certificate (must match cluster)
+  caCertPath: /path/to/ca.crt
+
+---
+# Adding third server to HA cluster
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: rke2-server-03
+  description: Third control-plane server for HA quorum
+
+spec:
+  hostname: rke2-server-03
+  
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.13
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [10.0.0.10, 10.0.0.11]
+      searchDomains: [cluster.local, example.com]
+  
+  cluster:
+    # Use load balancer address for better HA
+    serverUrl: https://rke2-api.example.com:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+    tlsSans:
+      - rke2-api.example.com
+      - 10.0.100.10
+      - 10.0.100.11
+      - 10.0.100.12
+      - 10.0.100.13
+      - 10.0.100.100
+    clusterCidr: 10.42.0.0/16
+    serviceCidr: 10.43.0.0/16
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+
+---
+# Multi-interface additional server
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: rke2-server-multi-02
+  description: Multi-NIC server joining cluster
+
+spec:
+  hostname: rke2-server-multi-02
+  
+  interfaces:
+    - name: eth0  # Management
+      ip: 10.0.100.22
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [10.0.0.10]
+      metric: 100
+    
+    - name: eth1  # Cluster communication
+      ip: 192.168.1.22
+      prefix: 24
+      mtu: 9000
+      metric: 200
+    
+    - name: eth2  # Storage
+      ip: 172.16.0.22
+      prefix: 24
+      mtu: 9000
+      metric: 300
+  
+  cluster:
+    serverUrl: https://192.168.1.10:9345  # Use cluster network
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+    nodeIp: 192.168.1.22
+    bindAddress: 192.168.1.22
+    advertiseAddress: 192.168.1.22
+    tlsSans:
+      - rke2-api.example.com
+      - 192.168.1.10
+      - 192.168.1.11
+      - 192.168.1.22
+      - 192.168.1.100
+  
+  registry:
+    endpoint: registry.example.com:5000/rke2
+    username: rke2-reader
+    password: CHANGE-ME
+
+---
+# Minimal additional server
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: simple-add-server
+
+spec:
+  hostname: rke2-server-add
+  
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.21
+      prefix: 24
+      gateway: 10.0.100.1
+      dns: [8.8.8.8]
+  
+  cluster:
+    serverUrl: https://10.0.100.10:9345
+    token: K10abcdef1234567890::server:abc123def456
+  
+  rke2:
+    version: v1.34.1+rke2r1
+    tlsSans:
+      - 10.0.100.10
+      - 10.0.100.21
