@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.7d (preprod)
+#       Version: 0.8a (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -28,44 +28,91 @@ esac
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
-#   Rancher RKE2 Kubernetes deployment using official RKE2 Rancher images.
+#   Rancher RKE2 Kubernetes deployment using official RKE2 Rancher images with support for
+#   multi-interface networking configurations.
 #
 # Actions:
-#   1) push   - Tag and push preloaded images into a private registry (nerdctl only)
-#   2) image  - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
-#   3) server - Configure network/hostname and install rke2-server (offline)
-#   4) agent  - Configure network/hostname and install rke2-agent  (offline)
-#   5) verify - Check that node prerequisites are in place
-#   6) airgap - Run 'image' without reboot and power off the machine for templating
-#   7) label-node - Apply Kubernetes labels to an RKE2 node
-#   8) taint-node - Apply Kubernetes taints to an RKE2 node
+#   1) push         - Tag and push preloaded images into a private registry (nerdctl)
+#   2) image        - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
+#   3) server       - Configure multi-interface network, hostname, and install rke2-server (offline)
+#   4) add-server   - Add additional control-plane node to existing cluster (offline)
+#   5) agent        - Configure multi-interface network, hostname, and install rke2-agent (offline)
+#   6) verify       - Check that node prerequisites are in place without making changes
+#   7) airgap       - Run 'image' without reboot and power off the machine for templating
+#   8) label-node   - Apply Kubernetes labels to an RKE2 node
+#   9) taint-node   - Apply Kubernetes taints to an RKE2 node
+#  10) custom-ca    - Generate first-server token from custom CA specified in YAML
 #
 # Connectivity expectations:
-#   - image is the only action that requires Internet access in order to gather
-#     artifacts. It should be run from a host with outbound connectivity.
-#   - push, server, add-server, agent, verify, and airgap are intended to run fully
-#     offline and do not initiate Internet access.
+#   - image is the ONLY action that requires Internet access to gather artifacts
+#   - All other actions (push, server, add-server, agent, verify, label-node, 
+#     taint-node, custom-ca) are designed to run fully offline
 #
-# Major changes vs previous:
-#   - Runtime install caches official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
-#     Only used as a standby CRI/O runtime if the RKE2-installed containerd fails.
-#   - Uses standalone nerdctl binary for image operations (no Docker dependency).
-#     Only used as a standby CLI if RKE2-installed nerdctl fails.  
-#   - Fixed verify() return code logic so success returns 0.
-#   - Added progress indicators + extra logging for downloads and binary installs.
-#   - Hardened Netplan so old IP/GW don’t return after reboot (cloud-init disabled; old YAMLs removed).
+# Key features in this version:
+#   - Multi-interface networking: Configure multiple NICs with static IPs or DHCP
+#   - Deferred netplan application: Network changes apply on reboot (use --apply-netplan-now to override)
+#   - Enhanced RKE2 config support: node-ip, bind-address, advertise-address, and more
+#   - Custom CA integration: Support for custom cluster certificates
+#   - Node management: Label and taint nodes via kubectl integration
+#   - Offline-first design: All artifacts cached locally for air-gapped deployments
+#   - Progress indicators: Spinner feedback for long-running operations
+#   - YAML-driven configuration: apiVersion rkeprep/v1 with comprehensive spec options
 #
-# Safety:
-#   - set -Eeuo pipefail
-#   - global ERR trap emits line number
-#   - root check
-#   - strong input validation for IP/prefix/DNS/search
+# Major architectural improvements:
+#   - Multi-interface support via YAML spec.interfaces[] or --interface CLI args
+#   - Network configuration deferred to reboot by default (safer for remote operations)
+#   - Enhanced YAML parsing with Python fallback for complex nested structures
+#   - Automatic primary interface detection when name not specified
+#   - Support for per-interface DNS, search domains, MTU, and routing metrics
+#   - Custom CA certificate installation and trust chain management
+#   - Token generation with embedded CA fingerprints for secure cluster joins
+#   - Comprehensive prerequisite validation (verify action)
 #
-# YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, CustomCA|Custom-CA|customca|custom-CA|custom-ca
+# Safety features:
+#   - set -Eeuo pipefail (fail fast on errors)
+#   - Global ERR trap with line number reporting
+#   - Root privilege enforcement
+#   - Strong input validation for IP addresses, CIDR prefixes, DNS, and search domains
+#   - CRLF (Windows line ending) detection and rejection
+#   - Credential masking in sanitized YAML output
+#   - Warning for default/example credentials
+#
+# YAML configuration (apiVersion: rkeprep/v1):
+#   Supported kinds: Push, Image, Server, AddServer, Agent, Verify, Airgap, CustomCA
+#   Required: metadata.name for all configurations
+#   Multi-interface syntax:
+#     spec.interfaces:
+#       - name: eth0
+#         ip: 10.0.0.5
+#         prefix: 24
+#         gateway: 10.0.0.1
+#         dns: [8.8.8.8, 8.8.4.4]
+#         searchDomains: [example.com]
+#       - name: eth1
+#         dhcp4: true
+#
+# CLI flags:
+#   -f FILE               YAML config file (apiVersion: rkeprep/v1)
+#   -v VERSION            RKE2 version tag (e.g., v1.34.1+rke2r1)
+#   -r REGISTRY           Private registry (host[/namespace])
+#   -u USER               Registry username
+#   -p PASS               Registry password
+#   -n NAME               Node name for label-node/taint-node (defaults to hostname)
+#   -y                    Auto-confirm prompts (reboots, cleanup)
+#   -P                    Print sanitized YAML (masks secrets)
+#   -h                    Show help
+#   --dry-push            Simulate registry push without actually pushing
+#   --apply-netplan-now   Apply netplan immediately instead of deferring to reboot
+#   --node-name NAME      Alias for -n (node name)
+#   --interface ...       Define interface via CLI (name=X ip=X prefix=X gateway=X dns=X search=X)
 #
 # Exit codes:
-#   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
+#   0 = success
+#   1 = usage error / invalid arguments
+#   2 = missing prerequisites / validation failure
+#   3 = missing required data / artifacts
+#   4 = registry authentication failure
+#   5 = YAML parsing or validation issues
 # ----------------------------------------------------------------------------------------------
 
 set -Eeuo pipefail
@@ -85,6 +132,8 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Defaults & tunables ----------------------------------------------------------------
 RKE2_VERSION=""                                       # auto-detect if empty
+# WARNING: These are EXAMPLE defaults only. Override with -r/-u/-p or via YAML config.
+#          DO NOT use these default credentials in production environments.
 REGISTRY="rke2registry.dev.local"
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
@@ -101,6 +150,7 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -139,59 +189,131 @@ NERDCTL_STD_TGZ=""
 # ------------------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
+RKE2 Node Initialization Script (v0.8a)
+========================================
+Automates air-gapped RKE2 cluster deployment with multi-interface networking support.
+
 NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name: my-config }).
-Usage:
-  sudo ./rke2nodeinit.sh -f file.yaml [options]
-  sudo ./rke2nodeinit.sh [options] <push|image|server|add-server|agent|verify>
-  sudo ./rke2nodeinit.sh examples/image.yaml image
 
+USAGE:
+  sudo ./rke2nodeinit.sh -f <file.yaml> [options]
+  sudo ./rke2nodeinit.sh [options] <action>
 
-YAML kinds (apiVersion: rkeprep/v1):
-  - kind: Push|Image|Airgap|Server|AddServer|Agent|Verify
+YAML KINDS (apiVersion: rkeprep/v1):
+  Push        - Push RKE2 images to private registry
+  Image       - Prepare air-gapped base image (full prep + reboot)
+  Airgap      - Same as Image but powers off instead of reboot (for VM templating)
+  Server      - Initialize first RKE2 control-plane node
+  AddServer   - Join additional control-plane nodes to existing cluster
+  Agent       - Join worker node to cluster
+  Verify      - Verify existing RKE2 installation and configuration
+  CustomCA    - Install custom CA certificates into OS trust and registries.yaml
 
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # Absolute or relative to the script directory
-  rootCrt: certs/enterprise-root.crt
-  rootKey: certs/enterprise-root.key        # optional; OR use intermediate* below
-  intermediateCrt: certs/issuing-ca.crt     # optional
-  intermediateKey: certs/issuing-ca.key     # optional
-  installToOSTrust: true                    # default true
----
+ACTIONS (CLI):
+  push         - Push images to registry (requires -r, -u, -p)
+  image        - Prepare base image for air-gapped deployment
+  airgap       - Prepare base image and power off (for VM templates)
+  server       - Initialize first control-plane node
+  add-server   - Join additional control-plane node
+  agent        - Join worker node
+  verify       - Verify RKE2 installation
+  custom-ca    - Install custom CA certificates
+  label-node   - Apply Kubernetes labels to node (requires -n or --node-name)
+  taint-node   - Apply Kubernetes taints to node (requires -n or --node-name)
 
-Options:
-  -f FILE     YAML config (apiVersion: rkeprep/v1; kind selects action)
-  -v VER      RKE2 version tag (e.g., v1.34.1+rke2r1). If omitted, auto-detect latest
-  -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
-  -u USER     Registry username
-  -p PASS     Registry password
-  -n NAME     Node name for label-node/taint-node actions (defaults to detected hostname)
-              (also available as --node-name NAME)
-  -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
-  -P          Print sanitized YAML to screen (masks secrets)
-  -h          Show this help
-  --dry-push  Do not actually push images to registry (simulate only)
-Image action:
-  Does the full prep for an air-gapped base image:
-    - Installs OS prerequisites and disables swap
-    - Caches nerdctl FULL bundle (containerd + runc + CNI + BuildKit + nerdctl)
-    - Detects & downloads RKE2 artifacts (images, tarball, checksums, installer)
-    - Verifies checksums and stages artifacts for offline install
-    - (Optional) Installs registry/cluster CA into OS trust and writes registries.yaml
-    - Saves DNS/search defaults for later (server/agent)
-    - Reboots the machine so you can shut down and clone it
+OPTIONS:
+  -f FILE      YAML config file (apiVersion: rkeprep/v1; kind selects action)
+  -v VER       RKE2 version tag (e.g., v1.34.1+rke2r1). Auto-detects latest if omitted
+  -r REG       Private registry (host[/namespace]), e.g., registry.example.com/rke2
+  -u USER      Registry username for authentication
+  -p PASS      Registry password for authentication
+  -n NAME      Node name for label-node/taint-node (defaults to hostname)
+               (also available as --node-name NAME)
+  -y           Auto-confirm prompts (reboots, cleanup operations)
+  -P           Print sanitized YAML to screen (masks secrets)
+  -h           Show this help message
+  --dry-push   Simulate image push without actually pushing to registry
+  --apply-netplan-now
+               Apply netplan immediately instead of deferring until reboot
+               (default: netplan changes deferred to next reboot for safety)
+  --interface name=<iface> ip=<addr> prefix=<bits> [gateway=<gw>] [dns=<dns>] [search=<domain>]
+               Define network interface (repeatable for multi-interface setups)
+               Use "dhcp4=true" for DHCP-based interfaces
+               Omit name on first interface to auto-detect primary NIC
 
+MULTI-INTERFACE YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: Server
+  metadata:
+    name: ctrl01-server
+  spec:
+    token: K10abc...xyz::server:1234abcd
+    clusterInit: true
+    nodeName: ctrl01.example.com
+    node-ip: 10.0.69.60
+    bind-address: 10.0.69.60
+    interfaces:
+      - name: eth0
+        ip: 10.0.69.60
+        prefix: 24
+        gateway: 10.0.69.1
+        dns: [10.0.69.1, 8.8.8.8]
+        search: [example.com]
+      - name: eth1
+        ip: 192.168.1.60
+        prefix: 24
+      - name: eth2
+        dhcp4: true
 
-Actions:
-  image        Prepare a base image for air-gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
-  airgap       Run 'image' without reboot and power off the machine for templating
-  label-node   Apply Kubernetes labels to the specified (or local) node
-  taint-node   Apply Kubernetes taints to the specified (or local) node
+CUSTOM CA YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: CustomCA
+  metadata:
+    name: enterprise-ca
+  spec:
+    rootCrt: certs/enterprise-root.crt
+    rootKey: certs/enterprise-root.key        # optional
+    intermediateCrt: certs/issuing-ca.crt     # optional
+    intermediateKey: certs/issuing-ca.key     # optional
+    installToOSTrust: true                    # default: true
 
-Outputs:
-  - SBOM:    $OUT_DIR/../sbom/<metadata.name>-sbom.txt with sha256 + sizes of cached artifacts
-  - Run dir: $OUT_DIR/<metadata.name>/README.txt summarizing image prep
+WORKFLOW EXAMPLES:
+  1. Prepare base image for cloning:
+     sudo ./rke2nodeinit.sh -f examples/image.yaml
+
+  2. Initialize first control-plane with multi-interface networking:
+     sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
+
+  3. Join worker node:
+     sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
+
+  4. Push images to private registry:
+     sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret
+
+  5. Label a node:
+     sudo ./rke2nodeinit.sh label-node -n worker01 -f labels.yaml
+
+  6. Install custom CA:
+     sudo ./rke2nodeinit.sh -f certs/custom-ca.yaml custom-ca
+
+OUTPUTS:
+  - SBOM:      outputs/sbom/<metadata.name>-sbom.txt
+               (SHA256 checksums and sizes of cached artifacts)
+  - Run log:   outputs/<metadata.name>/README.txt
+               (Summary of image preparation steps)
+  - Token:     outputs/generated-token/<cluster>-token.txt
+               (Generated cluster token for Server with clusterInit: true)
+
+EXIT CODES:
+  0 - Success
+  1 - General error (validation, filesystem, network)
+  2 - Missing dependencies or unsupported configuration
+  3 - RKE2 installation or service failure
+  4 - Network configuration failure (netplan, routing)
+  5 - User cancellation or dry-run mode
+
+For more information, see README.md or visit:
+  https://github.com/cantrellcloud/rke2-node-init
 
 EOF
 }
@@ -215,6 +337,25 @@ log() {
   host="$(hostname)"
   echo "[$level] $msg"
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
+}
+
+# ------------------------------------------------------------------------------
+# Function: warn_default_credentials
+# Purpose : Emit a warning if the script is using hardcoded default credentials.
+#           This helps prevent accidental use of example values in production.
+# Arguments:
+#   $1 - Registry host
+#   $2 - Registry username
+#   $3 - Registry password
+# Returns : Always returns 0
+# ------------------------------------------------------------------------------
+warn_default_credentials() {
+  local reg="$1" user="$2" pass="$3"
+  # Check if using the exact default values from the script header
+  if [[ "$reg" == "rke2registry.dev.local" && "$user" == "admin" && "$pass" == "ZAQwsx!@#123" ]]; then
+    log WARN "Using EXAMPLE default credentials! These should be overridden for production use."
+    log WARN "Override with: -r <registry> -u <username> -p <password> or via YAML config."
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -366,6 +507,9 @@ yaml_get_api() {
 #   $1 - Path to the YAML file to inspect
 # Returns :
 #   Prints the kind string to stdout.
+# Implementation:
+#   Uses grep to match 'kind:' line, awk to split on colon and extract value,
+#   xargs to trim whitespace. Fast and sufficient for single-value extraction.
 # ------------------------------------------------------------------------------
 yaml_get_kind() {
   grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
@@ -390,17 +534,18 @@ import re
 import sys
 
 file_path, key_path = sys.argv[1:3]
-parts = key_path.split('.')
+parts = key_path.split('.')  # Split dotted path: "customCA.rootCrt" -> ["customCA", "rootCrt"]
 target_depth = len(parts)
 
 try:
     with open(file_path, encoding='utf-8') as fh:
         in_spec = False
-        stack = []
-        indent_stack = []
+        stack = []        # Current nested key path as we parse the YAML structure
+        indent_stack = [] # Parallel indentation levels to track when to pop from stack
         for raw_line in fh:
             line = raw_line.rstrip('\n')
             if not in_spec:
+                # Skip everything until we find the 'spec:' section
                 if re.match(r'^\s*spec:\s*$', line):
                     in_spec = True
                 continue
@@ -410,8 +555,11 @@ try:
 
             indent = len(line) - len(line.lstrip(' '))
             if indent < 1:
-                break
+                break  # Left the spec: section (back to top level)
 
+            # Pop stack when we dedent (moving back to shallower nesting level)
+            # Example: if we go from "    key:" (indent=4) to "  key:" (indent=2),
+            # we pop the deeper keys from our tracking stack
             while indent_stack and indent <= indent_stack[-1]:
                 stack.pop()
                 indent_stack.pop()
@@ -420,17 +568,21 @@ try:
             if not match:
                 continue
 
+            # Add current key to stack and track its indentation level
             stack.append(match.group(1).strip())
             indent_stack.append(indent)
 
+            # Check if current stack path matches the requested key path
+            # Example: if looking for "customCA.rootCrt", stack must be ["customCA", "rootCrt"]
             if stack[:len(parts)] != parts[:len(stack)]:
                 continue
 
             value = match.group(2).strip()
             if len(stack) == target_depth and value:
-                value = re.sub(r'\s+#.*$', '', value).strip()
+                # Found exact match at correct depth - extract and return value
+                value = re.sub(r'\s+#.*$', '', value).strip()  # Remove inline comments
                 if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
+                    value = value[1:-1]  # Strip quotes
                 print(value)
                 sys.exit(0)
 except FileNotFoundError:
@@ -506,6 +658,7 @@ yaml_spec_has_list() {
       if (found==1) {
         if ($0 ~ "^[[:space:]]*-[[:space:]]+") { print "YES"; exit }
         else if ($0 ~ "^[[:space:]]*$") { next } # skip blanks
+        else if ($0 ~ "^[[:space:]]*#") { next } # skip comments
         else { exit } # not a list
       }
     }
@@ -592,7 +745,7 @@ append_spec_config_extras() {
     "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
-    "enable-servicelb"
+    "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
 
   local k v
@@ -711,6 +864,506 @@ normalize_list_csv() {
 }
 
 # ------------------------------------------------------------------------------
+# Section: Network Interface Helpers
+# Purpose: Provide encoding/decoding utilities for multi-interface support that
+#          allow YAML, CLI, and interactive prompts to share a common format.
+# ------------------------------------------------------------------------------
+
+# Trim leading and trailing whitespace without relying on external utilities.
+# Handles edge cases: empty strings and whitespace-only strings safely.
+# Uses bash parameter expansion pattern matching:
+#   ${var#pattern}  - remove shortest match from beginning
+#   ${var%pattern}  - remove shortest match from end
+#   ${var%%pattern} - remove longest match from beginning (greedy)
+#   ${var##pattern} - remove longest match from end (greedy)
+trim_whitespace() {
+  local _s="$1"
+  # Handle empty or whitespace-only strings
+  [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
+  # Strip leading whitespace: 
+  #   ${_s%%[![:space:]]*} finds everything up to first non-space
+  #   ${_s#...} removes that prefix, leaving string from first non-space onward
+  _s="${_s#${_s%%[![:space:]]*}}"
+  # Strip trailing whitespace:
+  #   ${_s##*[![:space:]]} finds everything after last non-space
+  #   ${_s%...} removes that suffix, leaving string up to last non-space
+  _s="${_s%${_s##*[![:space:]]}}"
+  printf '%s' "$_s"
+}
+
+# Encode an associative array describing a NIC into a pipe-delimited string.
+# Format: "key1=value1|key2=value2|key3=value3"
+# This allows passing complex interface configuration through simple strings.
+# Ordered fields are emitted first for consistency, then any extra fields.
+interface_encode_assoc() {
+  local -n _nic="$1"
+  # Define canonical field order for consistent output
+  local -a _order=(name dhcp4 cidr ip prefix gateway dns search addresses mtu metric)
+  local -a _parts=()
+
+  local _key
+  # First pass: emit known fields in defined order
+  for _key in "${_order[@]}"; do
+    if [[ -n "${_nic[${_key}]:-}" ]]; then
+      _parts+=("${_key}=${_nic[${_key}]}")
+    fi
+  done
+
+  # Second pass: append any extra fields not in the canonical order
+  for _key in "${!_nic[@]}"; do
+    local _normalized="${_key,,}"
+    if [[ " ${_order[*]} " == *" ${_normalized} "* ]]; then
+      continue  # Already handled in first pass
+    fi
+    _parts+=("${_normalized}=${_nic[$_key]}")
+  done
+
+  # Join all parts with pipe delimiter
+  (IFS='|'; echo "${_parts[*]}")
+}
+
+# Decode a pipe-delimited NIC string into an associative array supplied by name.
+# Input format: "name=eth0|ip=10.0.0.5|prefix=24|gateway=10.0.0.1"
+# Output: Populates the associative array referenced by $2 with normalized keys.
+# Normalizes legacy/alias field names (e.g., "address" -> "ip", "gw" -> "gateway").
+# Returns 0 on success, 1 if the entry is empty or invalid.
+interface_decode_entry() {
+  local _entry="$1"
+  local -n _dest="$2"
+  _dest=()
+
+  # Validate entry is not empty
+  [[ -z "$_entry" ]] && return 1
+
+  # Split on pipe delimiter into array of key=value pairs
+  IFS='|' read -r -a _pairs <<<"$_entry"
+  
+  # Validate we have at least one pair
+  if (( ${#_pairs[@]} == 0 )); then
+    return 1
+  fi
+  
+  local _pair _key _value
+  for _pair in "${_pairs[@]}"; do
+    [[ -z "$_pair" ]] && continue
+    _key="${_pair%%=*}"; _value="${_pair#*=}"
+    _key="${_key,,}"  # Normalize to lowercase
+    # Map legacy/alias field names to canonical names
+    case "$_key" in
+      interface|nic) _key="name" ;;
+      address) _key="ip" ;;
+      cidrprefix) _key="prefix" ;;
+      gw) _key="gateway" ;;
+      nameservers) _key="dns" ;;
+      searchdomains) _key="search" ;;
+      dhcp) _key="dhcp4" ;;
+    esac
+    _dest["$_key"]="$_value"
+  done
+  
+  return 0
+}
+
+# Convert CLI tokens (key=value pairs) into an encoded NIC string.
+interface_cli_tokens_to_entry() {
+  local -a _tokens=("$@")
+  local -A _nic=()
+  local _token _key _value
+  for _token in "${_tokens[@]}"; do
+    if [[ "$_token" != *=* ]]; then
+      log ERROR "Interface tokens must be key=value (got '$_token')."
+      exit 1
+    fi
+    _key="${_token%%=*}"; _value="${_token#*=}"
+    _key="${_key,,}"
+    case "$_key" in
+      interface|nic) _key="name" ;;
+      address) _key="ip" ;;
+      cidrprefix) _key="prefix" ;;
+      gw) _key="gateway" ;;
+      nameservers) _key="dns" ;;
+      searchdomains) _key="search" ;;
+      dhcp) _key="dhcp4" ;;
+    esac
+    _nic["$_key"]="$_value"
+  done
+  interface_encode_assoc _nic
+}
+
+# Produce a comma-separated list suitable for YAML inline arrays.
+format_inline_list() {
+  local _raw="$1"
+  [[ -z "$_raw" ]] && return
+  local _clean
+  _clean="${_raw#[}"; _clean="${_clean%]}"
+  _clean="${_clean//;/,}"
+  local -a _items=()
+  IFS=',' read -r -a _tmp <<<"$_clean"
+  local _item
+  for _item in "${_tmp[@]}"; do
+    _item="$(trim_whitespace "$_item")"
+    [[ -n "$_item" ]] && _items+=("$_item")
+  done
+  (IFS=', '; echo "${_items[*]}")
+}
+
+# Detect the most likely primary network interface for the host.
+detect_primary_interface() {
+  local _nic
+  _nic="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n1 || true)"
+  if [[ -z "$_nic" ]]; then
+    local _path _candidate
+    for _path in /sys/class/net/*; do
+      _candidate="${_path##*/}"
+      if [[ "$_candidate" =~ ^(lo|docker|cni|flannel|kube|veth|virbr|br-) ]]; then
+        continue
+      fi
+      _nic="$_candidate"
+      break
+    done
+  fi
+  echo "$_nic"
+}
+
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_interfaces
+# Purpose : Extract spec.interfaces entries from YAML as encoded NIC strings.
+# Arguments:
+#   $1 - Path to YAML configuration file
+# Returns :
+#   Prints encoded interface strings to stdout (one per line)
+# ------------------------------------------------------------------------------
+yaml_spec_interfaces() {
+  local _file="$1"
+  [[ -z "$_file" || ! -f "$_file" ]] && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not available; skipping spec.interfaces parsing for $_file"
+    return 0
+  fi
+  python3 - "$_file" <<'PY'
+import re
+import sys
+
+file_path = sys.argv[1]
+try:
+    with open(file_path, encoding='utf-8') as fh:
+        lines = fh.readlines()
+except FileNotFoundError:
+    sys.exit(0)
+except Exception as e:
+    # Log error to stderr and exit gracefully
+    print(f"Error reading YAML file: {e}", file=sys.stderr)
+    sys.exit(0)
+
+def strip_quotes(value: str) -> str:
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return value[1:-1]
+    if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+items = []
+in_spec = False
+interfaces_indent = None
+current = None
+current_indent = None
+last_list_key = None
+last_list_indent = None
+
+def flush_current():
+    global current
+    if current is not None:
+        items.append(current)
+        current = None
+
+for raw in lines:
+    line = raw.rstrip('\n')
+    if not in_spec:
+        if re.match(r'^\s*spec\s*:\s*$', line):
+            in_spec = True
+        continue
+
+    if interfaces_indent is None:
+        if re.match(r'^\s*interfaces\s*:\s*$', line):
+            interfaces_indent = len(line) - len(line.lstrip(' '))
+        elif re.match(r'^\S', line):
+            break
+        continue
+
+    if re.match(r'^\S', line):
+        flush_current()
+        break
+
+    if not line.strip() or line.lstrip().startswith('#'):
+        continue
+
+    indent = len(line) - len(line.lstrip(' '))
+    
+    # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
+    # This must be checked before dash_match to avoid treating sibling list items as interface items
+    if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
+        flush_current()
+        break
+
+    dash_match = re.match(r'^\s*-\s*(.*)$', line)
+    if dash_match:
+        rest = dash_match.group(1).strip()
+        if current is not None and indent > (current_indent or interfaces_indent) and last_list_key:
+            value = strip_quotes(rest)
+            current.setdefault(last_list_key, []).append(value)
+            continue
+        flush_current()
+        current = {}
+        current_indent = indent
+        last_list_key = None
+        if rest:
+            key, _, value = rest.partition(':')
+            key = key.strip()
+            value = value.strip()
+            value = re.sub(r'\s+#.*$', '', value)
+            if value == '':
+                last_list_key = key
+                last_list_indent = indent
+                current.setdefault(key, [])
+            else:
+                value = strip_quotes(value)
+                if value.startswith('[') and value.endswith(']'):
+                    inner = value[1:-1]
+                    if inner.strip():
+                        current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                    else:
+                        current[key] = []
+                else:
+                    current[key] = value
+        continue
+
+    if current is None:
+        continue
+
+    key_value = re.match(r'^\s*([^:#]+):\s*(.*)$', line)
+    if key_value:
+        key = key_value.group(1).strip()
+        value = key_value.group(2).strip()
+        value = re.sub(r'\s+#.*$', '', value)
+        if value == '':
+            last_list_key = key
+            last_list_indent = indent
+            current.setdefault(key, [])
+        else:
+            last_list_key = None
+            value = strip_quotes(value)
+            if value.startswith('[') and value.endswith(']'):
+                inner = value[1:-1]
+                if inner.strip():
+                    current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                else:
+                    current[key] = []
+            else:
+                current[key] = value
+        continue
+
+    list_item = re.match(r'^\s*-\s*(.*)$', line)
+    if list_item and last_list_key and indent > (last_list_indent or interfaces_indent):
+        value = strip_quotes(list_item.group(1).strip())
+        current.setdefault(last_list_key, []).append(value)
+        continue
+
+flush_current()
+
+try:
+    for item in items:
+        parts = []
+        for key, value in item.items():
+            if isinstance(value, list):
+                if value:  # Only include non-empty lists
+                    parts.append(f"{key}=" + ",".join(value))
+            else:
+                parts.append(f"{key}={value}")
+        if parts:
+            print("|".join(parts))
+except Exception as e:
+    # Log error to stderr and exit gracefully without breaking the shell script
+    print(f"Error processing interface data: {e}", file=sys.stderr)
+    sys.exit(0)
+PY
+}
+
+# Merge interfaces defined in YAML and CLI blobs into an array supplied by name.
+collect_interface_specs() {
+  local -n _dest="$1"
+  local _config="$2"
+  local _cli_blob="$3"
+  _dest=()
+
+  if [[ -n "$_config" ]]; then
+    mapfile -t _dest < <(yaml_spec_interfaces "$_config" || true)
+  fi
+
+  if [[ -n "$_cli_blob" ]]; then
+    while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      _dest+=("$_line")
+    done <<<"$_cli_blob"
+  fi
+}
+
+# Normalize the first interface entry and propagate values back to legacy vars.
+merge_primary_interface_fields() {
+  local -n _ifaces="$1"
+  local -n _ip_ref="$2"
+  local -n _prefix_ref="$3"
+  local -n _gw_ref="$4"
+  local -n _dns_ref="$5"
+  local -n _search_ref="$6"
+
+  local -A _primary=()
+  local _has_entry=0
+  if (( ${#_ifaces[@]} )); then
+    if ! interface_decode_entry "${_ifaces[0]}" _primary; then
+      log WARN "Failed to decode primary interface entry; using empty defaults"
+    else
+      _has_entry=1
+    fi
+  fi
+
+  local _dhcp="${_primary[dhcp4]:-}"
+  _dhcp="${_dhcp,,}"
+
+  if [[ "$_dhcp" != "true" ]]; then
+    if [[ -n "${_primary[cidr]:-}" ]]; then
+      local _cidr="${_primary[cidr]}"
+      if [[ -z "$_ip_ref" && "$_cidr" == */* ]]; then
+        _ip_ref="${_cidr%/*}"
+        [[ -z "$_prefix_ref" ]] && _prefix_ref="${_cidr#*/}"
+      fi
+    fi
+    if [[ -z "$_ip_ref" && -n "${_primary[ip]:-}" ]]; then
+      local _ipvalue="${_primary[ip]}"
+      if [[ "$_ipvalue" == */* ]]; then
+        _ip_ref="${_ipvalue%/*}"
+        [[ -z "$_prefix_ref" ]] && _prefix_ref="${_ipvalue#*/}"
+      else
+        _ip_ref="$_ipvalue"
+      fi
+    fi
+    if [[ -z "$_prefix_ref" && -n "${_primary[prefix]:-}" ]]; then
+      _prefix_ref="${_primary[prefix]}"
+    fi
+    if [[ -z "$_gw_ref" && -n "${_primary[gateway]:-}" ]]; then
+      _gw_ref="${_primary[gateway]}"
+    fi
+  fi
+
+  if [[ -z "$_dns_ref" && -n "${_primary[dns]:-}" ]]; then
+    _dns_ref="${_primary[dns]}"
+  fi
+  if [[ -z "$_search_ref" && -n "${_primary[search]:-}" ]]; then
+    _search_ref="${_primary[search]}"
+  fi
+
+  if [[ -n "$_ip_ref" && -z "$_prefix_ref" ]]; then
+    _prefix_ref=24
+  fi
+
+  if [[ "$_dhcp" != "true" ]]; then
+    [[ -n "$_ip_ref" ]] && _primary[ip]="$_ip_ref"
+    [[ -n "$_prefix_ref" ]] && _primary[prefix]="$_prefix_ref"
+    [[ -n "$_gw_ref" ]] && _primary[gateway]="$_gw_ref"
+  fi
+  [[ -n "$_dns_ref" ]] && _primary[dns]="$(normalize_list_csv "$_dns_ref")"
+  [[ -n "$_search_ref" ]] && _primary[search]="$(normalize_list_csv "$_search_ref")"
+
+  local _encoded="$(interface_encode_assoc _primary)"
+  if (( _has_entry )); then
+    _ifaces[0]="$_encoded"
+  elif [[ -n "$_encoded" ]]; then
+    _ifaces=("$_encoded")
+  fi
+}
+
+# Interactive helper to append extra interfaces when the operator opts in.
+prompt_additional_interfaces() {
+  local -n _ifaces="$1"
+  local _default_dns="$2"
+  local _prompt_label="$3"
+
+  while true; do
+    local _resp=""
+    read -rp "Add another network interface${_prompt_label:+ for $_prompt_label}? [y/N]: " _resp || break
+    [[ "$_resp" =~ ^[Yy]$ ]] || break
+
+    local _name=""
+    while [[ -z "$_name" ]]; do
+      read -rp "Interface name (e.g., eth1): " _name || return
+      _name="$(trim_whitespace "$_name")"
+    done
+
+    local _dhcp_resp=""
+    read -rp "Use DHCP for $_name? [y/N]: " _dhcp_resp || return
+    local -A _nic=( [name]="$_name" )
+    if [[ "$_dhcp_resp" =~ ^[Yy]$ ]]; then
+      _nic[dhcp4]="true"
+    else
+      local _ip="" _prefix="" _gw="" _dns="" _search=""
+      while [[ -z "$_ip" ]]; do
+        read -rp "Static IPv4 for $_name: " _ip || return
+        _ip="$(trim_whitespace "$_ip")"
+        valid_ipv4 "$_ip" || { echo "Invalid IPv4."; _ip=""; }
+      done
+      read -rp "Prefix length for $_name [default 24]: " _prefix || true
+      _prefix="$(trim_whitespace "$_prefix")"
+      while [[ -n "$_prefix" ]]; do
+        if valid_prefix "$_prefix"; then
+          break
+        fi
+        read -rp "Invalid prefix. Re-enter [default 24]: " _prefix || true
+        _prefix="$(trim_whitespace "$_prefix")"
+      done
+      [[ -z "$_prefix" ]] && _prefix=24
+      read -rp "Default gateway for $_name [optional]: " _gw || true
+      _gw="$(trim_whitespace "$_gw")"
+      while [[ -n "$_gw" ]]; do
+        if valid_ipv4_or_blank "$_gw"; then
+          break
+        fi
+        read -rp "Invalid gateway. Re-enter (blank to skip): " _gw || true
+        _gw="$(trim_whitespace "$_gw")"
+      done
+      read -rp "DNS servers for $_name (comma-separated) [optional]: " _dns || true
+      _dns="$(trim_whitespace "$_dns")"
+      while [[ -n "$_dns" ]]; do
+        if valid_csv_dns "$_dns"; then
+          break
+        fi
+        read -rp "Invalid DNS list. Re-enter for $_name: " _dns || true
+        _dns="$(trim_whitespace "$_dns")"
+      done
+      read -rp "Search domains for $_name (comma-separated) [optional]: " _search || true
+      _search="$(trim_whitespace "$_search")"
+      while [[ -n "$_search" ]]; do
+        if valid_search_domains_csv "$_search"; then
+          break
+        fi
+        read -rp "Invalid search domain list. Re-enter for $_name: " _search || true
+        _search="$(trim_whitespace "$_search")"
+      done
+
+      _nic[ip]="$_ip"
+      _nic[prefix]="$_prefix"
+      [[ -n "$_gw" ]] && _nic[gateway]="$_gw"
+      if [[ -n "$_dns" ]]; then
+        _nic[dns]="$(normalize_list_csv "$_dns")"
+      elif [[ -n "$_default_dns" ]]; then
+        _nic[dns]="$(normalize_list_csv "$_default_dns")"
+      fi
+      [[ -n "$_search" ]] && _nic[search]="$(normalize_list_csv "$_search")"
+    fi
+
+    _ifaces+=("$(interface_encode_assoc _nic)")
+  done
+}
+
+# ------------------------------------------------------------------------------
 # Function: parse_action_cli_args
 # Purpose : Parse residual CLI arguments passed after the action name so that
 #           actions can honor flag-style overrides without requiring YAML.
@@ -737,6 +1390,29 @@ parse_action_cli_args() {
     case "$arg" in
       --)
         break
+        ;;
+      --interface)
+        if (( ${#args[@]} == 0 )); then
+          log ERROR "[$action_label] --interface requires key=value tokens (e.g., --interface name=eth1 ip=10.0.0.5 prefix=24)"; exit 1
+        fi
+        local -a _if_tokens=()
+        while (( ${#args[@]} )) && [[ "${args[0]}" != --* ]]; do
+          _if_tokens+=("${args[0]}")
+          args=("${args[@]:1}")
+        done
+        if (( ${#_if_tokens[@]} == 0 )); then
+          log ERROR "[$action_label] --interface must be followed by key=value tokens"; exit 1
+        fi
+        local _if_entry
+        _if_entry="$(interface_cli_tokens_to_entry "${_if_tokens[@]}")"
+        if [[ -n "${_dest[interfaces]:-}" ]]; then
+          _dest[interfaces]+=$'\n'"${_if_entry}"
+        else
+          _dest[interfaces]="${_if_entry}"
+        fi
+        ;;
+      --interface=*)
+        log ERROR "[$action_label] --interface expects key=value tokens separated by spaces (e.g., --interface name=eth1 ip=10.0.0.5 prefix=24)"; exit 1
         ;;
       --hostname)
         if (( ${#args[@]} == 0 )); then
@@ -1244,85 +1920,202 @@ apply_netplan_now() {
 
 # ------------------------------------------------------------------------------
 # Function: write_netplan
-# Purpose : Author the authoritative static netplan file using the supplied
-#           addressing information and apply it immediately.
+# Purpose : Author the authoritative static netplan file using one or more
+#           interface definitions and apply it immediately.
 # Arguments:
-#   $1 - IPv4 address
-#   $2 - Prefix length
-#   $3 - Default gateway (optional)
-#   $4 - CSV DNS servers (optional)
-#   $5 - CSV search domains (optional)
+#   Legacy mode retains positional arguments for backward compatibility.
+#   Modern mode: write_netplan --interfaces <encoded-entry> [...]
 # Returns :
 #   Returns 0 on success, exits with status 2 when interface detection fails.
+# Strategy:
+#   1. Disable cloud-init networking and remove old netplan files
+#   2. Create fresh /etc/netplan/99-rke-static.yaml with networkd renderer
+#   3. Process each interface entry: decode, validate, and write YAML stanza
+#   4. Support both DHCP and static configurations with optional routes/DNS
+#   5. Apply netplan immediately and log interface/route state for verification
 # ------------------------------------------------------------------------------
-write_netplan() {
-  local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
+write_netplan_multi() {
+  local -a _entries=("$@")
+  (( ${#_entries[@]} )) || { log ERROR "write_netplan: no interface definitions supplied"; exit 2; }
 
-  # Detect primary NIC
-  local nic
-  local nic_path nic_candidate
-  nic="$(ip -o -4 route show to default | awk '{print $5}' || true)"
-  if [[ -z "$nic" ]]; then
-    for nic_path in /sys/class/net/*; do
-      nic_candidate="${nic_path##*/}"
-      if [[ ! $nic_candidate =~ ^(lo|docker|cni|flannel|kube|veth|virbr|br-) ]]; then
-        nic="$nic_candidate"
-        break
-      fi
-    done
-  fi
-  [[ -z "$nic" ]] && { log ERROR "Failed to detect a primary network interface"; exit 2; }
-
-  export NETPLAN_LAST_NIC="$nic"
-
+  # Remove conflicting network config sources
   disable_cloud_init_net
   purge_old_netplan
 
-  local tmp="/etc/netplan/99-rke-static.yaml"
-  : > "$tmp"
+  local _tmp="/etc/netplan/99-rke-static.yaml"
+  : > "$_tmp"
 
+  # Write netplan header
   {
     echo "network:"
     echo "  version: 2"
     echo "  renderer: networkd"
     echo "  ethernets:"
-    echo "    $nic:"
-    echo "      dhcp4: false"
-    echo "      addresses:"
-    echo "        - $ip/${prefix:-24}"
-    if [[ -n "$gw" ]]; then
-      echo "      routes:"
-      echo "        - to: default"
-      echo "          via: $gw"
+  } >> "$_tmp"
+
+  local _idx=0 _primary_nic="" _summary=""; local -a _ifaces=()
+  local _entry
+  # Process each interface definition
+  for _entry in "${_entries[@]}"; do
+    local -A _nic=()
+    if ! interface_decode_entry "$_entry" _nic; then
+      log ERROR "Failed to decode interface entry #$((_idx+1))"; exit 2
     fi
-    echo "      nameservers:"
-    if [[ -n "$dns_csv" ]]; then
-      local dns_sp arr joined
-      dns_sp="$(echo "$dns_csv" | sed 's/,/ /g')"
-      read -r -a arr <<<"$dns_sp"
-      joined="$(printf ', %s' "${arr[@]}")"; joined="${joined:2}"
-      echo "        addresses: [$joined]"
+
+    local _name="${_nic[name]:-}"
+    if [[ -z "$_name" ]]; then
+      if (( _idx == 0 )); then
+        _name="$(detect_primary_interface)"
+        if [[ -z "$_name" ]]; then
+          log ERROR "Failed to detect a primary network interface"; exit 2
+        fi
+        _nic[name]="$_name"
+      else
+        log ERROR "Interface #$((_idx+1)) is missing a 'name' field"; exit 2
+      fi
+    fi
+
+    [[ -n "$_primary_nic" ]] || _primary_nic="$_name"
+  _ifaces+=("$_name")
+
+    local _dhcp="${_nic[dhcp4]:-}"
+    _dhcp="${_dhcp,,}"
+
+    {
+      echo "    $_name:"
+      if [[ "$_dhcp" == "true" ]]; then
+        echo "      dhcp4: true"
+        echo "      dhcp6: false"
+      else
+        echo "      dhcp4: false"
+        echo "      dhcp6: false"
+
+        local -a _addresses=()
+        if [[ -n "${_nic[cidr]:-}" ]]; then
+          local _addr_list
+          _addr_list="$(format_inline_list "${_nic[cidr]}")"
+          local -a _addr_tmp=()
+          IFS=',' read -r -a _addr_tmp <<<"$_addr_list"
+          local _a
+          for _a in "${_addr_tmp[@]}"; do
+            _a="$(trim_whitespace "$_a")"
+            [[ -n "$_a" ]] && _addresses+=("$_a")
+          done
+        fi
+        if [[ -n "${_nic[ip]:-}" ]]; then
+          local _ip="${_nic[ip]}"
+          if [[ "$_ip" == */* ]]; then
+            _addresses+=("$_ip")
+          else
+            local _pref="${_nic[prefix]:-24}"
+            [[ -z "$_pref" ]] && _pref=24
+            _addresses+=("${_ip}/${_pref}")
+          fi
+        fi
+        if [[ -n "${_nic[addresses]:-}" ]]; then
+          local _addr_list
+          _addr_list="$(format_inline_list "${_nic[addresses]}")"
+          local -a _addr_tmp=()
+          IFS=',' read -r -a _addr_tmp <<<"$_addr_list"
+          local _a
+          for _a in "${_addr_tmp[@]}"; do
+            _a="$(trim_whitespace "$_a")"
+            [[ -n "$_a" ]] && _addresses+=("$_a")
+          done
+        fi
+        if (( ${#_addresses[@]} == 0 )); then
+          log ERROR "Interface '$_name' is missing static addresses"; exit 2
+        fi
+        echo "      addresses:"
+        local _addr
+        for _addr in "${_addresses[@]}"; do
+          echo "        - $_addr"
+        done
+
+        if [[ -n "${_nic[gateway]:-}" ]]; then
+          echo "      routes:"
+          echo "        - to: default"
+          echo "          via: ${_nic[gateway]}"
+          if [[ -n "${_nic[metric]:-}" ]]; then
+            echo "          metric: ${_nic[metric]}"
+          fi
+        fi
+      fi
+
+      local _dns_block="$(format_inline_list "${_nic[dns]:-}")"
+      local _search_block="$(format_inline_list "${_nic[search]:-}")"
+      if [[ -n "$_dns_block" || -n "$_search_block" ]]; then
+        echo "      nameservers:"
+        if [[ -n "$_dns_block" ]]; then
+          echo "        addresses: [${_dns_block}]"
+        fi
+        if [[ -n "$_search_block" ]]; then
+          echo "        search: [${_search_block}]"
+        fi
+      fi
+
+      if [[ -n "${_nic[mtu]:-}" ]]; then
+        echo "      mtu: ${_nic[mtu]}"
+      fi
+      
+      # Disable IPv6 on all interfaces
+      echo "      accept-ra: false"
+      echo "      link-local: []"
+    } >> "$_tmp"
+
+    local _desc="${_nic[ip]:-}${_nic[cidr]:+ (${_nic[cidr]})}"
+    if [[ "$_dhcp" == "true" ]]; then
+      _desc="dhcp4"
+    elif [[ -z "$_desc" ]]; then
+      _desc="${_addresses[*]:-}"
+    fi
+    [[ -z "$_desc" ]] && _desc="configured"
+    if [[ -n "$_summary" ]]; then
+      _summary+="; $_name=$_desc"
     else
-      echo "        addresses: [8.8.8.8]"
+      _summary="$_name=$_desc"
     fi
-    if [[ -n "$search_csv" ]]; then
-      local sd_sp arr2 joined2
-      sd_sp="$(echo "$search_csv" | sed 's/,/ /g')"
-      read -r -a arr2 <<<"$sd_sp"
-      joined2="$(printf ', %s' "${arr2[@]}")"; joined2="${joined2:2}"
-      echo "        search: [$joined2]"
-    fi
-  } >> "$tmp"
 
-  chmod 600 "$tmp"
-  log INFO "Netplan written to $tmp for $nic (IP=$ip/${prefix:-24}, GW=${gw:-<none>}, DNS=${dns_csv:-<default>}, SEARCH=${search_csv:-<none>})"
+    _idx=$((_idx + 1))
+  done
 
-  # Apply immediately (and persists after reboot because other YAMLs are purged and cloud-init is disabled)
-  apply_netplan_now || true
+  export NETPLAN_LAST_NIC="$_primary_nic"
+  chmod 600 "$_tmp"
+  log INFO "Netplan written to $_tmp (primary=$_primary_nic; interfaces=${_summary})"
 
-  # Quick verification snapshot
-  ip -4 addr show dev "$nic"   | sed 's/^/IFACE: /'  >>"$LOG_FILE" 2>&1 || true
-  ip route show default        | sed 's/^/ROUTE: /'  >>"$LOG_FILE" 2>&1 || true
+  if (( APPLY_NETPLAN_NOW )); then
+    log INFO "Applying netplan immediately (--apply-netplan-now flag set)..."
+    apply_netplan_now || true
+  else
+    log INFO "Netplan will be applied on next reboot. Use --apply-netplan-now to apply immediately."
+  fi
+
+  local _iface
+  for _iface in "${_ifaces[@]}"; do
+    [[ -z "$_iface" ]] && continue
+    ip -4 addr show dev "$_iface" | sed 's/^/IFACE: /' >>"$LOG_FILE" 2>&1 || true
+  done
+  ip route show default | sed 's/^/ROUTE: /' >>"$LOG_FILE" 2>&1 || true
+}
+
+write_netplan() {
+  if [[ "$1" == "--interfaces" ]]; then
+    shift
+    write_netplan_multi "$@"
+    return
+  fi
+
+  local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
+  local -A _legacy_nic=()
+  [[ -n "$ip" ]] && _legacy_nic[ip]="$ip"
+  [[ -n "$prefix" ]] && _legacy_nic[prefix]="$prefix"
+  [[ -n "$gw" ]] && _legacy_nic[gateway]="$(trim_whitespace "$gw")"
+  if [[ -z "$dns_csv" ]]; then
+    dns_csv="8.8.8.8"
+  fi
+  [[ -n "$dns_csv" ]] && _legacy_nic[dns]="$(normalize_list_csv "$dns_csv")"
+  [[ -n "$search_csv" ]] && _legacy_nic[search]="$(normalize_list_csv "$search_csv")"
+  write_netplan_multi "$(interface_encode_assoc _legacy_nic)"
 }
 
 # ------------------------------------------------------------------------------
@@ -1373,24 +2166,11 @@ capture_sans() {
 }
 
 # ------------------------------------------------------------------------------
-# Function: emit_tls_sans
-# Purpose : Write the tls-san YAML list derived from capture_sans() into the
-#           config file while trimming empty entries.
-# Arguments:
-#   $1 - CSV string of SAN entries
-# Returns :
-#   Prints a YAML fragment to stdout.
+# TODO: emit_tls_sans() function was removed (unused)
+# SANs are captured via capture_sans() but never formatted/emitted.
+# Consider re-integrating if TLS SAN YAML formatting is needed.
+# Archived in: rke2nodeinit-unused-functions.sh
 # ------------------------------------------------------------------------------
-emit_tls_sans() {
-  local csv="$1"
-  [[ -z "$csv" ]] && return 0
-  echo "tls-san:"
-  IFS=',' read -r -a _sans <<<"$csv"
-  for s in "${_sans[@]}"; do
-    s="${s//\"/}"; s="${s// /}"
-    [[ -n "$s" ]] && echo "  - \"$s\""
-  done
-}
 
 # ------------------------------------------------------------------------------
 # Function: check_system_settings
@@ -2273,86 +3053,27 @@ ensure_staged_artifacts() {
 # system-default-registry prefix so containerd will use them without pulling, and
 # 3) registries.yaml mirrors point to your offline registry endpoints in priority order.
 # ------------------------------------------------------------------------------
-# Function: load_staged_images
-# Purpose : Load the pre-downloaded RKE2 image archive into containerd using
-#           nerdctl so offline hosts have required images available.
-# Arguments:
-#   None
-# Returns :
-#   Returns 0 on success, exits when archive missing.
-# ------------------------------------------------------------------------------
-load_staged_images() {
-  # Load any pre-staged images into containerd so we can retag them.
-  shopt -s nullglob
-  local loaded=0
-  for f in /var/lib/rancher/rke2/agent/images/*.tar*; do
-    case "$f" in
-      *.zst)  zstdcat "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
-      *.gz)   gzip -dc "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
-      *.tar)  nerdctl --namespace k8s.io load -i "$f" >/dev/null 2>&1 || true ;;
-    esac
-    loaded=1
-  done
-  shopt -u nullglob
-  if (( loaded == 1 )); then
-    log INFO "Loaded staged images into containerd namespace k8s.io."
-  else
-    log INFO "No staged images to load (skip)."
-  fi
-}
 
 # ------------------------------------------------------------------------------
-# Function: retag_local_images_with_prefix
-# Purpose : Apply a registry prefix to all cached images to mimic the structure
-#           of the private registry prior to pushing.
-# Arguments:
-#   $1 - Registry hostname or namespace prefix
-# Returns :
-#   Returns 0 on success.
+# TODO: load_staged_images() function was removed (unused)
+# Could be useful for air-gapped scenarios. Consider integrating into
+# action_airgap or action_push workflows if image loading is needed.
+# Archived in: rke2nodeinit-unused-functions.sh
 # ------------------------------------------------------------------------------
-retag_local_images_with_prefix() {
-  # Give every locally available image an additional name that includes the private registry host.
-  # This guarantees kubelet/containerd can find the content locally when it asks for
-  # e.g. <regHost>/rancher/mirrored-pause:3.6.
-  local reg_host="$1"
-  [[ -z "$reg_host" ]] && return 0
-
-  # Make a best effort and stay quiet on errors
-  mapfile -t imgs < <(nerdctl --namespace k8s.io images --format '{{.Repository}}:{{.Tag}}' \
-                      | awk '$0 !~ /<none>/' | sort -u)
-  local ref
-  for ref in "${imgs[@]}"; do
-    [[ -z "$ref" ]] && continue
-    case "$ref" in
-      "$reg_host"/*) : ;; # already retagged with prefix
-      *"@sha256:"*)  : ;; # skip digested names
-      *"<none>"*)    : ;; # skip invalid
-      *:*)           nerdctl --namespace k8s.io tag "$ref" "$reg_host/$ref" >/dev/null 2>&1 || true ;;
-      *)             : ;;
-    esac
-  done
-  log INFO "Retagged local images with registry prefix: $reg_host/… (best-effort)."
-}
 
 # ------------------------------------------------------------------------------
-# Function: ensure_hosts_pin
-# Purpose : Ensure /etc/hosts contains an entry mapping the registry hostname to
-#           the provided IP when strict pinning is requested.
-# Arguments:
-#   $1 - Registry hostname
-#   $2 - IPv4 address
-# Returns :
-#   Returns 0 on success.
+# TODO: retag_local_images_with_prefix() function was removed (unused)
+# Could be useful for private registry workflows. Consider integrating with
+# action_push or registry configuration logic if image retagging is needed.
+# Archived in: rke2nodeinit-unused-functions.sh
 # ------------------------------------------------------------------------------
-ensure_hosts_pin() {
-  # Optionally force-resolve a registry name when DNS is not yet populated.
-  local host="$1" ip="$2"
-  [[ -z "$host" || -z "$ip" ]] && return 0
-  if ! grep -qE "^[[:space:]]*${ip[[:space:]]}+${host(\s|$)}" /etc/hosts; then
-    echo "$ip $host" >> /etc/hosts
-    log INFO "Pinned $host → $ip in /etc/hosts"
-  fi
-}
+
+# ------------------------------------------------------------------------------
+# TODO: ensure_hosts_pin() function was removed (unused)
+# Could be useful for offline/air-gapped scenarios when DNS is not available.
+# Consider integrating with registry configuration logic if hostname pinning needed.
+# Archived in: rke2nodeinit-unused-functions.sh
+# ------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
 # Function: write_registries_yaml_with_fallbacks
@@ -2732,6 +3453,9 @@ action_push() {
     log WARN "Using YAML values; CLI flags may be overridden (push)."
   fi
 
+  # Warn if using example default credentials
+  warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+
   ensure_installed zstd
 
   local work="$DOWNLOADS_DIR"
@@ -2830,6 +3554,9 @@ action_image() {
     CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
     CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
   fi
+
+  # Warn if using example default credentials
+  warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
 
   # Resolve cert paths relative to script dir if not absolute
   [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
@@ -2950,6 +3677,10 @@ action_image() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot when complete.
+# Note    : This is a large orchestration function (~200+ lines). For future
+#           maintainability, consider extracting repeated validation/prompt
+#           patterns into helper functions like validate_network_config(),
+#           prompt_for_network_settings(), or generate_rke2_config().
 # ------------------------------------------------------------------------------
 action_server() {
   initialize_action_context false "server"
@@ -2960,6 +3691,7 @@ action_server() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
+  local -a NET_INTERFACES=()
 
   log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -2979,6 +3711,11 @@ action_server() {
   log INFO "Reading configuration from CLI args (if provided)..."
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
+
+  local yaml_has_interfaces=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces=1
+  fi
 
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
@@ -3010,6 +3747,9 @@ action_server() {
     TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
   fi
 
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${server_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3032,6 +3772,8 @@ action_server() {
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domains CSV. Re-enter: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
+
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
   log INFO "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
@@ -3056,6 +3798,48 @@ action_server() {
 
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  local prompt_extra_ifaces=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces )); then
+      prompt_extra_ifaces=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${server_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "server"
+  fi
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
 
   log INFO "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
@@ -3113,7 +3897,11 @@ action_server() {
   chmod 600 /etc/rancher/rke2/config.yaml
   
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
@@ -3140,6 +3928,9 @@ action_server() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot upon success.
+# Note    : Similar to action_server, this orchestrates multiple concerns.
+#           Consider refactoring shared network validation, YAML parsing,
+#           and config generation logic into reusable helpers.
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
@@ -3150,6 +3941,7 @@ action_agent() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
+  local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
   log INFO "Reading configuration from YAML (if provided)..."
@@ -3170,6 +3962,11 @@ action_agent() {
   log INFO "Reading configuration from CLI args (if provided)..."
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
+
+  local yaml_has_interfaces_agent=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces_agent=1
+  fi
 
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
@@ -3200,6 +3997,9 @@ action_agent() {
     URL="${agent_cli[server_url]}"
   fi
 
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${agent_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -3224,6 +4024,8 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+
   log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
   ensure_staged_artifacts
 
@@ -3231,11 +4033,53 @@ action_agent() {
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
+  local prompt_extra_ifaces_agent=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces_agent )); then
+      prompt_extra_ifaces_agent=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${agent_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces_agent=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces_agent )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "agent"
+  fi
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
+
   log INFO "Gathering cluster join information..."
   if [[ -z "$URL" ]]; then
     read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
   fi
-  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+  if [[ -n "$URL" && -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
     read -rp "Enter cluster join token [optional]: " TOKEN || true
   fi
   if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
@@ -3294,7 +4138,11 @@ action_agent() {
   chmod 600 /etc/rancher/rke2/config.yaml
 
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "agent"
@@ -3319,6 +4167,9 @@ action_agent() {
 #   None
 # Returns :
 #   Exits on failure; prompts for reboot upon success.
+# Note    : Shares substantial logic with action_server. Future refactoring
+#           could extract common patterns (YAML parsing, validation, config
+#           generation) to reduce duplication and improve maintainability.
 # ------------------------------------------------------------------------------
 action_add_server() {
   initialize_action_context false "add-server"
@@ -3330,6 +4181,7 @@ action_add_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
+  local -a NET_INTERFACES=()
 
   log INFO "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -3350,6 +4202,11 @@ action_add_server() {
   log INFO "Reading configuration from CLI args (if provided)..."
   local -A add_server_cli=()
   parse_action_cli_args add_server_cli "add-server" "${ACTION_ARGS[@]}"
+
+  local yaml_has_interfaces_add_server=0
+  if [[ -n "$CONFIG_FILE" ]] && yaml_spec_has_list "$CONFIG_FILE" "interfaces"; then
+    yaml_has_interfaces_add_server=1
+  fi
 
   log INFO "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${add_server_cli[hostname]:-}" ]]; then
@@ -3383,6 +4240,9 @@ action_add_server() {
     TLS_SANS_IN="${add_server_cli[tls_sans]}"
     TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
   fi
+
+  collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${add_server_cli[interfaces]:-}"
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
   log INFO "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
@@ -3431,6 +4291,48 @@ action_add_server() {
 
   log INFO "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+
+  local prompt_extra_ifaces_add_server=1
+  if (( ${#NET_INTERFACES[@]} )); then
+    if (( yaml_has_interfaces_add_server )); then
+      prompt_extra_ifaces_add_server=0
+      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+    elif [[ -n "${add_server_cli[interfaces]:-}" ]]; then
+      prompt_extra_ifaces_add_server=0
+      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+    fi
+  fi
+
+  if (( prompt_extra_ifaces_add_server )); then
+    prompt_additional_interfaces NET_INTERFACES "${DNS:-$DEFAULT_DNS}" "add-server"
+  fi
+  merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  if (( ${#NET_INTERFACES[@]} )); then
+    local _iface_summary=""
+    local _encoded
+    for _encoded in "${NET_INTERFACES[@]}"; do
+      local -A _nic_dbg=()
+      if ! interface_decode_entry "$_encoded" _nic_dbg; then
+        log WARN "Skipping invalid interface entry in summary"
+        continue
+      fi
+      local _name_dbg="${_nic_dbg[name]:-<auto>}"
+      local _desc_dbg=""
+      if [[ "${_nic_dbg[dhcp4]:-}" =~ ^([Tt]rue)$ ]]; then
+        _desc_dbg="dhcp4"
+      elif [[ -n "${_nic_dbg[ip]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[ip]}"
+        if [[ -n "${_nic_dbg[prefix]:-}" ]]; then
+          _desc_dbg+="/${_nic_dbg[prefix]}"
+        fi
+      elif [[ -n "${_nic_dbg[cidr]:-}" ]]; then
+        _desc_dbg="${_nic_dbg[cidr]}"
+      fi
+      [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
+      _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
+    done
+    log INFO "Network interfaces prepared: ${_iface_summary}"
+  fi
 
   log INFO "Gathering cluster join information..."
   [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
@@ -3494,7 +4396,11 @@ action_add_server() {
   chmod 600 /etc/rancher/rke2/config.yaml
 
   log INFO "Writing netplan configuration and applying network settings..."
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  if (( ${#NET_INTERFACES[@]} )); then
+    write_netplan --interfaces "${NET_INTERFACES[@]}"
+  else
+    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+  fi
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
@@ -3728,6 +4634,7 @@ action_custom_ca() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
+    --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2
