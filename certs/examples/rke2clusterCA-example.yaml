@@ -1,0 +1,52 @@
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: example-cluster-ca
+  description: Example RKE2 cluster CA configuration
+
+spec:
+  # EXAMPLE CONFIGURATION - UPDATE WITH YOUR VALUES
+  
+  # Path to CA certificate file
+  # This should point to your actual CA certificate
+  caCert: /path/to/certs/rke2ca-cert.crt
+  
+  # Path to CA private key
+  # KEEP THIS SECURE - Never commit to version control
+  caKey: /path/to/certs/rke2ca-cert-key.pem
+  
+  # Optional: Custom subject for server certificates
+  subject:
+    commonName: "rke2-server"
+    organization: "Example Organization"
+    organizationalUnit: "Kubernetes Infrastructure"
+    locality: "City"
+    province: "State"
+    country: "US"
+  
+  # Optional: Certificate validity period (days)
+  validityDays: 365
+  
+  # Optional: Key algorithm and size
+  keyAlgorithm: "RSA"
+  keySize: 4096
+
+---
+# Example for a specific domain/environment
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: production-domain-ca
+  description: Production environment CA
+
+spec:
+  caCert: /etc/rke2/certs/prod-ca.crt
+  caKey: /etc/rke2/certs/prod-ca-key.pem
+  
+  subject:
+    commonName: "production-rke2-cluster"
+    organization: "Your Company"
+    organizationalUnit: "Cloud Infrastructure"
+    locality: "San Francisco"
+    province: "California"
+    country: "US"

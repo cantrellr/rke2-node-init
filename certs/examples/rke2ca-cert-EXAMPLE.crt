@@ -1,0 +1,18 @@
+-----BEGIN CERTIFICATE-----
+EXAMPLE CERTIFICATE - DO NOT USE IN PRODUCTION
+This is a placeholder file for demonstration purposes only.
+
+TO GENERATE A REAL CERTIFICATE:
+1. Install OpenSSL
+2. Generate CA private key first (see rke2ca-cert-key-EXAMPLE.pem)
+3. Run: openssl req -new -x509 -days 3650 \
+     -key rke2ca-cert-key.pem \
+     -out rke2ca-cert.crt \
+     -subj "/CN=Your Organization RKE2 CA/O=Your Organization"
+4. Follow the instructions in certs/README.md
+
+SECURITY WARNING:
+- This is an EXAMPLE certificate for documentation
+- Real certificates should be generated with proper CN and validity
+- See certs/README.md for complete generation instructions
+-----END CERTIFICATE-----
