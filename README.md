@@ -19,6 +19,7 @@
   - [YAML Configuration Reference](#yaml-configuration-reference)
   - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
   - [Network Configuration Strategy](#network-configuration-strategy)
+  - [Multi-Interface Configuration](#multi-interface-configuration)
   - [Logging \& Observability](#logging--observability)
   - [Safety Controls \& Idempotency](#safety-controls--idempotency)
   - [Generated Files \& Directory Layout](#generated-files--directory-layout)
@@ -34,6 +35,7 @@
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
+- **Multi-NIC Aware** – Accepts multiple network interface definitions via YAML, CLI flags, or interactive prompts, skips questions when interfaces are already defined, and renders a consolidated netplan configuration for complex topologies.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
 - **Operational Transparency** – Streams all steps to `logs/` with timestamps and hostnames. Long-running tasks show CLI spinners while stdout remains concise.
 - **Reusable Defaults** – Persistently stores DNS/search defaults and custom CA information so subsequent server/agent runs reuse the captured site context.
@@ -161,8 +163,19 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 # With a manifest
 sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
 
+# Control plane using manifest-provided interfaces (no additional NIC prompt)
+sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-ctrl01.yaml server
+
+# Worker join pulling networking from YAML and overriding the token file via CLI
+sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-work01.yaml agent --token-file /rke2-node-init/outputs/j64manager-ca-bootstrap-token.txt
+
 # Direct action without YAML
 sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
+
+# Multiple interfaces provided via CLI
+sudo ./rke2nodeinit.sh server --hostname ctrl01 \
+  --interface name=eth0 ip=10.0.4.161 prefix=24 gateway=10.0.4.1 dns=10.0.1.34,10.231.1.34 \
+  --interface name=eth1 dhcp4=true
 
 # Print sanitized manifest for auditing
 sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
@@ -179,6 +192,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-y` | Auto-confirm prompts (reboots, legacy runtime cleanup) |
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
 | `--dry-push` | Simulate `push` without contacting the registry |
+| `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
@@ -211,12 +225,13 @@ spec:
 
 **Supported spec keys (highlights):**
 
-- **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`
+- **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`, `interfaces[].{name,ip,prefix,gateway,dns,searchDomains,dhcp4}`
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
+When `spec.interfaces` is supplied, the first entry is treated as the primary adapter and seeds the legacy scalar fields (`ip`, `prefix`, `gateway`, `dns`, `searchDomains`) if they are omitted.
 
 ---
 
@@ -235,6 +250,28 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 - Existing Netplan YAML files are backed up under `/etc/netplan/.backup-<timestamp>/` before being removed.
 - A single authoritative file (`/etc/netplan/99-rke-static.yaml`) is written using the provided IPv4, prefix, gateway, DNS, and search domains.
 - Netplan is applied immediately, and interfaces/routes are logged for post-check analysis.
+
+## Multi-Interface Configuration
+
+- **YAML:** Provide a list under `spec.interfaces` to describe one or more NICs. The first entry becomes the primary interface (legacy `ip/prefix` keys are still honored for backward compatibility). Example:
+
+  ```yaml
+  spec:
+    hostname: ctrl01
+    interfaces:
+      - name: eth0
+        ip: 10.0.4.161
+        prefix: 24
+        gateway: 10.0.4.1
+        dns: ["10.0.1.34", "10.231.1.34"]
+        searchDomains: ["dev.kube", "dev.local"]
+      - name: eth1
+        dhcp4: true
+  ```
+
+- **CLI:** Repeat `--interface` to add additional adapters. Each occurrence consumes key=value tokens until the next flag. Keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`.
+- **Runtime prompts:** When neither YAML nor CLI flags supply interface definitions, the script offers to collect extra NICs interactively. Manifests that already include `spec.interfaces` (or CLI `--interface` entries) run non-interactively with no additional prompts.
+- Netplan output combines all collected interfaces, so `server`, `add-server`, and `agent` modes can stage trunk, storage, or management links in one pass.
 
 ---
 

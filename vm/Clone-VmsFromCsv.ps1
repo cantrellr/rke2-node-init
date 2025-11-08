@@ -402,6 +402,7 @@ foreach ($vmRow in $vmDefinitions) {
   }
   catch {
     # ------------------------------------------------------------------------
+    # ------------------------------------------------------------------------
     # Error handling: Report clone failure and continue to next row
     # ------------------------------------------------------------------------
     Write-Error "Failed to clone VM '$vmName': $_"
