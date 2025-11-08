@@ -1,4 +1,4 @@
-]633;E;sed -n '1,18p' rke2nodeinit.sh;0c4dfb70-ab5f-4dd3-9225-e6467e8fe8ce]633;C#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # If not running under bash, re-exec with bash
 if [ -z "${BASH_VERSION:-}" ]; then
