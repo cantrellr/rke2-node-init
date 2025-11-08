@@ -183,11 +183,9 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 
 ### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `12`) to control the entropy, for example `make token TOKEN_SIZE=24`.
-- Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
+- `make token` generates a base64 token using OpenSSL and saves it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
-- `make token` to print a fresh Base64 token and save it under `outputs/generated-token/token-<timestamp>.txt`. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 
 ## YAML Configuration Reference
 

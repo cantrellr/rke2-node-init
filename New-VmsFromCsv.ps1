@@ -1,4 +1,74 @@
-<#!
+<#
+# ==============================================================================
+# New-VmsFromCsv.ps1
+# ==============================================================================
+#
+#       Version: 1.0
+#       Written by: Ron Cantrell
+#           Github: cantrellr
+#            Email: charlescantrelljr@outlook.com
+#
+# ==============================================================================
+# Purpose:
+#   Provision VMware vSphere VMs from CSV definitions with support for both
+#   template-based deployment and blank VM creation. Automates the complete
+#   VM provisioning workflow including resource allocation, network assignment,
+#   and guest customization.
+#
+# Features:
+#   - Create VMs from templates or build from scratch
+#   - Configure CPU, memory, and disk resources
+#   - Assign to specific clusters, resource pools, and folders
+#   - Apply OS customization specifications
+#   - Set CPU and memory reservations for resource guarantees
+#   - Skip existing VMs to support idempotent operations
+#   - Automatic disk resizing when not using templates
+#
+# Requirements:
+#   - VMware PowerCLI module
+#   - vCenter Server access with VM creation permissions
+#   - Valid CSV file with required columns (see CSV_SCHEMA below)
+#
+# CSV Schema:
+#   Required columns:
+#     VMName              - Unique name for the VM
+#   
+#   Optional columns:
+#     Cluster             - Target cluster name
+#     Datastore           - Datastore for VM files
+#     Network             - Network/port group name
+#     CpuCount            - Number of vCPUs (default: 2)
+#     MemoryGB            - Memory in GB (default: 4)
+#     DiskGB              - Primary disk size in GB (default: 40)
+#     Template            - Source template name (optional)
+#     Folder              - vCenter folder for organization
+#     ResourcePool        - Resource pool assignment
+#     GuestId             - Guest OS identifier (e.g., ubuntu64Guest)
+#     OSCustomizationSpec - Customization spec name
+#     CpuReservationMHz   - CPU reservation in MHz
+#     MemoryReservationGB - Memory reservation in GB
+#
+# Examples:
+#   # Basic usage with credentials prompt
+#   $cred = Get-Credential
+#   .\New-VmsFromCsv.ps1 -CsvPath .\vm-definitions.csv `
+#                        -VCenter vcsa.lab.local `
+#                        -Credential $cred
+#
+#   # Skip VMs that already exist
+#   .\New-VmsFromCsv.ps1 -CsvPath .\vm-definitions.csv `
+#                        -VCenter vcsa.lab.local `
+#                        -Credential $cred `
+#                        -SkipExisting
+#
+# Exit Codes:
+#   0 - Success
+#   1 - CSV file not found
+#   2 - CSV file empty or unreadable
+#   3 - vCenter connection failure
+#   4 - VM creation failure (non-fatal, continues with remaining VMs)
+#
+# ==============================================================================
 .SYNOPSIS
   Provision VMware vSphere VMs from a CSV definition.
 
@@ -7,9 +77,24 @@
     VMName, Cluster, Datastore, Network, CpuCount, MemoryGB, DiskGB, Template,
     Folder, ResourcePool, GuestId, OSCustomizationSpec, CpuReservationMHz, MemoryReservationGB.
 
+.PARAMETER CsvPath
+  Path to the CSV file containing VM definitions. Required.
+
+.PARAMETER VCenter
+  vCenter Server FQDN or IP address. Required.
+
+.PARAMETER Credential
+  PSCredential object for vCenter authentication. Required.
+
+.PARAMETER SkipExisting
+  If specified, skip VMs that already exist instead of failing.
+
 .EXAMPLE
   $cred = Get-Credential
   .\New-VmsFromCsv.ps1 -CsvPath .\vm-template.csv -VCenter vcsa.lab.local -Credential $cred
+
+.EXAMPLE
+  .\New-VmsFromCsv.ps1 -CsvPath .\vms.csv -VCenter vcsa.example.com -Credential $cred -SkipExisting
 #>
 [CmdletBinding()]
 param(
@@ -25,29 +110,64 @@ param(
   [switch]$SkipExisting
 )
 
+# ==============================================================================
+# Module Initialization
+# ==============================================================================
 Import-Module VMware.PowerCLI -ErrorAction Stop
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
+# ==============================================================================
+# Input Validation
+# ==============================================================================
 if (-not (Test-Path -Path $CsvPath -PathType Leaf)) {
   throw "CSV file not found at $CsvPath"
 }
 
+# ==============================================================================
+# vCenter Connection
+# ==============================================================================
 $viserver = Get-VIServer -Server $VCenter -ErrorAction SilentlyContinue
 if (-not $viserver) {
   $viserver = Connect-VIServer -Server $VCenter -Credential $Credential -ErrorAction Stop
 }
 
+# ==============================================================================
+# CSV Import and Validation
+# ==============================================================================
 $vmDefinitions = Import-Csv -Path $CsvPath
 if (-not $vmDefinitions -or $vmDefinitions.Count -eq 0) {
   throw "CSV $CsvPath is empty or unreadable."
 }
 
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Function: Get-StringOrNull
+# Purpose : Safely extract a string value from CSV, returning null if blank or
+#           whitespace-only. Trims leading/trailing whitespace.
+# Arguments:
+#   $Value - Raw string value from CSV column
+# Returns :
+#   Trimmed string or $null if blank/whitespace
+# ------------------------------------------------------------------------------
 function Get-StringOrNull {
   param([string]$Value)
   if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
   return $Value.Trim()
 }
 
+# ------------------------------------------------------------------------------
+# Function: Get-IntOrDefault
+# Purpose : Safely parse an integer value from CSV with fallback to default.
+#           Handles empty strings and invalid integer formats gracefully.
+# Arguments:
+#   $Value   - Raw string value from CSV column
+#   $Default - Fallback integer value if parsing fails
+# Returns :
+#   Parsed integer or default value
+# ------------------------------------------------------------------------------
 function Get-IntOrDefault {
   param(
     [string]$Value,
@@ -59,6 +179,15 @@ function Get-IntOrDefault {
   return $Default
 }
 
+# ------------------------------------------------------------------------------
+# Function: Get-ClusterRootResourcePool
+# Purpose : Retrieve the root resource pool for a given cluster. This is needed
+#           when creating VMs without an explicit resource pool assignment.
+# Arguments:
+#   $Cluster - VMware cluster object
+# Returns :
+#   Root resource pool object or $null if unavailable
+# ------------------------------------------------------------------------------
 function Get-ClusterRootResourcePool {
   param($Cluster)
   if (-not $Cluster) { return $null }
@@ -66,19 +195,31 @@ function Get-ClusterRootResourcePool {
   return Get-ResourcePool -Id $Cluster.ExtensionData.ResourcePool -ErrorAction SilentlyContinue
 }
 
+# ==============================================================================
+# Main VM Provisioning Loop
+# ==============================================================================
 foreach ($vmRow in $vmDefinitions) {
+  # --------------------------------------------------------------------------
+  # Extract and validate VM name (required field)
+  # --------------------------------------------------------------------------
   $vmName = Get-StringOrNull $vmRow.VMName
   if (-not $vmName) {
     Write-Warning "Skipping row with blank VMName."
     continue
   }
 
+  # --------------------------------------------------------------------------
+  # Check if VM already exists (skip if -SkipExisting specified)
+  # --------------------------------------------------------------------------
   if ($SkipExisting -and (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) {
     Write-Host "VM '$vmName' already exists; skipping." -ForegroundColor Yellow
     continue
   }
 
   try {
+    # ------------------------------------------------------------------------
+    # Parse CSV columns into typed values with defaults
+    # ------------------------------------------------------------------------
     $clusterName   = Get-StringOrNull $vmRow.Cluster
     $datastoreName = Get-StringOrNull $vmRow.Datastore
     $networkName   = Get-StringOrNull $vmRow.Network
@@ -88,12 +229,16 @@ foreach ($vmRow in $vmDefinitions) {
     $guestId       = Get-StringOrNull $vmRow.GuestId
     $oscSpecName   = Get-StringOrNull $vmRow.OSCustomizationSpec
 
+    # Resource specifications with sensible defaults
     $cpuCount      = Get-IntOrDefault $vmRow.CpuCount 2
     $memoryGb      = Get-IntOrDefault $vmRow.MemoryGB 4
     $diskGb        = Get-IntOrDefault $vmRow.DiskGB 40
     $cpuResMhz     = Get-IntOrDefault $vmRow.CpuReservationMHz 0
     $memResGb      = Get-IntOrDefault $vmRow.MemoryReservationGB 0
 
+    # ------------------------------------------------------------------------
+    # Resolve vCenter objects from names
+    # ------------------------------------------------------------------------
     $cluster      = if ($clusterName)   { Get-Cluster -Name $clusterName -ErrorAction Stop }        else { $null }
     $datastore    = if ($datastoreName) { Get-Datastore -Name $datastoreName -ErrorAction Stop }    else { $null }
     $folder       = if ($folderName)    { Get-Folder -Name $folderName -ErrorAction Stop }          else { $null }
@@ -101,14 +246,23 @@ foreach ($vmRow in $vmDefinitions) {
     $template     = if ($templateName)  { Get-Template -Name $templateName -ErrorAction Stop }      else { $null }
     $oscSpec      = if ($oscSpecName)   { Get-OSCustomizationSpec -Name $oscSpecName -ErrorAction Stop } else { $null }
 
+    # ------------------------------------------------------------------------
+    # Resolve resource pool from cluster if not explicitly provided
+    # ------------------------------------------------------------------------
     if (-not $resourcePool -and $cluster) {
       $resourcePool = Get-ClusterRootResourcePool $cluster
     }
 
+    # ------------------------------------------------------------------------
+    # Validate required resources based on deployment type
+    # ------------------------------------------------------------------------
     if (-not $template -and -not $resourcePool) {
       throw "ResourcePool (or Cluster resolving to a resource pool) is required when not cloning from a template."
     }
 
+    # ------------------------------------------------------------------------
+    # Build New-VM parameter hash based on template vs. blank deployment
+    # ------------------------------------------------------------------------
     $params = @{
       Name     = $vmName
       NumCPU   = $cpuCount
@@ -116,9 +270,11 @@ foreach ($vmRow in $vmDefinitions) {
     }
 
     if ($template) {
+      # Template-based deployment: clone from template
       $params['Template'] = $template
       if ($datastore) { $params['Datastore'] = $datastore }
     } else {
+      # Blank VM deployment: requires datastore and disk specification
       if (-not $datastore) {
         throw "Datastore is required when creating a VM without a template."
       }
@@ -126,15 +282,22 @@ foreach ($vmRow in $vmDefinitions) {
       $params['DiskGB'] = $diskGb
     }
 
+    # Add optional parameters if provided
     if ($folder)       { $params['Location'] = $folder }
     if ($resourcePool) { $params['ResourcePool'] = $resourcePool }
     if ($guestId)      { $params['GuestId'] = $guestId }
     if ($oscSpec)      { $params['OSCustomizationSpec'] = $oscSpec }
     if ($networkName)  { $params['NetworkName'] = $networkName }
 
+    # ------------------------------------------------------------------------
+    # Create the VM
+    # ------------------------------------------------------------------------
     Write-Host "Creating VM '$vmName'..." -ForegroundColor Cyan
     $newVm = New-VM @params -ErrorAction Stop
 
+    # ------------------------------------------------------------------------
+    # Post-creation: Resize disk if creating blank VM (not from template)
+    # ------------------------------------------------------------------------
     if (-not $template) {
       $primaryDisk = Get-HardDisk -VM $newVm | Select-Object -First 1
       if ($primaryDisk -and [int]$primaryDisk.CapacityGB -ne $diskGb) {
@@ -142,6 +305,9 @@ foreach ($vmRow in $vmDefinitions) {
       }
     }
 
+    # ------------------------------------------------------------------------
+    # Configure resource reservations if specified
+    # ------------------------------------------------------------------------
     if ($cpuResMhz -gt 0 -or $memResGb -gt 0) {
       $resourceParams = @{}
       if ($cpuResMhz -gt 0) { $resourceParams['CpuReservationMhz'] = $cpuResMhz }
@@ -156,4 +322,7 @@ foreach ($vmRow in $vmDefinitions) {
   }
 }
 
+# ==============================================================================
+# Cleanup and Disconnect
+# ==============================================================================
 Disconnect-VIServer -Server $viserver -Confirm:$false | Out-Null
