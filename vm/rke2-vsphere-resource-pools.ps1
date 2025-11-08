@@ -10,7 +10,7 @@
 #   This script automates the creation of a hierarchical folder and resource
 #   pool structure under an existing "Kube.Sites" parent container. It creates
 #   site-level folders (j64, j52, r01) and cluster-level subfolders
-#   (j64manager, j64domain, j52domain, r01domain), then establishes
+#   (dc1manager, dc1domain, dc2domain, dc3domain), then establishes
 #   corresponding resource pools with CPU and memory reservations calculated
 #   with 30% overhead for cluster infrastructure.
 #
@@ -37,10 +37,10 @@
 #     - vCenter credentials (interactive)
 #
 # Resource Allocation Strategy:
-#   j64manager:  28600 MHz CPU, 114 GB memory (7 nodes: 3 ctrl + 4 work)
-#   j64domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
-#   j52domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
-#   r01domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#   dc1manager:  28600 MHz CPU, 114 GB memory (7 nodes: 3 ctrl + 4 work)
+#   dc1domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#   dc2domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#   dc3domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
 #
 #   Calculations based on:
 #     - 3x controller VMs: 4 vCPU, 8 GB RAM each
@@ -51,12 +51,12 @@
 # Folder Structure Created:
 #   Kube.Sites/
 #   ├── j64/
-#   │   ├── j64manager/  (7 VMs: 3 ctrl + 4 work)
-#   │   └── j64domain/   (6 VMs: 3 ctrl + 3 work)
+#   │   ├── dc1manager/  (7 VMs: 3 ctrl + 4 work)
+#   │   └── dc1domain/   (6 VMs: 3 ctrl + 3 work)
 #   ├── j52/
-#   │   └── j52domain/   (6 VMs: 3 ctrl + 3 work)
+#   │   └── dc2domain/   (6 VMs: 3 ctrl + 3 work)
 #   └── r01/
-#       └── r01domain/   (6 VMs: 3 ctrl + 3 work)
+#       └── dc3domain/   (6 VMs: 3 ctrl + 3 work)
 #
 # DRS Anti-Affinity Rules:
 #   - Separate controller VMs across different ESXi hosts
@@ -150,12 +150,12 @@ $r01Folder = Get-Folder -Name "r01" -Location $topFolder
 # Each subfolder will contain controller and worker VMs for one cluster
 # ------------------------------------------------------------------------
 # j64 site has two clusters: manager and domain
-New-Folder -Name "j64manager" -Location $j64Folder -ErrorAction SilentlyContinue
-New-Folder -Name "j64domain" -Location $j64Folder -ErrorAction SilentlyContinue
+New-Folder -Name "dc1manager" -Location $j64Folder -ErrorAction SilentlyContinue
+New-Folder -Name "dc1domain" -Location $j64Folder -ErrorAction SilentlyContinue
 
 # j52 and r01 sites each have one domain cluster
-New-Folder -Name "j52domain" -Location $j52Folder -ErrorAction SilentlyContinue
-New-Folder -Name "r01domain" -Location $r01Folder -ErrorAction SilentlyContinue
+New-Folder -Name "dc2domain" -Location $j52Folder -ErrorAction SilentlyContinue
+New-Folder -Name "dc3domain" -Location $r01Folder -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------------------
 # Optional: Create logical segregation subfolders (currently not used)
@@ -167,21 +167,21 @@ New-Folder -Name "r01domain" -Location $r01Folder -ErrorAction SilentlyContinue
 # ------------------------------------------------------------------------
 <#
 # Optionally, create additional subfolders for logical segregation.
-$j64managerFolder = Get-Folder -Name "j64manager" -Location $j64Folder
-New-Folder -Name "KubeControl" -Location $j64managerFolder -ErrorAction SilentlyContinue
-New-Folder -Name "KubeWorker"  -Location $j64managerFolder -ErrorAction SilentlyContinue
+$dc1managerFolder = Get-Folder -Name "dc1manager" -Location $j64Folder
+New-Folder -Name "KubeControl" -Location $dc1managerFolder -ErrorAction SilentlyContinue
+New-Folder -Name "KubeWorker"  -Location $dc1managerFolder -ErrorAction SilentlyContinue
 
-$j64domainFolder = Get-Folder -Name "j64domain" -Location $j64Folder
-New-Folder -Name "KubeControl" -Location $j64domainFolder -ErrorAction SilentlyContinue
-New-Folder -Name "KubeWorker"  -Location $j64domainFolder -ErrorAction SilentlyContinue
+$dc1domainFolder = Get-Folder -Name "dc1domain" -Location $j64Folder
+New-Folder -Name "KubeControl" -Location $dc1domainFolder -ErrorAction SilentlyContinue
+New-Folder -Name "KubeWorker"  -Location $dc1domainFolder -ErrorAction SilentlyContinue
 
-$j52domainFolder = Get-Folder -Name "j52domain" -Location $j52Folder
-New-Folder -Name "KubeControl" -Location $j52domainFolder -ErrorAction SilentlyContinue
-New-Folder -Name "KubeWorker"  -Location $j52domainFolder -ErrorAction SilentlyContinue
+$dc2domainFolder = Get-Folder -Name "dc2domain" -Location $j52Folder
+New-Folder -Name "KubeControl" -Location $dc2domainFolder -ErrorAction SilentlyContinue
+New-Folder -Name "KubeWorker"  -Location $dc2domainFolder -ErrorAction SilentlyContinue
 
-$r01domainFolder = Get-Folder -Name "r01domain" -Location $r01Folder
-New-Folder -Name "KubeControl" -Location $r01domainFolder -ErrorAction SilentlyContinue
-New-Folder -Name "KubeWorker"  -Location $r01domainFolder -ErrorAction SilentlyContinue
+$dc3domainFolder = Get-Folder -Name "dc3domain" -Location $r01Folder
+New-Folder -Name "KubeControl" -Location $dc3domainFolder -ErrorAction SilentlyContinue
+New-Folder -Name "KubeWorker"  -Location $dc3domainFolder -ErrorAction SilentlyContinue
 #>
 
 # ==============================================================================
@@ -213,7 +213,7 @@ if (-not $r01RP) { $r01RP = New-ResourcePool -Name "r01" -Location $topRP }
 
 # ------------------------------------------------------------------------
 # Resource reservation calculations (30% overhead included):
-# - j64manager: 7 VMs (3 ctrl @ 4vCPU/8GB + 4 work @ 4vCPU/16GB)
+# - dc1manager: 7 VMs (3 ctrl @ 4vCPU/8GB + 4 work @ 4vCPU/16GB)
 #   Base: 28 vCPU * 2600 MHz = 72,800 MHz, 88 GB RAM
 #   With 30% overhead: ~95 GHz CPU, ~114 GB RAM
 #   Reserved: 28,600 MHz CPU, 114 GB RAM
@@ -225,21 +225,21 @@ if (-not $r01RP) { $r01RP = New-ResourcePool -Name "r01" -Location $topRP }
 # ------------------------------------------------------------------------
 
 # Create cluster-level resource pools under j64 site
-New-ResourcePool -Name "j64manager" -Location $j64RP `
+New-ResourcePool -Name "dc1manager" -Location $j64RP `
     -CpuReservationMHz 28600 `
     -MemReservationMB ([math]::Round(114 * 1024))
 
-New-ResourcePool -Name "j64domain" -Location $j64RP `
+New-ResourcePool -Name "dc1domain" -Location $j64RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
 # Create cluster-level resource pool under j52 site
-New-ResourcePool -Name "j52domain" -Location $j52RP `
+New-ResourcePool -Name "dc2domain" -Location $j52RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
 # Create cluster-level resource pool under r01 site
-New-ResourcePool -Name "r01domain" -Location $r01RP `
+New-ResourcePool -Name "dc3domain" -Location $r01RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
@@ -256,8 +256,8 @@ New-ResourcePool -Name "r01domain" -Location $r01RP `
 #   running on the same ESXi host.
 #
 # Arguments:
-#   FolderName - Name of VM folder to search (e.g., "j64manager")
-#   RulePrefix - Prefix for rule naming (e.g., "j64manager")
+#   FolderName - Name of VM folder to search (e.g., "dc1manager")
+#   RulePrefix - Prefix for rule naming (e.g., "dc1manager")
 #
 # Returns:
 #   None (creates DRS rules in vSphere cluster as side effect)
@@ -325,10 +325,10 @@ function Create-DrsRulesForPool {
 # ==============================================================================
 
 # Create anti-affinity rules for each cluster environment
-Create-DrsRulesForPool -FolderName "j64manager" -RulePrefix "j64manager"
-Create-DrsRulesForPool -FolderName "j64domain"  -RulePrefix "j64domain"
-Create-DrsRulesForPool -FolderName "j52domain"  -RulePrefix "j52domain"
-Create-DrsRulesForPool -FolderName "r01domain"  -RulePrefix "r01domain"
+Create-DrsRulesForPool -FolderName "dc1manager" -RulePrefix "dc1manager"
+Create-DrsRulesForPool -FolderName "dc1domain"  -RulePrefix "dc1domain"
+Create-DrsRulesForPool -FolderName "dc2domain"  -RulePrefix "dc2domain"
+Create-DrsRulesForPool -FolderName "dc3domain"  -RulePrefix "dc3domain"
 
 # ==============================================================================
 # Script Complete

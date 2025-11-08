@@ -57,10 +57,10 @@ DRS Anti-Affinity Rules:
     - Workers: VM name contains "work"
 
   Rules are created for these folders:
-    - j64manager
-    - j64domain
-    - j52domain
-    - r01domain
+    - dc1manager
+    - dc1domain
+    - dc2domain
+    - dc3domain
 
 Examples:
   Clone VMs and power them on
@@ -422,8 +422,8 @@ foreach ($vmRow in $vmDefinitions) {
 #   running on the same ESXi host.
 #
 # Arguments:
-#   FolderName - Name of VM folder to search (e.g., "j64manager")
-#   RulePrefix - Prefix for rule naming (e.g., "j64manager")
+#   FolderName - Name of VM folder to search (e.g., "dc1manager")
+#   RulePrefix - Prefix for rule naming (e.g., "dc1manager")
 #
 # Returns:
 #   None (creates DRS rules in vSphere cluster as side effect)
@@ -495,10 +495,10 @@ function Create-DrsRulesForPool {
 # ==============================================================================
 
 # Create anti-affinity rules for each cluster environment
-Create-DrsRulesForPool -FolderName "j64manager" -RulePrefix "j64manager"
-Create-DrsRulesForPool -FolderName "j64domain"  -RulePrefix "j64domain"
-Create-DrsRulesForPool -FolderName "j52domain"  -RulePrefix "j52domain"
-Create-DrsRulesForPool -FolderName "r01domain"  -RulePrefix "r01domain"
+Create-DrsRulesForPool -FolderName "dc1manager" -RulePrefix "dc1manager"
+Create-DrsRulesForPool -FolderName "dc1domain"  -RulePrefix "dc1domain"
+Create-DrsRulesForPool -FolderName "dc2domain"  -RulePrefix "dc2domain"
+Create-DrsRulesForPool -FolderName "dc3domain"  -RulePrefix "dc3domain"
 
 # ==============================================================================
 # Cleanup: Disconnect from vCenter Server

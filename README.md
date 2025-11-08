@@ -164,10 +164,10 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
 
 # Control plane using manifest-provided interfaces (no additional NIC prompt)
-sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-ctrl01.yaml server
+sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-ctrl01.yaml server
 
 # Worker join pulling networking from YAML and overriding the token file via CLI
-sudo ./rke2nodeinit.sh -f clusters/j64manager/j64manager-work01.yaml agent --token-file /rke2-node-init/outputs/j64manager-ca-bootstrap-token.txt
+sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-work01.yaml agent --token-file /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
 
 # Direct action without YAML
 sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-CONFIG_FILE="$SCRIPT_DIR/clusters/j64manager/j64manager-ctrl01.yaml"
+CONFIG_FILE="$SCRIPT_DIR/clusters/dc1manager/dc1manager-ctrl01.yaml"
 
 echo "Testing YAML interface detection..."
 echo "=================================="

@@ -1,7 +1,0 @@
-VMName,Cluster,Datastore,Network,CpuCount,MemoryGB,DiskGB,Template,Folder,ResourcePool,GuestId,OSCustomizationSpec,CpuReservationMHz,MemoryReservationGB
-j64domain-ctrl01,R01_KSR-Tanzu,nfs_nvme,kubes-domain,2,16,40,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0
-j64domain-ctrl02,R01_KSR-Tanzu,nfs_nvme,kubes-domain,2,16,40,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0
-j64domain-ctrl03,R01_KSR-Tanzu,nfs_nvme,kubes-domain,2,16,40,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0
-j64domain-work01,R01_KSR-Tanzu,nfs_nvme,kubes-domain,4,32,60,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0
-j64domain-work02,R01_KSR-Tanzu,nfs_nvme,kubes-domain,4,32,60,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0
-j64domain-work03,R01_KSR-Tanzu,nfs_nvme,kubes-domain,4,32,60,,Kube.Control,Kube.Control,ubuntu64Guest,,0,0

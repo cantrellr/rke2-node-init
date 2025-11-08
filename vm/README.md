@@ -93,10 +93,10 @@ $cred = Get-Credential
 - **Optional**: `Cluster`, `VMHost`, `ResourcePool`, `Datastore`, `Folder`, `Network`, `CpuCount`, `MemoryGB`, `DiskGB`, `OSCustomizationSpec`, `PowerOn`
 
 **DRS Anti-Affinity Rules**: Automatically creates rules for these folders:
-- `j64manager`
-- `j64domain`
-- `j52domain`
-- `r01domain`
+- `dc1manager`
+- `dc1domain`
+- `dc2domain`
+- `dc3domain`
 
 ---
 
@@ -114,16 +114,16 @@ $cred = Get-Credential
 ```
 Kube.Sites/
 ├── j64/
-│   ├── j64manager/ (7 VMs: 3 ctrl + 4 work)
-│   └── j64domain/  (6 VMs: 3 ctrl + 3 work)
+│   ├── dc1manager/ (7 VMs: 3 ctrl + 4 work)
+│   └── dc1domain/  (6 VMs: 3 ctrl + 3 work)
 ├── j52/
-│   └── j52domain/  (6 VMs: 3 ctrl + 3 work)
+│   └── dc2domain/  (6 VMs: 3 ctrl + 3 work)
 └── r01/
-    └── r01domain/  (6 VMs: 3 ctrl + 3 work)
+    └── dc3domain/  (6 VMs: 3 ctrl + 3 work)
 ```
 
 **Resource Allocations** (30% overhead included):
-- **j64manager**: 28,600 MHz CPU, 114 GB RAM
+- **dc1manager**: 28,600 MHz CPU, 114 GB RAM
 - **Other domains**: 23,400 MHz CPU, 94 GB RAM
 
 **Usage**:
@@ -209,13 +209,13 @@ Get-DrsRule -Cluster "R01_Kubernetes" | Where-Object { $_.Name -match "j64|j52|r
 
 ### VM Naming Convention
 Scripts use pattern matching to identify VM roles:
-- **Controllers**: VM name contains `ctrl` (e.g., `j64manager-ctrl01`)
-- **Workers**: VM name contains `work` (e.g., `j64manager-work01`)
+- **Controllers**: VM name contains `ctrl` (e.g., `dc1manager-ctrl01`)
+- **Workers**: VM name contains `work` (e.g., `dc1manager-work01`)
 
 ### Resource Pool Strategy
 Resource pools are calculated with 30% overhead for Kubernetes infrastructure:
 
-**Calculation Example (j64manager)**:
+**Calculation Example (dc1manager)**:
 - Base: 7 VMs (3 ctrl @ 4vCPU/8GB + 4 work @ 4vCPU/16GB)
 - vCPU total: 28 vCPU × 2,600 MHz = 72,800 MHz
 - Memory total: (3 × 8) + (4 × 16) = 88 GB
@@ -234,9 +234,9 @@ Resource pools are calculated with 30% overhead for Kubernetes infrastructure:
 # Create CSV with cluster definitions
 $csv = @"
 VMName,SourceVM,Cluster,Folder,Network,CpuCount,MemoryGB,DiskGB
-j64manager-ctrl01,rke2-ubuntu-template,R01_Kubernetes,j64manager,VM Network,4,8,60
-j64manager-ctrl02,rke2-ubuntu-template,R01_Kubernetes,j64manager,VM Network,4,8,60
-j64manager-work01,rke2-ubuntu-template,R01_Kubernetes,j64manager,VM Network,4,16,100
+dc1manager-ctrl01,rke2-ubuntu-template,R01_Kubernetes,dc1manager,VM Network,4,8,60
+dc1manager-ctrl02,rke2-ubuntu-template,R01_Kubernetes,dc1manager,VM Network,4,8,60
+dc1manager-work01,rke2-ubuntu-template,R01_Kubernetes,dc1manager,VM Network,4,16,100
 "@ | Out-File -FilePath cluster.csv -Encoding UTF8
 
 # Clone and power on
@@ -286,8 +286,8 @@ $cred = Get-Credential
 DRS (Distributed Resource Scheduler) anti-affinity rules ensure high availability by preventing VMs from running on the same ESXi host.
 
 ### Rule Naming Convention
-- **Controllers**: `<cluster>_Controllers` (e.g., `j64manager_Controllers`)
-- **Workers**: `<cluster>_Workers` (e.g., `j64manager_Workers`)
+- **Controllers**: `<cluster>_Controllers` (e.g., `dc1manager_Controllers`)
+- **Workers**: `<cluster>_Workers` (e.g., `dc1manager_Workers`)
 
 ### How It Works
 1. Scripts scan designated folders for VMs
@@ -298,10 +298,10 @@ DRS (Distributed Resource Scheduler) anti-affinity rules ensure high availabilit
 4. Rules use `KeepTogether=$false` to enforce separation
 
 ### Supported Clusters
-- `j64manager`
-- `j64domain`
-- `j52domain`
-- `r01domain`
+- `dc1manager`
+- `dc1domain`
+- `dc2domain`
+- `dc3domain`
 
 ### Manual Rule Verification
 ```powershell
@@ -309,10 +309,10 @@ DRS (Distributed Resource Scheduler) anti-affinity rules ensure high availabilit
 Get-DrsRule -Cluster "R01_Kubernetes"
 
 # Check specific rule details
-Get-DrsRule -Name "j64manager_Controllers" -Cluster "R01_Kubernetes" | Format-List
+Get-DrsRule -Name "dc1manager_Controllers" -Cluster "R01_Kubernetes" | Format-List
 
 # Verify VMs in a rule
-(Get-DrsRule -Name "j64manager_Controllers" -Cluster "R01_Kubernetes").VM
+(Get-DrsRule -Name "dc1manager_Controllers" -Cluster "R01_Kubernetes").VM
 ```
 
 ---
@@ -340,7 +340,7 @@ Get-DrsRule -Name "j64manager_Controllers" -Cluster "R01_Kubernetes" | Format-Li
 **Solution**: 
 ```powershell
 # Verify VM folder location
-Get-VM -Name "j64manager-ctrl01" | Select-Object Name, Folder
+Get-VM -Name "dc1manager-ctrl01" | Select-Object Name, Folder
 
 # Check DRS is enabled
 Get-Cluster -Name "R01_Kubernetes" | Select-Object Name, DrsEnabled

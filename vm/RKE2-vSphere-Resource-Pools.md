@@ -8,19 +8,19 @@ Documentation & Notes
   – VMs must follow a naming convention that includes “ctrl” for controllers and “work” for workers.
   – PowerCLI is installed and loaded.
   – The CSV requirements remain:
-      • j64manager: 22 vCPUs / 88 GB → with 30% overhead becomes ~28.6 vCPUs (28600 MHz) and ~114 GB memory.
-      • j64domain, j52domain, r01domain: 18 vCPUs / 72 GB → with 30% overhead becomes ~23.4 vCPUs (23400 MHz) and ~94 GB memory.
+      • dc1manager: 22 vCPUs / 88 GB → with 30% overhead becomes ~28.6 vCPUs (28600 MHz) and ~114 GB memory.
+      • dc1domain, dc2domain, dc3domain: 18 vCPUs / 72 GB → with 30% overhead becomes ~23.4 vCPUs (23400 MHz) and ~94 GB memory.
 
 • Script Structure:
   1. Prompts for vCenter details and logs into vCenter.
   2. Verifies the existence of the top-level folder (“Kube.Sites”) and resource pool (“Kube.Sites”) in the specified datacenter and cluster.
   3. Under “Kube.Sites,” it creates site folders (j64, j52, r01) and the subordinate subfolders:
-       - Under j64, creates “j64manager” and “j64domain”.
-       - Under j52 creates “j52domain”.
-       - Under r01 creates “r01domain”.
+       - Under j64, creates “dc1manager” and “dc1domain”.
+       - Under j52 creates “dc2domain”.
+       - Under r01 creates “dc3domain”.
      Additionally, optional subfolders “KubeControl” and “KubeWorker” are created within each cluster folder.
   4. The script then verifies the top-level resource pool “Kube.Sites” exists in the cluster and creates corresponding site resource pools (j64, j52, r01) under it.
-  5. Under the site resource pools, the script creates subordinate resource pools (j64manager, j64domain, j52domain, r01domain) using the calculated CPU and memory reservations.
+  5. Under the site resource pools, the script creates subordinate resource pools (dc1manager, dc1domain, dc2domain, dc3domain) using the calculated CPU and memory reservations.
   6. A helper function is used to search the appropriate folder for VMs (by name pattern) and then generate DRS anti-affinity rules to separate controllers and workers.
 
 ───────────────────────────────  
@@ -53,19 +53,19 @@ The total available CPU across the four hosts is roughly 4 × 94,500 MHz = 378,0
 
 Based on the CSV:
   
-• j64manager (controllers + workers):  
+• dc1manager (controllers + workers):  
  – vCPU count: 3 controllers × 2 + 4 workers × 4 = 6 + 16 = 22  
  – Memory: 3 × 8 GB + 4 × 16 GB = 24 + 64 = 88 GB
 
-• j64domain:  
+• dc1domain:  
  – vCPU count: 3 controllers × 2 + 3 workers × 4 = 6 + 12 = 18  
  – Memory: 3 × 8 + 3 × 16 = 24 + 48 = 72 GB
 
-• j52domain:  
+• dc2domain:  
  – vCPU count: 18 (same formula as above)  
  – Memory: 72 GB
 
-• r01domain:  
+• dc3domain:  
  – vCPU count: 18  
  – Memory: 72 GB
 
@@ -74,12 +74,12 @@ Based on the CSV:
 
 To “reserve” 30% more for each resource pool than the actual VM requirements, we multiply the totals by 1.3.
 
-a) j64manager Resource Pool  
+a) dc1manager Resource Pool  
  - CPU: 22 vCPUs × 1.3 ≈ 28.6 vCPUs  
   Using our baseline (1,000 MHz per vCPU), that’s about 28,600 MHz  
  - Memory: 88 GB × 1.3 ≈ 114.4 GB (approximately 114 GB)
 
-b) j64domain, j52domain, and r01domain Resource Pools (each)  
+b) dc1domain, dc2domain, and dc3domain Resource Pools (each)  
  - CPU: 18 vCPUs × 1.3 = 23.4 vCPUs → approximately 23,400 MHz  
  - Memory: 72 GB × 1.3 = 93.6 GB (approximately 94 GB)
 
@@ -96,14 +96,14 @@ New-Folder -Name "j64" -Location "DatacenterName"
 New-Folder -Name "j52" -Location "DatacenterName"
 New-Folder -Name "r01" -Location "DatacenterName"
 
-New-Folder -Name "j64manager" -Location (Get-Folder -Name "j64")
-New-Folder -Name "j64domain" -Location (Get-Folder -Name "j64")
-New-Folder -Name "j52domain" -Location (Get-Folder -Name "j52")
-New-Folder -Name "r01domain" -Location (Get-Folder -Name "r01")
+New-Folder -Name "dc1manager" -Location (Get-Folder -Name "j64")
+New-Folder -Name "dc1domain" -Location (Get-Folder -Name "j64")
+New-Folder -Name "dc2domain" -Location (Get-Folder -Name "j52")
+New-Folder -Name "dc3domain" -Location (Get-Folder -Name "r01")
 
 # Optionally, add subfolders for KubeControl and KubeWorker if desired.
-New-Folder -Name "KubeControl" -Location (Get-Folder -Name "j64manager")
-New-Folder -Name "KubeWorker"  -Location (Get-Folder -Name "j64manager")
+New-Folder -Name "KubeControl" -Location (Get-Folder -Name "dc1manager")
+New-Folder -Name "KubeWorker"  -Location (Get-Folder -Name "dc1manager")
 
 # 2. Create Resource Pools with Updated Reservations
 # Note: The CPU reservation values are in MHz; 1 vCPU ≈ 1000 MHz (adjust if needed)
@@ -111,23 +111,23 @@ New-Folder -Name "KubeWorker"  -Location (Get-Folder -Name "j64manager")
 # Example: Assume a cluster named 'YourClusterName' is being used across the sites.
 $cluster = Get-Cluster -Name "YourClusterName"
 
-# j64manager: 28,600 MHz CPU and ~114 GB Memory 
-New-ResourcePool -Name "j64manager" -Location $cluster `
+# dc1manager: 28,600 MHz CPU and ~114 GB Memory 
+New-ResourcePool -Name "dc1manager" -Location $cluster `
   -CpuReservationMHz 28600 `
   -MemReservationMB ([math]::Round(114 * 1024))  # Convert GB to MB
 
-# j64domain: 23,400 MHz CPU and ~94 GB Memory
-New-ResourcePool -Name "j64domain" -Location $cluster `
+# dc1domain: 23,400 MHz CPU and ~94 GB Memory
+New-ResourcePool -Name "dc1domain" -Location $cluster `
   -CpuReservationMHz 23400 `
   -MemReservationMB ([math]::Round(94 * 1024))
 
-# j52domain: 23,400 MHz CPU and ~94 GB Memory
-New-ResourcePool -Name "j52domain" -Location $cluster `
+# dc2domain: 23,400 MHz CPU and ~94 GB Memory
+New-ResourcePool -Name "dc2domain" -Location $cluster `
   -CpuReservationMHz 23400 `
   -MemReservationMB ([math]::Round(94 * 1024))
 
-# r01domain: 23,400 MHz CPU and ~94 GB Memory
-New-ResourcePool -Name "r01domain" -Location $cluster `
+# dc3domain: 23,400 MHz CPU and ~94 GB Memory
+New-ResourcePool -Name "dc3domain" -Location $cluster `
   -CpuReservationMHz 23400 `
   -MemReservationMB ([math]::Round(94 * 1024))
 ```
@@ -135,23 +135,23 @@ New-ResourcePool -Name "r01domain" -Location $cluster `
 ───────────────────────────────  
 5. VM/Host Anti-Affinity Rules (DRS Rules)
 
-To keep controllers and workers separate on ESXi hosts, you can create anti-affinity (or “separation”) rules. For instance, for the j64manager resource pool:
+To keep controllers and workers separate on ESXi hosts, you can create anti-affinity (or “separation”) rules. For instance, for the dc1manager resource pool:
 
 ```powershell
-# Retrieve the VMs in the j64manager folder
-$ctrlVMs = Get-VM -Location (Get-Folder -Name "j64manager") | Where-Object { $_.Name -match "ctrl" }
-$workerVMs = Get-VM -Location (Get-Folder -Name "j64manager") | Where-Object { $_.Name -match "work" }
+# Retrieve the VMs in the dc1manager folder
+$ctrlVMs = Get-VM -Location (Get-Folder -Name "dc1manager") | Where-Object { $_.Name -match "ctrl" }
+$workerVMs = Get-VM -Location (Get-Folder -Name "dc1manager") | Where-Object { $_.Name -match "work" }
 
 # Create VM groups and an anti-affinity rule.
-New-DrsRule -Name "j64manager_Controllers" -VM $ctrlVMs -Cluster $cluster -KeepTogether:$false
-New-DrsRule -Name "j64manager_Workers" -VM $workerVMs -Cluster $cluster -KeepTogether:$false
+New-DrsRule -Name "dc1manager_Controllers" -VM $ctrlVMs -Cluster $cluster -KeepTogether:$false
+New-DrsRule -Name "dc1manager_Workers" -VM $workerVMs -Cluster $cluster -KeepTogether:$false
 
 # Create a separation (anti-affinity) rule to ensure controllers and workers are placed on separate hosts.
-New-DrsRule -Name "j64manager_NoMix" -VM ($ctrlVMs + $workerVMs) `
+New-DrsRule -Name "dc1manager_NoMix" -VM ($ctrlVMs + $workerVMs) `
     -Cluster $cluster -Enabled $true -Type SeparateVMHosts
 ```
 
-You would replicate similar steps for the other Resource Pools: j64domain, j52domain, and r01domain.
+You would replicate similar steps for the other Resource Pools: dc1domain, dc2domain, and dc3domain.
 
 ───────────────────────────────  
 6. Logical Overview Diagram
@@ -168,10 +168,10 @@ graph TD
     B --> C
     B --> D
     B --> E
-    C --> F[j64manager]
-    C --> G[j64domain]
-    D --> H[j52domain]
-    E --> I[r01domain]
+    C --> F[dc1manager]
+    C --> G[dc1domain]
+    D --> H[dc2domain]
+    E --> I[dc3domain]
     F --> J[KubeControl]
     F --> K[KubeWorker]
     G --> L[KubeControl]
@@ -185,24 +185,24 @@ graph TD
 For Resource Pools, the hierarchy is similar:
 • Top-level resource pool: Kube.Sites  
    ├── j64  
-   │    ├── j64manager (28600 MHz CPU & 114GB mem)  
-   │    └── j64domain (23400 MHz CPU & 94GB mem)  
+   │    ├── dc1manager (28600 MHz CPU & 114GB mem)  
+   │    └── dc1domain (23400 MHz CPU & 94GB mem)  
    ├── j52  
-   │    └── j52domain (23400 MHz CPU & 94GB mem)  
+   │    └── dc2domain (23400 MHz CPU & 94GB mem)  
    └── r01  
-        └── r01domain (23400 MHz CPU & 94GB mem)
+        └── dc3domain (23400 MHz CPU & 94GB mem)
 
 ──────────────────────────────
 Summary
 ──────────────────────────────
 
 • The original VM resource totals for each pool were calculated as:  
-  – j64manager: 22 vCPUs and 88 GB memory  
-  – j64domain, j52domain, r01domain: 18 vCPUs and 72 GB memory
+  – dc1manager: 22 vCPUs and 88 GB memory  
+  – dc1domain, dc2domain, dc3domain: 18 vCPUs and 72 GB memory
 
 • To account for a 30% overhead reservation, multiply these figures by 1.3:  
-  – j64manager becomes roughly 28.6 vCPUs (≈28,600 MHz) and 114 GB memory  
-  – Each of j64domain, j52domain, and r01domain becomes roughly 23.4 vCPUs (≈23,400 MHz) and 94 GB memory
+  – dc1manager becomes roughly 28.6 vCPUs (≈28,600 MHz) and 114 GB memory  
+  – Each of dc1domain, dc2domain, and dc3domain becomes roughly 23.4 vCPUs (≈23,400 MHz) and 94 GB memory
 
 • With the host capacities (after reserving 30% for the host OS/hypervisor), the available CPU and Memory across each Dell PowerEdge MX760c are:  
   – For r01ex241 and r01ex242: 94,500 MHz CPU and roughly 1,434 GB memory  
@@ -211,6 +211,6 @@ Summary
 • This script:
   - Prompts for vCenter connection details and logs in.
   - Verifies that "Kube.Sites" exists as both a folder (in the datacenter) and a resource pool (in the cluster). If not present, the script exits with an error.
-  - Creates the subordinate site folders (j64, j52, r01) below "Kube.Sites", as well as subfolders (j64manager, j64domain, j52domain, r01domain) and further optional logical subdivision ("KubeControl" and "KubeWorker").
+  - Creates the subordinate site folders (j64, j52, r01) below "Kube.Sites", as well as subfolders (dc1manager, dc1domain, dc2domain, dc3domain) and further optional logical subdivision ("KubeControl" and "KubeWorker").
   - Creates a matching resource pool hierarchy with the calculated reservations.
   - Creates DRS anti-affinity rules to ensure that VMs with “ctrl” and “work” naming are kept on separate hosts.
