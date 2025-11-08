@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+]633;E;sed -n '1,18p' rke2nodeinit.sh;0c4dfb70-ab5f-4dd3-9225-e6467e8fe8ce]633;C#!/usr/bin/env bash
 #
 # If not running under bash, re-exec with bash
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.7d (preprod)
+#       Version: 0.8a (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -28,44 +28,91 @@ esac
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
-#   Rancher RKE2 Kubernetes deployment using official RKE2 Rancher images.
+#   Rancher RKE2 Kubernetes deployment using official RKE2 Rancher images with support for
+#   multi-interface networking configurations.
 #
 # Actions:
-#   1) push   - Tag and push preloaded images into a private registry (nerdctl only)
-#   2) image  - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
-#   3) server - Configure network/hostname and install rke2-server (offline)
-#   4) agent  - Configure network/hostname and install rke2-agent  (offline)
-#   5) verify - Check that node prerequisites are in place
-#   6) airgap - Run 'image' without reboot and power off the machine for templating
-#   7) label-node - Apply Kubernetes labels to an RKE2 node
-#   8) taint-node - Apply Kubernetes taints to an RKE2 node
+#   1) push         - Tag and push preloaded images into a private registry (nerdctl)
+#   2) image        - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
+#   3) server       - Configure multi-interface network, hostname, and install rke2-server (offline)
+#   4) add-server   - Add additional control-plane node to existing cluster (offline)
+#   5) agent        - Configure multi-interface network, hostname, and install rke2-agent (offline)
+#   6) verify       - Check that node prerequisites are in place without making changes
+#   7) airgap       - Run 'image' without reboot and power off the machine for templating
+#   8) label-node   - Apply Kubernetes labels to an RKE2 node
+#   9) taint-node   - Apply Kubernetes taints to an RKE2 node
+#  10) custom-ca    - Generate first-server token from custom CA specified in YAML
 #
 # Connectivity expectations:
-#   - image is the only action that requires Internet access in order to gather
-#     artifacts. It should be run from a host with outbound connectivity.
-#   - push, server, add-server, agent, verify, and airgap are intended to run fully
-#     offline and do not initiate Internet access.
+#   - image is the ONLY action that requires Internet access to gather artifacts
+#   - All other actions (push, server, add-server, agent, verify, label-node, 
+#     taint-node, custom-ca) are designed to run fully offline
 #
-# Major changes vs previous:
-#   - Runtime install caches official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
-#     Only used as a standby CRI/O runtime if the RKE2-installed containerd fails.
-#   - Uses standalone nerdctl binary for image operations (no Docker dependency).
-#     Only used as a standby CLI if RKE2-installed nerdctl fails.  
-#   - Fixed verify() return code logic so success returns 0.
-#   - Added progress indicators + extra logging for downloads and binary installs.
-#   - Hardened Netplan so old IP/GW don’t return after reboot (cloud-init disabled; old YAMLs removed).
+# Key features in this version:
+#   - Multi-interface networking: Configure multiple NICs with static IPs or DHCP
+#   - Deferred netplan application: Network changes apply on reboot (use --apply-netplan-now to override)
+#   - Enhanced RKE2 config support: node-ip, bind-address, advertise-address, and more
+#   - Custom CA integration: Support for custom cluster certificates
+#   - Node management: Label and taint nodes via kubectl integration
+#   - Offline-first design: All artifacts cached locally for air-gapped deployments
+#   - Progress indicators: Spinner feedback for long-running operations
+#   - YAML-driven configuration: apiVersion rkeprep/v1 with comprehensive spec options
 #
-# Safety:
-#   - set -Eeuo pipefail
-#   - global ERR trap emits line number
-#   - root check
-#   - strong input validation for IP/prefix/DNS/search
+# Major architectural improvements:
+#   - Multi-interface support via YAML spec.interfaces[] or --interface CLI args
+#   - Network configuration deferred to reboot by default (safer for remote operations)
+#   - Enhanced YAML parsing with Python fallback for complex nested structures
+#   - Automatic primary interface detection when name not specified
+#   - Support for per-interface DNS, search domains, MTU, and routing metrics
+#   - Custom CA certificate installation and trust chain management
+#   - Token generation with embedded CA fingerprints for secure cluster joins
+#   - Comprehensive prerequisite validation (verify action)
 #
-# YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, CustomCA|Custom-CA|customca|custom-CA|custom-ca
+# Safety features:
+#   - set -Eeuo pipefail (fail fast on errors)
+#   - Global ERR trap with line number reporting
+#   - Root privilege enforcement
+#   - Strong input validation for IP addresses, CIDR prefixes, DNS, and search domains
+#   - CRLF (Windows line ending) detection and rejection
+#   - Credential masking in sanitized YAML output
+#   - Warning for default/example credentials
+#
+# YAML configuration (apiVersion: rkeprep/v1):
+#   Supported kinds: Push, Image, Server, AddServer, Agent, Verify, Airgap, CustomCA
+#   Required: metadata.name for all configurations
+#   Multi-interface syntax:
+#     spec.interfaces:
+#       - name: eth0
+#         ip: 10.0.0.5
+#         prefix: 24
+#         gateway: 10.0.0.1
+#         dns: [8.8.8.8, 8.8.4.4]
+#         searchDomains: [example.com]
+#       - name: eth1
+#         dhcp4: true
+#
+# CLI flags:
+#   -f FILE               YAML config file (apiVersion: rkeprep/v1)
+#   -v VERSION            RKE2 version tag (e.g., v1.34.1+rke2r1)
+#   -r REGISTRY           Private registry (host[/namespace])
+#   -u USER               Registry username
+#   -p PASS               Registry password
+#   -n NAME               Node name for label-node/taint-node (defaults to hostname)
+#   -y                    Auto-confirm prompts (reboots, cleanup)
+#   -P                    Print sanitized YAML (masks secrets)
+#   -h                    Show help
+#   --dry-push            Simulate registry push without actually pushing
+#   --apply-netplan-now   Apply netplan immediately instead of deferring to reboot
+#   --node-name NAME      Alias for -n (node name)
+#   --interface ...       Define interface via CLI (name=X ip=X prefix=X gateway=X dns=X search=X)
 #
 # Exit codes:
-#   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
+#   0 = success
+#   1 = usage error / invalid arguments
+#   2 = missing prerequisites / validation failure
+#   3 = missing required data / artifacts
+#   4 = registry authentication failure
+#   5 = YAML parsing or validation issues
 # ----------------------------------------------------------------------------------------------
 
 set -Eeuo pipefail
@@ -103,6 +150,7 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -174,6 +222,7 @@ Options:
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
   --dry-push  Do not actually push images to registry (simulate only)
+  --apply-netplan-now  Apply netplan immediately instead of deferring until reboot
   --interface name=eth1 ip=10.0.0.5 prefix=24 [gateway=...] [dns=...] [search=...]
               Repeatable. Defines one network interface for server/agent/add-server
               actions. Supply multiple key=value tokens after the flag; omit name
@@ -630,7 +679,7 @@ append_spec_config_extras() {
     "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
-    "enable-servicelb"
+    "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
 
   local k v
@@ -911,10 +960,167 @@ detect_primary_interface() {
 }
 
 # ------------------------------------------------------------------------------
-# TODO: yaml_spec_interfaces() function was removed (unused, redundant)
-# The functionality is handled by yaml_spec_get in collect_interface_specs.
-# Archived in: rke2nodeinit-unused-functions.sh
+# Function: yaml_spec_interfaces
+# Purpose : Extract spec.interfaces entries from YAML as encoded NIC strings.
+# Arguments:
+#   $1 - Path to YAML configuration file
+# Returns :
+#   Prints encoded interface strings to stdout (one per line)
 # ------------------------------------------------------------------------------
+yaml_spec_interfaces() {
+  local _file="$1"
+  [[ -z "$_file" || ! -f "$_file" ]] && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not available; skipping spec.interfaces parsing for $_file"
+    return 0
+  fi
+  python3 - "$_file" <<'PY'
+import re
+import sys
+
+file_path = sys.argv[1]
+try:
+    with open(file_path, encoding='utf-8') as fh:
+        lines = fh.readlines()
+except FileNotFoundError:
+    sys.exit(0)
+except Exception as e:
+    # Log error to stderr and exit gracefully
+    print(f"Error reading YAML file: {e}", file=sys.stderr)
+    sys.exit(0)
+
+def strip_quotes(value: str) -> str:
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return value[1:-1]
+    if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+items = []
+in_spec = False
+interfaces_indent = None
+current = None
+current_indent = None
+last_list_key = None
+last_list_indent = None
+
+def flush_current():
+    global current
+    if current is not None:
+        items.append(current)
+        current = None
+
+for raw in lines:
+    line = raw.rstrip('\n')
+    if not in_spec:
+        if re.match(r'^\s*spec\s*:\s*$', line):
+            in_spec = True
+        continue
+
+    if interfaces_indent is None:
+        if re.match(r'^\s*interfaces\s*:\s*$', line):
+            interfaces_indent = len(line) - len(line.lstrip(' '))
+        elif re.match(r'^\S', line):
+            break
+        continue
+
+    if re.match(r'^\S', line):
+        flush_current()
+        break
+
+    if not line.strip() or line.lstrip().startswith('#'):
+        continue
+
+    indent = len(line) - len(line.lstrip(' '))
+    
+    # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
+    # This must be checked before dash_match to avoid treating sibling list items as interface items
+    if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
+        flush_current()
+        break
+
+    dash_match = re.match(r'^\s*-\s*(.*)$', line)
+    if dash_match:
+        rest = dash_match.group(1).strip()
+        if current is not None and indent > (current_indent or interfaces_indent) and last_list_key:
+            value = strip_quotes(rest)
+            current.setdefault(last_list_key, []).append(value)
+            continue
+        flush_current()
+        current = {}
+        current_indent = indent
+        last_list_key = None
+        if rest:
+            key, _, value = rest.partition(':')
+            key = key.strip()
+            value = value.strip()
+            value = re.sub(r'\s+#.*$', '', value)
+            if value == '':
+                last_list_key = key
+                last_list_indent = indent
+                current.setdefault(key, [])
+            else:
+                value = strip_quotes(value)
+                if value.startswith('[') and value.endswith(']'):
+                    inner = value[1:-1]
+                    if inner.strip():
+                        current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                    else:
+                        current[key] = []
+                else:
+                    current[key] = value
+        continue
+
+    if current is None:
+        continue
+
+    key_value = re.match(r'^\s*([^:#]+):\s*(.*)$', line)
+    if key_value:
+        key = key_value.group(1).strip()
+        value = key_value.group(2).strip()
+        value = re.sub(r'\s+#.*$', '', value)
+        if value == '':
+            last_list_key = key
+            last_list_indent = indent
+            current.setdefault(key, [])
+        else:
+            last_list_key = None
+            value = strip_quotes(value)
+            if value.startswith('[') and value.endswith(']'):
+                inner = value[1:-1]
+                if inner.strip():
+                    current[key] = [strip_quotes(v.strip()) for v in inner.split(',')]
+                else:
+                    current[key] = []
+            else:
+                current[key] = value
+        continue
+
+    list_item = re.match(r'^\s*-\s*(.*)$', line)
+    if list_item and last_list_key and indent > (last_list_indent or interfaces_indent):
+        value = strip_quotes(list_item.group(1).strip())
+        current.setdefault(last_list_key, []).append(value)
+        continue
+
+flush_current()
+
+try:
+    for item in items:
+        parts = []
+        for key, value in item.items():
+            if isinstance(value, list):
+                if value:  # Only include non-empty lists
+                    parts.append(f"{key}=" + ",".join(value))
+            else:
+                parts.append(f"{key}={value}")
+        if parts:
+            print("|".join(parts))
+except Exception as e:
+    # Log error to stderr and exit gracefully without breaking the shell script
+    print(f"Error processing interface data: {e}", file=sys.stderr)
+    sys.exit(0)
+PY
+}
 
 # Merge interfaces defined in YAML and CLI blobs into an array supplied by name.
 collect_interface_specs() {
@@ -1811,7 +2017,12 @@ write_netplan_multi() {
   chmod 600 "$_tmp"
   log INFO "Netplan written to $_tmp (primary=$_primary_nic; interfaces=${_summary})"
 
-  apply_netplan_now || true
+  if (( APPLY_NETPLAN_NOW )); then
+    log INFO "Applying netplan immediately (--apply-netplan-now flag set)..."
+    apply_netplan_now || true
+  else
+    log INFO "Netplan will be applied on next reboot. Use --apply-netplan-now to apply immediately."
+  fi
 
   local _iface
   for _iface in "${_ifaces[@]}"; do
@@ -4357,6 +4568,7 @@ action_custom_ca() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
+    --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2

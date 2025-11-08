@@ -1,0 +1,53 @@
+apiVersion: rkeprep/v1
+kind: Server
+metadata:
+  name: cotpa-ctrl01
+spec:
+  hostname: cotpa-ctrl01
+  token: K100d52bb8e82c63eb2a0e978dd4ccc92333bc6f407aa301c0064139ab2383b465f::server:3182b19e41fb7731076433b4f11571aea11e2e4a
+  interfaces:
+    # Primary
+    - name: eth0
+      ip: 10.0.69.60
+      prefix: 27
+      gateway: 10.0.69.33
+      dns: ["172.16.69.71", "172.16.69.72"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # Storage
+    - name: eth1
+      ip: 172.16.69.39
+      prefix: 27
+      gateway: 
+      dns: ["10.0.69.41", "10.0.69.42"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # Segment1
+    - name: eth2
+      ip: 10.0.68.231
+      prefix: 27
+      gateway: 
+      dns: ["4.2.2.2"]
+      searchDomains: []
+  node-ip: 10.0.69.60
+  bind-address: 10.0.69.60
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=preprod"
+  tls-san:
+    - cotpa-ctrl01
+    - cotpa-ctrl01.cantrellcloud.net
+    - cotpa-cluster
+    - cotpa-cluster.cantrellcloud.net
+    - 10.0.69.60
+  service-cidr: 10.96.0.0/12
+  cluster-cidr: 10.42.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: false
+  kube-apiserver-arg:
+    - audit-log-maxage=15
+
+  # Optional: your CA handling
+  customCA:
+    rootCrt: certs/rke2ca-cert.crt
+    rootKey: certs/rke2ca-cert-key.pem
+    installToOSTrust: true
