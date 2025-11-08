@@ -189,65 +189,131 @@ NERDCTL_STD_TGZ=""
 # ------------------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
+RKE2 Node Initialization Script (v0.8a)
+========================================
+Automates air-gapped RKE2 cluster deployment with multi-interface networking support.
+
 NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name: my-config }).
-Usage:
-  sudo ./rke2nodeinit.sh -f file.yaml [options]
-  sudo ./rke2nodeinit.sh [options] <push|image|server|add-server|agent|verify>
-  sudo ./rke2nodeinit.sh examples/image.yaml image
 
+USAGE:
+  sudo ./rke2nodeinit.sh -f <file.yaml> [options]
+  sudo ./rke2nodeinit.sh [options] <action>
 
-YAML kinds (apiVersion: rkeprep/v1):
-  - kind: Push|Image|Airgap|Server|AddServer|Agent|Verify
+YAML KINDS (apiVersion: rkeprep/v1):
+  Push        - Push RKE2 images to private registry
+  Image       - Prepare air-gapped base image (full prep + reboot)
+  Airgap      - Same as Image but powers off instead of reboot (for VM templating)
+  Server      - Initialize first RKE2 control-plane node
+  AddServer   - Join additional control-plane nodes to existing cluster
+  Agent       - Join worker node to cluster
+  Verify      - Verify existing RKE2 installation and configuration
+  CustomCA    - Install custom CA certificates into OS trust and registries.yaml
 
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # Absolute or relative to the script directory
-  rootCrt: certs/enterprise-root.crt
-  rootKey: certs/enterprise-root.key        # optional; OR use intermediate* below
-  intermediateCrt: certs/issuing-ca.crt     # optional
-  intermediateKey: certs/issuing-ca.key     # optional
-  installToOSTrust: true                    # default true
----
+ACTIONS (CLI):
+  push         - Push images to registry (requires -r, -u, -p)
+  image        - Prepare base image for air-gapped deployment
+  airgap       - Prepare base image and power off (for VM templates)
+  server       - Initialize first control-plane node
+  add-server   - Join additional control-plane node
+  agent        - Join worker node
+  verify       - Verify RKE2 installation
+  custom-ca    - Install custom CA certificates
+  label-node   - Apply Kubernetes labels to node (requires -n or --node-name)
+  taint-node   - Apply Kubernetes taints to node (requires -n or --node-name)
 
-Options:
-  -f FILE     YAML config (apiVersion: rkeprep/v1; kind selects action)
-  -v VER      RKE2 version tag (e.g., v1.34.1+rke2r1). If omitted, auto-detect latest
-  -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
-  -u USER     Registry username
-  -p PASS     Registry password
-  -n NAME     Node name for label-node/taint-node actions (defaults to detected hostname)
-              (also available as --node-name NAME)
-  -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
-  -P          Print sanitized YAML to screen (masks secrets)
-  -h          Show this help
-  --dry-push  Do not actually push images to registry (simulate only)
-  --apply-netplan-now  Apply netplan immediately instead of deferring until reboot
-  --interface name=eth1 ip=10.0.0.5 prefix=24 [gateway=...] [dns=...] [search=...]
-              Repeatable. Defines one network interface for server/agent/add-server
-              actions. Supply multiple key=value tokens after the flag; omit name
-              on the first interface to auto-detect the primary NIC. Use
-              "dhcp4=true" for DHCP-based interfaces.
-Image action:
-  Does the full prep for an air-gapped base image:
-    - Installs OS prerequisites and disables swap
-    - Caches nerdctl FULL bundle (containerd + runc + CNI + BuildKit + nerdctl)
-    - Detects & downloads RKE2 artifacts (images, tarball, checksums, installer)
-    - Verifies checksums and stages artifacts for offline install
-    - (Optional) Installs registry/cluster CA into OS trust and writes registries.yaml
-    - Saves DNS/search defaults for later (server/agent)
-    - Reboots the machine so you can shut down and clone it
+OPTIONS:
+  -f FILE      YAML config file (apiVersion: rkeprep/v1; kind selects action)
+  -v VER       RKE2 version tag (e.g., v1.34.1+rke2r1). Auto-detects latest if omitted
+  -r REG       Private registry (host[/namespace]), e.g., registry.example.com/rke2
+  -u USER      Registry username for authentication
+  -p PASS      Registry password for authentication
+  -n NAME      Node name for label-node/taint-node (defaults to hostname)
+               (also available as --node-name NAME)
+  -y           Auto-confirm prompts (reboots, cleanup operations)
+  -P           Print sanitized YAML to screen (masks secrets)
+  -h           Show this help message
+  --dry-push   Simulate image push without actually pushing to registry
+  --apply-netplan-now
+               Apply netplan immediately instead of deferring until reboot
+               (default: netplan changes deferred to next reboot for safety)
+  --interface name=<iface> ip=<addr> prefix=<bits> [gateway=<gw>] [dns=<dns>] [search=<domain>]
+               Define network interface (repeatable for multi-interface setups)
+               Use "dhcp4=true" for DHCP-based interfaces
+               Omit name on first interface to auto-detect primary NIC
 
+MULTI-INTERFACE YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: Server
+  metadata:
+    name: ctrl01-server
+  spec:
+    token: K10abc...xyz::server:1234abcd
+    clusterInit: true
+    nodeName: ctrl01.example.com
+    node-ip: 10.0.69.60
+    bind-address: 10.0.69.60
+    interfaces:
+      - name: eth0
+        ip: 10.0.69.60
+        prefix: 24
+        gateway: 10.0.69.1
+        dns: [10.0.69.1, 8.8.8.8]
+        search: [example.com]
+      - name: eth1
+        ip: 192.168.1.60
+        prefix: 24
+      - name: eth2
+        dhcp4: true
 
-Actions:
-  image        Prepare a base image for air-gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
-  airgap       Run 'image' without reboot and power off the machine for templating
-  label-node   Apply Kubernetes labels to the specified (or local) node
-  taint-node   Apply Kubernetes taints to the specified (or local) node
+CUSTOM CA YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: CustomCA
+  metadata:
+    name: enterprise-ca
+  spec:
+    rootCrt: certs/enterprise-root.crt
+    rootKey: certs/enterprise-root.key        # optional
+    intermediateCrt: certs/issuing-ca.crt     # optional
+    intermediateKey: certs/issuing-ca.key     # optional
+    installToOSTrust: true                    # default: true
 
-Outputs:
-  - SBOM:    $OUT_DIR/../sbom/<metadata.name>-sbom.txt with sha256 + sizes of cached artifacts
-  - Run dir: $OUT_DIR/<metadata.name>/README.txt summarizing image prep
+WORKFLOW EXAMPLES:
+  1. Prepare base image for cloning:
+     sudo ./rke2nodeinit.sh -f examples/image.yaml
+
+  2. Initialize first control-plane with multi-interface networking:
+     sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
+
+  3. Join worker node:
+     sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
+
+  4. Push images to private registry:
+     sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret
+
+  5. Label a node:
+     sudo ./rke2nodeinit.sh label-node -n worker01 -f labels.yaml
+
+  6. Install custom CA:
+     sudo ./rke2nodeinit.sh -f certs/custom-ca.yaml custom-ca
+
+OUTPUTS:
+  - SBOM:      outputs/sbom/<metadata.name>-sbom.txt
+               (SHA256 checksums and sizes of cached artifacts)
+  - Run log:   outputs/<metadata.name>/README.txt
+               (Summary of image preparation steps)
+  - Token:     outputs/generated-token/<cluster>-token.txt
+               (Generated cluster token for Server with clusterInit: true)
+
+EXIT CODES:
+  0 - Success
+  1 - General error (validation, filesystem, network)
+  2 - Missing dependencies or unsupported configuration
+  3 - RKE2 installation or service failure
+  4 - Network configuration failure (netplan, routing)
+  5 - User cancellation or dry-run mode
+
+For more information, see README.md or visit:
+  https://github.com/cantrellcloud/rke2-node-init
 
 EOF
 }
