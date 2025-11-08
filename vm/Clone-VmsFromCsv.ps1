@@ -1,90 +1,90 @@
 <#
-# ==============================================================================
-# Clone-VmsFromCsv.ps1
-# ==============================================================================
-#
-#       Version: 1.0
-#       Written by: Ron Cantrell
-#           Github: cantrellr
-#            Email: charlescantrelljr@outlook.com
-#
-# ==============================================================================
-# Purpose:
-#   Clone VMware vSphere VMs from existing templates or powered-off source VMs
-#   using CSV-driven definitions. Automates mass VM provisioning for RKE2
-#   Kubernetes clusters with intelligent host placement, resource configuration,
-#   and DRS anti-affinity rule creation for high availability.
-#
-# Features:
-#   - Clone from templates or powered-off VMs
-#   - Intelligent ESXi host selection based on CPU utilization
-#   - Post-clone CPU, memory, and disk resizing
-#   - Network adapter reconfiguration
-#   - Per-VM or global PowerOn control
-#   - Automatic DRS anti-affinity rule creation for controller/worker separation
-#   - Support for OS customization specifications
-#   - Idempotent operation with -SkipExisting
-#
-# Requirements:
-#   - VMware PowerCLI module
-#   - vCenter Server 8.0.3 or later (tested)
-#   - vSphere cluster with DRS enabled (for anti-affinity rules)
-#   - Source template or powered-off VM
-#   - Appropriate vCenter permissions (VM creation, DRS rule management)
-#
-# CSV Schema:
-#   Required columns:
-#     VMName    - Unique name for the cloned VM
-#     SourceVM  - Name of template or powered-off VM to clone from
-#
-#   Optional columns:
-#     Cluster             - Target cluster (used for host selection if VMHost not provided)
-#     VMHost              - Specific ESXi host for VM placement
-#     ResourcePool        - Resource pool assignment
-#     Datastore           - Datastore for clone storage
-#     Folder              - vCenter folder for organization
-#     Network             - Port group for primary NIC
-#     CpuCount            - Override vCPU count (must be valid for guest OS)
-#     MemoryGB            - Override memory size in GB
-#     DiskGB              - Resize primary disk (must be >= source disk size)
-#     OSCustomizationSpec - Customization spec for guest OS
-#     PowerOn             - TRUE/FALSE to override global -PowerOn switch
-#
-# DRS Anti-Affinity Rules:
-#   The script automatically creates DRS anti-affinity rules to separate
-#   controller and worker VMs based on naming conventions:
-#     - Controllers: VM name contains "ctrl"
-#     - Workers: VM name contains "work"
-#
-#   Rules are created for these folders:
-#     - j64manager
-#     - j64domain
-#     - j52domain
-#     - r01domain
-#
-# Examples:
-#   # Clone VMs and power them on
-#   $cred = Get-Credential
-#   .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
-#                          -VCenter vcsa.lab.local `
-#                          -Credential $cred `
-#                          -PowerOn
-#
-#   # Clone VMs, skip existing, and test with WhatIf
-#   .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
-#                          -VCenter vcsa.lab.local `
-#                          -Credential $cred `
-#                          -SkipExisting `
-#                          -WhatIf
-#
-# Exit Codes:
-#   0 - Success
-#   1 - CSV file not found
-#   2 - CSV file empty or unreadable
-#   3 - vCenter connection failure
-#   4 - VM cloning failure (non-fatal, continues with remaining VMs)
-#
-# ==============================================================================
+==============================================================================
+Clone-VmsFromCsv.ps1
+==============================================================================
+
+      Version: 1.0
+      Written by: Ron Cantrell
+          Github: cantrellr
+           Email: charlescantrelljr@outlook.com
+
+==============================================================================
+Purpose:
+  Clone VMware vSphere VMs from existing templates or powered-off source VMs
+  using CSV-driven definitions. Automates mass VM provisioning for RKE2
+  Kubernetes clusters with intelligent host placement, resource configuration,
+  and DRS anti-affinity rule creation for high availability.
+
+Features:
+  - Clone from templates or powered-off VMs
+  - Intelligent ESXi host selection based on CPU utilization
+  - Post-clone CPU, memory, and disk resizing
+  - Network adapter reconfiguration
+  - Per-VM or global PowerOn control
+  - Automatic DRS anti-affinity rule creation for controller/worker separation
+  - Support for OS customization specifications
+  - Idempotent operation with -SkipExisting
+
+Requirements:
+  - VMware PowerCLI module
+  - vCenter Server 8.0.3 or later (tested)
+  - vSphere cluster with DRS enabled (for anti-affinity rules)
+  - Source template or powered-off VM
+  - Appropriate vCenter permissions (VM creation, DRS rule management)
+
+CSV Schema:
+  Required columns:
+    VMName    - Unique name for the cloned VM
+    SourceVM  - Name of template or powered-off VM to clone from
+
+  Optional columns:
+    Cluster             - Target cluster (used for host selection if VMHost not provided)
+    VMHost              - Specific ESXi host for VM placement
+    ResourcePool        - Resource pool assignment
+    Datastore           - Datastore for clone storage
+    Folder              - vCenter folder for organization
+    Network             - Port group for primary NIC
+    CpuCount            - Override vCPU count (must be valid for guest OS)
+    MemoryGB            - Override memory size in GB
+    DiskGB              - Resize primary disk (must be greater than or equal to source disk size)
+    OSCustomizationSpec - Customization spec for guest OS
+    PowerOn             - TRUE/FALSE to override global -PowerOn switch
+
+DRS Anti-Affinity Rules:
+  The script automatically creates DRS anti-affinity rules to separate
+  controller and worker VMs based on naming conventions:
+    - Controllers: VM name contains "ctrl"
+    - Workers: VM name contains "work"
+
+  Rules are created for these folders:
+    - j64manager
+    - j64domain
+    - j52domain
+    - r01domain
+
+Examples:
+  Clone VMs and power them on
+  $cred = Get-Credential
+  .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
+                         -VCenter vcsa.lab.local `
+                         -Credential $cred `
+                         -PowerOn
+
+  Clone VMs, skip existing, and test with WhatIf
+  .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
+                         -VCenter vcsa.lab.local `
+                         -Credential $cred `
+                         -SkipExisting `
+                         -WhatIf
+
+Exit Codes:
+  0 - Success
+  1 - CSV file not found
+  2 - CSV file empty or unreadable
+  3 - vCenter connection failure
+  4 - VM cloning failure (non-fatal, continues with remaining VMs)
+
+==============================================================================
 .SYNOPSIS
   Clone VMware vSphere VMs from a CSV definition using an existing source VM or template.
 
@@ -101,7 +101,7 @@
     Network             - Port group name to connect the primary NIC to (optional).
     CpuCount            - Target vCPU count (optional; defaults to source VM setting).
     MemoryGB            - Target memory size in GB (optional; defaults to source VM setting).
-    DiskGB              - Desired size of the primary disk in GB (optional; must be >= source disk).
+    DiskGB              - Desired size of the primary disk in GB (optional; must be greater than or equal to source disk).
     OSCustomizationSpec - Customization spec name (optional).
     PowerOn             - True/False to power on the VM post-clone (optional; overrides -PowerOn switch).
 
@@ -485,10 +485,9 @@ function Create-DrsRulesForPool {
     
     # Note: Optional cross-group anti-affinity rule (currently commented out)
     # This would prevent ANY controller from sharing a host with ANY worker
-    # <#
+    # Uncomment the following to enable:
     # New-DrsRule -Name "${RulePrefix}_NoMix" -VM ($ctrlVMs + $workerVMs) `
-    #     -Cluster $cluster -Enabled $true #-Type SeparateVMHosts
-    # #>
+    #     -Cluster $cluster -Enabled $true
 }
 
 # ==============================================================================
@@ -506,4 +505,3 @@ Create-DrsRulesForPool -FolderName "r01domain"  -RulePrefix "r01domain"
 # ==============================================================================
 
 Disconnect-VIServer -Server $viserver -Confirm:$false | Out-Null
-

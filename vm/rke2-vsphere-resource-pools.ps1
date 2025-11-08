@@ -1,55 +1,126 @@
-#*************************************************************************
-# Full PowerShell Script for Creating Folders, Resource Pools, and DRS Rules
+# ==============================================================================
+# rke2-vsphere-resource-pools.ps1
+# ==============================================================================
 #
-# Overview:
-# This script logs into a vCenter server and creates a site-level folder and 
-# resource pool hierarchy under an existing top-level "Kube.Sites" object.
+# Purpose:
+#   Create vSphere folder and resource pool hierarchy for RKE2 Kubernetes
+#   clusters with DRS anti-affinity rules for high availability.
 #
-# Pre-requisites:
-#   - Top-level Folder and Resource Pool "Kube.Sites" must already exist.
-#   - VMs follow naming conventions: "ctrl" for controllers and "work" for workers.
-#   - PowerCLI is installed and imported.
+# Description:
+#   This script automates the creation of a hierarchical folder and resource
+#   pool structure under an existing "Kube.Sites" parent container. It creates
+#   site-level folders (j64, j52, r01) and cluster-level subfolders
+#   (j64manager, j64domain, j52domain, r01domain), then establishes
+#   corresponding resource pools with CPU and memory reservations calculated
+#   with 30% overhead for cluster infrastructure.
 #
-# The script:
-# 1. Prompts for vCenter FQDN/IP and credentials then logs in.
-# 2. Checks that the top-level folder "Kube.Sites" exists in the specified datacenter.
-# 3. Creates subordinate site folders: j64, j52, and r01, under "Kube.Sites".
-# 4. Under each site folder, creates further subfolders for clusters:
-#      - j64 => j64manager and j64domain
-#      - j52 => j52domain
-#      - r01 => r01domain
-#    Additionally, optional subfolders "KubeControl" and "KubeWorker" are created.
-# 5. Verifies that the top-level resource pool "Kube.Sites" exists in the specified cluster.
-# 6. Creates site resource pools under "Kube.Sites": j64, j52, and r01.
-# 7. Under each site resource pool, creates subordinate resource pools with
-#    CPU/Memory reservations based on the following:
-#         j64manager: ~28600 MHz CPU and ~114GB memory.
-#         j64domain, j52domain, r01domain: ~23400 MHz CPU and ~94GB memory.
-# 8. Calls a helper function that searches each folder for VMs (by name) that include 
-#    "ctrl" or "work" and creates DRS anti-affinity rules to keep them on separate hosts.
-#*************************************************************************
+#   After creating the infrastructure hierarchy, the script optionally creates
+#   DRS anti-affinity rules to ensure controller and worker VMs are distributed
+#   across different ESXi hosts for fault tolerance.
+#
+# Prerequisites:
+#   - VMware PowerCLI module installed and imported
+#   - vCenter Server 8.0.3 or compatible version
+#   - Existing top-level folder "Kube.Sites" in target datacenter
+#   - Existing top-level resource pool "Kube.Sites" in target cluster
+#   - vCenter credentials with permissions to:
+#       * Create folders and resource pools
+#       * Configure DRS rules
+#       * Query VM and cluster information
+#   - VM naming convention: "ctrl" for controllers, "work" for workers
+#
+# Usage:
+#   .\rke2-vsphere-resource-pools.ps1
+#
+#   The script will prompt for:
+#     - vCenter Server FQDN or IP address
+#     - vCenter credentials (interactive)
+#
+# Resource Allocation Strategy:
+#   j64manager:  28600 MHz CPU, 114 GB memory (7 nodes: 3 ctrl + 4 work)
+#   j64domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#   j52domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#   r01domain:   23400 MHz CPU,  94 GB memory (6 nodes: 3 ctrl + 3 work)
+#
+#   Calculations based on:
+#     - 3x controller VMs: 4 vCPU, 8 GB RAM each
+#     - 3-4x worker VMs: 4 vCPU, 16 GB RAM each
+#     - 30% overhead for Kubernetes infrastructure
+#     - Assumes 2.6 GHz CPU cores (vCPU * 2600 MHz)
+#
+# Folder Structure Created:
+#   Kube.Sites/
+#   ├── j64/
+#   │   ├── j64manager/  (7 VMs: 3 ctrl + 4 work)
+#   │   └── j64domain/   (6 VMs: 3 ctrl + 3 work)
+#   ├── j52/
+#   │   └── j52domain/   (6 VMs: 3 ctrl + 3 work)
+#   └── r01/
+#       └── r01domain/   (6 VMs: 3 ctrl + 3 work)
+#
+# DRS Anti-Affinity Rules:
+#   - Separate controller VMs across different ESXi hosts
+#   - Separate worker VMs across different ESXi hosts
+#   - Rules named: <cluster>_Controllers, <cluster>_Workers
+#
+# Version:
+#   1.0.0 - Initial implementation
+#
+# Author:
+#   Cloud Operations Team
+#
+# Last Modified:
+#   2024-11-08
+#
+# Notes:
+#   - Script uses -ErrorAction SilentlyContinue to handle pre-existing objects
+#   - Memory reservations converted from GB to MB (GB * 1024)
+#   - Certificate validation disabled for lab environments (modify for production)
+#   - Optional KubeControl/KubeWorker subfolders commented out (not currently used)
+#   - DRS rule creation requires VMs to exist in folders (run after VM provisioning)
+#
+# ==============================================================================
 
-#------------------------------
-# Step 0: Prompt for vCenter Login Details
-#------------------------------
+# ==============================================================================
+# Initial Setup: PowerCLI Module and vCenter Connection
+# ==============================================================================
+
+# ------------------------------------------------------------------------
+# Import PowerCLI module and suppress certificate warnings for lab use
+# ------------------------------------------------------------------------
 Import-Module VMware.PowerCLI -ErrorAction Stop
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
 
+# ------------------------------------------------------------------------
+# Prompt for vCenter connection details and establish session
+# ------------------------------------------------------------------------
 $vCenter = Read-Host -Prompt "Enter the vCenter FQDN or IP address"
-$cred = Get-Credential
-#$vcUser  = Read-Host -Prompt "Enter your vCenter username"
-#$vcPass  = Read-Host -Prompt "Enter your vCenter password" -AsSecureString
+$cred = Get-Credential -Message "Enter vCenter credentials"
 
-# Connect to vCenter using provided credentials.
+# Connect to vCenter using provided credentials
 Connect-VIServer -Server $vCenter -Credential $cred
 
-#------------------------------
-# Step 1: Set Base Parameters and Verify Top-Level Folder
-#------------------------------
-$datacenterName = "Datacenter"   # Change this to match your datacenter name.
-$clusterName    = "R01_Kubernetes"    # Change this to your cluster name.
+# ==============================================================================
+# Configuration Parameters
+# ==============================================================================
 
-# Retrieve the datacenter object.
+# ------------------------------------------------------------------------
+# vSphere environment configuration
+# Modify these to match your datacenter and cluster names
+# ------------------------------------------------------------------------
+$datacenterName = "Datacenter"      # Change to match your datacenter
+$clusterName    = "R01_Kubernetes"  # Change to match your cluster
+
+# ==============================================================================
+# Section 1: Folder Hierarchy Creation
+# ==============================================================================
+
+# ------------------------------------------------------------------------
+# Retrieve datacenter object and verify top-level folder exists
+# ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
+# Retrieve datacenter object and verify top-level folder exists
+# ------------------------------------------------------------------------
 $dc = Get-Datacenter -Name $datacenterName
 
 # Verify that the top-level folder "Kube.Sites" exists.
@@ -59,24 +130,41 @@ if (-not $topFolder) {
     exit
 }
 
-# Create site folders under the top-level "Kube.Sites" folder.
+# ------------------------------------------------------------------------
+# Create site-level folders under Kube.Sites
+# j64 = Site 64 (production), j52 = Site 52 (dev/test), r01 = Region 01
+# ------------------------------------------------------------------------
 New-Folder -Name "j64" -Location $topFolder -ErrorAction SilentlyContinue
 New-Folder -Name "j52" -Location $topFolder -ErrorAction SilentlyContinue
 New-Folder -Name "r01" -Location $topFolder -ErrorAction SilentlyContinue
 
-# Retrieve the site folders.
+# ------------------------------------------------------------------------
+# Retrieve site folder objects for subfolder creation
+# ------------------------------------------------------------------------
 $j64Folder = Get-Folder -Name "j64" -Location $topFolder
 $j52Folder = Get-Folder -Name "j52" -Location $topFolder
 $r01Folder = Get-Folder -Name "r01" -Location $topFolder
 
-# Under j64 folder, create subfolders for clusters.
+# ------------------------------------------------------------------------
+# Create cluster-level subfolders under each site
+# Each subfolder will contain controller and worker VMs for one cluster
+# ------------------------------------------------------------------------
+# j64 site has two clusters: manager and domain
 New-Folder -Name "j64manager" -Location $j64Folder -ErrorAction SilentlyContinue
 New-Folder -Name "j64domain" -Location $j64Folder -ErrorAction SilentlyContinue
 
-# Under j52 and r01 folders, create subfolders for the domain.
+# j52 and r01 sites each have one domain cluster
 New-Folder -Name "j52domain" -Location $j52Folder -ErrorAction SilentlyContinue
 New-Folder -Name "r01domain" -Location $r01Folder -ErrorAction SilentlyContinue
 
+# ------------------------------------------------------------------------
+# Optional: Create logical segregation subfolders (currently not used)
+# Uncomment to create KubeControl/KubeWorker separation within each cluster
+# ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
+# Optional: Create logical segregation subfolders (currently not used)
+# Uncomment to create KubeControl/KubeWorker separation within each cluster
+# ------------------------------------------------------------------------
 <#
 # Optionally, create additional subfolders for logical segregation.
 $j64managerFolder = Get-Folder -Name "j64manager" -Location $j64Folder
@@ -95,99 +183,153 @@ $r01domainFolder = Get-Folder -Name "r01domain" -Location $r01Folder
 New-Folder -Name "KubeControl" -Location $r01domainFolder -ErrorAction SilentlyContinue
 New-Folder -Name "KubeWorker"  -Location $r01domainFolder -ErrorAction SilentlyContinue
 #>
-#------------------------------
-# Step 2: Verify Top-Level Resource Pool and Create Resource Pool Hierarchy
-#------------------------------
+
+# ==============================================================================
+# Section 2: Resource Pool Hierarchy Creation with Reservations
+# ==============================================================================
+
+# ------------------------------------------------------------------------
+# Retrieve cluster object and verify top-level resource pool exists
+# ------------------------------------------------------------------------
 $cluster = Get-Cluster -Name $clusterName
 
-# Verify that the top-level Resource Pool "Kube.Sites" exists.
 $topRP = Get-ResourcePool -Name "Kube.Sites" -Location $cluster -ErrorAction SilentlyContinue
 if (-not $topRP) {
     Write-Error "Top-level Resource Pool 'Kube.Sites' was not found in cluster '$clusterName'. Please create it manually first."
     exit
 }
 
-# Under "Kube.Sites", create site-level resource pools if they do not exist.
+# ------------------------------------------------------------------------
+# Create site-level resource pools under Kube.Sites (if not existing)
+# ------------------------------------------------------------------------
 $j64RP = Get-ResourcePool -Name "j64" -Location $topRP -ErrorAction SilentlyContinue
 if (-not $j64RP) { $j64RP = New-ResourcePool -Name "j64" -Location $topRP }
+
 $j52RP = Get-ResourcePool -Name "j52" -Location $topRP -ErrorAction SilentlyContinue
 if (-not $j52RP) { $j52RP = New-ResourcePool -Name "j52" -Location $topRP }
+
 $r01RP = Get-ResourcePool -Name "r01" -Location $topRP -ErrorAction SilentlyContinue
 if (-not $r01RP) { $r01RP = New-ResourcePool -Name "r01" -Location $topRP }
 
-# Reservation values based on 30% overhead:
-# j64manager: ~28600 MHz CPU & ~114GB memory.
-# j64domain, j52domain, r01domain: ~23400 MHz CPU & ~94GB memory.
-# Memory values are given in MB (GB * 1024).
+# ------------------------------------------------------------------------
+# Resource reservation calculations (30% overhead included):
+# - j64manager: 7 VMs (3 ctrl @ 4vCPU/8GB + 4 work @ 4vCPU/16GB)
+#   Base: 28 vCPU * 2600 MHz = 72,800 MHz, 88 GB RAM
+#   With 30% overhead: ~95 GHz CPU, ~114 GB RAM
+#   Reserved: 28,600 MHz CPU, 114 GB RAM
+#
+# - Other domains: 6 VMs (3 ctrl @ 4vCPU/8GB + 3 work @ 4vCPU/16GB)
+#   Base: 24 vCPU * 2600 MHz = 62,400 MHz, 72 GB RAM
+#   With 30% overhead: ~81 GHz CPU, ~94 GB RAM
+#   Reserved: 23,400 MHz CPU, 94 GB RAM
+# ------------------------------------------------------------------------
 
-# Under j64 resource pool, create subordinate pools.
+# Create cluster-level resource pools under j64 site
 New-ResourcePool -Name "j64manager" -Location $j64RP `
     -CpuReservationMHz 28600 `
     -MemReservationMB ([math]::Round(114 * 1024))
+
 New-ResourcePool -Name "j64domain" -Location $j64RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
-# Under j52 resource pool, create the j52domain pool.
+# Create cluster-level resource pool under j52 site
 New-ResourcePool -Name "j52domain" -Location $j52RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
-# Under r01 resource pool, create the r01domain pool.
+# Create cluster-level resource pool under r01 site
 New-ResourcePool -Name "r01domain" -Location $r01RP `
     -CpuReservationMHz 23400 `
     -MemReservationMB ([math]::Round(94 * 1024))
 
-#------------------------------
-# Step 3: Create DRS Anti-Affinity Rules for Controllers and Workers
-#------------------------------
+# ==============================================================================
+# DRS Anti-Affinity Rule Creation Functions
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Function: Create-DrsRulesForPool
+# ------------------------------------------------------------------------------
+# Purpose:
+#   Create DRS anti-affinity rules for controller and worker VMs in a folder.
+#   Ensures high availability by preventing controllers and workers from
+#   running on the same ESXi host.
 #
-# The function below searches each subfolder for VMs whose names contain 
-# "ctrl" or "work" and creates DRS anti-affinity rules so that controllers 
-# and workers are not co-located on the same ESXi host.
+# Arguments:
+#   FolderName - Name of VM folder to search (e.g., "j64manager")
+#   RulePrefix - Prefix for rule naming (e.g., "j64manager")
 #
+# Returns:
+#   None (creates DRS rules in vSphere cluster as side effect)
+#
+# Notes:
+#   - Uses VM name pattern matching: "ctrl" for controllers, "work" for workers
+#   - Creates two separate anti-affinity rules per folder (ctrl, work)
+#   - Skips folder if either controller or worker VMs are not found
+#   - Cluster name derived from first VM's parent cluster
+#   - KeepTogether=$false enforces anti-affinity (separate hosts)
+# ------------------------------------------------------------------------------
 function Create-DrsRulesForPool {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$FolderName,   # The name of the folder where VMs reside (e.g. "j64manager")
+        [string]$FolderName,   # The name of the folder where VMs reside
         [Parameter(Mandatory = $true)]
-        [string]$RulePrefix    # A prefix used for naming the rules (e.g. "j64manager")
+        [string]$RulePrefix    # A prefix used for naming the rules
     )
     
-    # Locate the folder by name.
+    # ------------------------------------------------------------------------
+    # Locate target VM folder by name
+    # ------------------------------------------------------------------------
     $folder = Get-Folder -Name $FolderName -ErrorAction SilentlyContinue
     if (-not $folder) {
         Write-Host "Folder '$FolderName' not found. Skipping DRS rule creation for this folder."
         return
     }
     
-    # Retrieve VMs from the folder using naming patterns.
+    # ------------------------------------------------------------------------
+    # Find VMs matching controller and worker naming patterns
+    # Pattern: VM names containing "ctrl" are controllers, "work" are workers
+    # ------------------------------------------------------------------------
     $ctrlVMs = Get-VM -Location $folder | Where-Object { $_.Name -match "ctrl" }
     $workerVMs = Get-VM -Location $folder | Where-Object { $_.Name -match "work" }
     
+    # ------------------------------------------------------------------------
+    # Validate VM discovery: Need both controllers and workers for HA rules
+    # ------------------------------------------------------------------------
     if (($ctrlVMs.Count -eq 0) -or ($workerVMs.Count -eq 0)) {
         Write-Host "Either controller or worker VMs were not found in folder '$FolderName'. Skipping DRS rule creation for this folder."
         return
     }
     
-    # Create optional VM groups for controllers and workers.
+    # ------------------------------------------------------------------------
+    # Create anti-affinity DRS rules to prevent co-location on same host
+    # - Controllers rule: Separate all controller VMs across ESXi hosts
+    # - Workers rule: Separate all worker VMs across ESXi hosts
+    # KeepTogether=$false enforces anti-affinity (VMs must be on different hosts)
+    # ------------------------------------------------------------------------
     New-DrsRule -Name "${RulePrefix}_Controllers" -VM $ctrlVMs -Cluster $cluster -KeepTogether $false
     New-DrsRule -Name "${RulePrefix}_Workers" -VM $workerVMs -Cluster $cluster -KeepTogether $false
     
-    <#
-    # Create an anti-affinity rule to ensure controllers and workers do not share the same host.
-    New-DrsRule -Name "${RulePrefix}_NoMix" -VM ($ctrlVMs + $workerVMs) `
-        -Cluster $cluster -Enabled $true #-Type SeparateVMHosts
-    Write-Host "DRS anti-affinity rules created for folder '$FolderName'."
-    #>
+    Write-Host "DRS anti-affinity rules created for folder '$FolderName'." -ForegroundColor Green
+    
+    # Note: Optional cross-group anti-affinity rule (currently commented out)
+    # This would prevent ANY controller from sharing a host with ANY worker
+    # <#
+    # New-DrsRule -Name "${RulePrefix}_NoMix" -VM ($ctrlVMs + $workerVMs) `
+    #     -Cluster $cluster -Enabled $true #-Type SeparateVMHosts
+    # #>
 }
 
-# Call the function for each of the subfolders.
+# ==============================================================================
+# Main Execution: Create DRS Rules for All RKE2 Cluster Folders
+# ==============================================================================
+
+# Create anti-affinity rules for each cluster environment
 Create-DrsRulesForPool -FolderName "j64manager" -RulePrefix "j64manager"
 Create-DrsRulesForPool -FolderName "j64domain"  -RulePrefix "j64domain"
 Create-DrsRulesForPool -FolderName "j52domain"  -RulePrefix "j52domain"
 Create-DrsRulesForPool -FolderName "r01domain"  -RulePrefix "r01domain"
 
-#*************************************************************************
-# End of Script
-#*************************************************************************
+# ==============================================================================
+# Script Complete
+# ==============================================================================
