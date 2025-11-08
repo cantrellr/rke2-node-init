@@ -1,27 +1,74 @@
-# .gitignore file
+# ==============================================================================
+# .gitignore for RKE2 Node Initialization Repository
+# ==============================================================================
 
-# OS
-.DS_Store
-Thumbs.db
+# CRITICAL: Sensitive files - Prevent credential leaks
+certs/*.pem
+certs/*.key
+*-token.txt
+*.token
+*-bootstrap-token.txt
+secrets/
+credentials/
+.env
+.env.local
 
-# Python
-__pycache__/
-*.pyc
-
-# Archives
-*.tar
-*.tar.gz
-*.tgz
-*.zip
-
-# Editor
-*.swp
-.vscode/
-.idea/
-
-# Project artifacts
+# Generated runtime files
 /logs/
 /outputs/
 /downloads/
 /code/
+*.log
+
+# Archives and build artifacts
+*.tar
+*.tar.gz
+*.tar.zst
+*.tgz
+*.zip
+*.sha256
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+.project
+.classpath
+.settings/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+.venv/
+
+# Temporary files
+*.tmp
+.temp-*
+temp/
+tmp/
+*.bak
+*.backup
+
+# Large binary files
+*.iso
+*.vmdk
+*.qcow2
+*.img
 
