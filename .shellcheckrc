@@ -1,0 +1,33 @@
+# ShellCheck configuration for rke2-node-init
+# https://github.com/koalaman/shellcheck/wiki/Directive
+
+# Disable specific checks that conflict with our coding style
+
+# SC2312: Consider invoking this command separately to avoid masking its return value
+# Rationale: We use pipefail mode and deliberate command chaining
+disable=SC2312
+
+# SC1090: Can't follow non-constant source
+# Rationale: We dynamically source files based on runtime conditions
+disable=SC1090
+
+# SC1091: Not following sourced file
+# Rationale: Some sourced files are generated or exist only at runtime
+disable=SC1091
+
+# SC2155: Declare and assign separately to avoid masking return values
+# Rationale: We use pipefail and prefer concise declarations for simple cases
+disable=SC2155
+
+# SC2034: Variable appears unused
+# Rationale: Some variables are used in sourced scripts or exported for child processes
+# disable=SC2034
+
+# Enable stricter checks
+enable=all
+
+# Set shell dialect
+shell=bash
+
+# External sources (if needed in future)
+# source-path=SCRIPTDIR

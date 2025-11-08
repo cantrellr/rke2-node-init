@@ -1,0 +1,96 @@
+apiVersion: rkeprep/v1
+kind: Push
+metadata:
+  name: push-to-registry
+  description: Push cached RKE2 images to private registry
+
+spec:
+  # Private registry configuration
+  registry:
+    # Registry endpoint (hostname[:port][/namespace])
+    endpoint: registry.example.com:5000/rke2
+    
+    # Authentication credentials
+    # WARNING: Do not commit real credentials to version control
+    # Use environment variables or secure secret management
+    username: admin
+    password: changeme-use-env-var
+    
+    # Optional: Skip TLS verification (not recommended for production)
+    # insecure: false
+  
+  # Optional: Dry run mode - simulate push without actually pushing
+  # dryRun: true
+  
+  # Optional: Custom CA certificate for registry
+  # caCertPath: /path/to/registry-ca.crt
+
+---
+# Example using environment variables for credentials
+apiVersion: rkeprep/v1
+kind: Push
+metadata:
+  name: push-secure-registry
+  description: Push images with environment variable credentials
+
+spec:
+  registry:
+    endpoint: secure.registry.corp.com/kubernetes/rke2
+    # Use environment variables: RKE2_REGISTRY_USER and RKE2_REGISTRY_PASS
+    # These should be set before running the script:
+    # export RKE2_REGISTRY_USER="myuser"
+    # export RKE2_REGISTRY_PASS="mypassword"
+    # Then omit username/password from YAML
+  
+  # Custom CA for self-signed registry certificates
+  caCertPath: /etc/ssl/certs/corporate-registry-ca.crt
+
+---
+# Harbor registry example
+apiVersion: rkeprep/v1
+kind: Push
+metadata:
+  name: push-to-harbor
+  description: Push images to Harbor registry
+
+spec:
+  registry:
+    endpoint: harbor.example.com/library/rke2
+    username: robot$rke2-pusher
+    password: CHANGE-ME-HARBOR-ROBOT-TOKEN
+  
+  caCertPath: /etc/ssl/certs/harbor-ca.crt
+
+---
+# JFrog Artifactory example
+apiVersion: rkeprep/v1
+kind: Push
+metadata:
+  name: push-to-artifactory
+  description: Push images to JFrog Artifactory
+
+spec:
+  registry:
+    endpoint: artifactory.corp.com:5001/docker-local/rke2
+    username: rke2-service-account
+    password: CHANGE-ME-ARTIFACTORY-TOKEN
+  
+  # Dry run for testing
+  dryRun: false
+
+---
+# Development/Testing registry (insecure)
+apiVersion: rkeprep/v1
+kind: Push
+metadata:
+  name: push-dev-registry
+  description: Push to local development registry
+
+spec:
+  registry:
+    endpoint: localhost:5000/rke2
+    username: testuser
+    password: testpass
+    insecure: true  # Allow insecure connections (dev only)
+  
+  dryRun: false

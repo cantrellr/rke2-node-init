@@ -1,0 +1,61 @@
+apiVersion: rkeprep/v1
+kind: Image
+metadata:
+  name: rke2-base-image
+  description: Prepare air-gapped base image with RKE2 artifacts
+
+spec:
+  # RKE2 version to download and cache
+  # Examples: v1.34.1+rke2r1, v1.30.5+rke2r1
+  rke2Version: v1.34.1+rke2r1
+  
+  # Optional: Custom DNS servers for the base image
+  # These will be used during artifact download and saved as defaults
+  dns:
+    - 8.8.8.8
+    - 8.8.4.4
+  
+  # Optional: Custom search domains
+  searchDomains:
+    - example.com
+    - cluster.local
+  
+  # Optional: Custom CA certificate path
+  # Install custom CA trust during image preparation
+  # caCertPath: /path/to/custom-ca.crt
+  
+  # Optional: Proxy settings for artifact download
+  # httpProxy: http://proxy.example.com:8080
+  # httpsProxy: http://proxy.example.com:8080
+  # noProxy: localhost,127.0.0.1,.cluster.local
+
+---
+# Minimal example - use defaults
+apiVersion: rkeprep/v1
+kind: Image
+metadata:
+  name: rke2-minimal-image
+
+spec:
+  rke2Version: v1.34.1+rke2r1
+
+---
+# Example with network configuration for template creation
+apiVersion: rkeprep/v1
+kind: Image
+metadata:
+  name: rke2-template-image
+  description: Base image for VM template with network defaults
+
+spec:
+  rke2Version: v1.34.1+rke2r1
+  
+  # Network defaults that will be reused by cloned VMs
+  dns:
+    - 10.0.0.10  # Internal DNS server
+    - 10.0.0.11  # Backup DNS server
+  
+  searchDomains:
+    - corp.example.com
+    - k8s.example.com
+    - example.com

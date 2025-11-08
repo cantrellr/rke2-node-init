@@ -29,6 +29,11 @@ clusters/
 /clusters/*.yaml
 !clusters/*-example.yaml
 
+# Production configuration paths (Phase 1 Security)
+configs/production/
+configs/*.prod.yaml
+configs/*.production.yaml
+
 # Generated runtime files
 /logs/
 /outputs/

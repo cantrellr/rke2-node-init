@@ -1,0 +1,148 @@
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: install-custom-ca
+  description: Install custom CA certificates for registry trust
+
+spec:
+  # Path to CA certificate file to install
+  caCertPath: /path/to/custom-ca.crt
+  
+  # Optional: CA certificate bundle (multiple CAs)
+  # caBundlePath: /path/to/ca-bundle.crt
+  
+  # Optional: Target locations for CA installation
+  installLocations:
+    - /usr/local/share/ca-certificates/  # System trust
+    - /etc/rancher/rke2/                 # RKE2 config
+  
+  # Optional: Update system CA trust
+  updateSystemTrust: true
+  
+  # Optional: Restart services after installation
+  restartServices:
+    - containerd
+    - rke2-server
+    - rke2-agent
+
+---
+# Enterprise CA installation
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: enterprise-ca-install
+  description: Install enterprise root and intermediate CAs
+
+spec:
+  # Root CA certificate
+  caCertPath: /etc/ssl/enterprise/root-ca.crt
+  
+  # Intermediate CA bundle
+  caBundlePath: /etc/ssl/enterprise/intermediate-ca-bundle.crt
+  
+  updateSystemTrust: true
+  
+  # Verify registry connectivity after installation
+  verifyRegistry:
+    endpoint: registry.corp.example.com
+    username: verify-user
+    password: CHANGE-ME
+
+---
+# Registry-specific CA
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: registry-ca-only
+  description: Install CA for private registry only
+
+spec:
+  caCertPath: /etc/ssl/certs/registry-ca.crt
+  
+  installLocations:
+    - /etc/rancher/rke2/
+  
+  updateSystemTrust: false  # Don't update system-wide trust
+  
+  # Configure registries.yaml with CA
+  configureRegistries: true
+  registry:
+    endpoint: registry.example.com:5000
+
+---
+# Harbor registry CA
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: harbor-ca-install
+  description: Install Harbor registry CA certificate
+
+spec:
+  caCertPath: /etc/ssl/harbor/ca.crt
+  
+  updateSystemTrust: true
+  
+  configureRegistries: true
+  registry:
+    endpoint: harbor.example.com
+    namespace: library/rke2
+
+---
+# Multiple CA bundle
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: multi-ca-bundle
+  description: Install multiple CA certificates as bundle
+
+spec:
+  # Bundle containing multiple CA certificates
+  caBundlePath: /etc/ssl/company/ca-bundle.pem
+  
+  updateSystemTrust: true
+  
+  installLocations:
+    - /usr/local/share/ca-certificates/
+    - /etc/rancher/rke2/
+    - /etc/docker/certs.d/
+  
+  restartServices:
+    - containerd
+    - docker
+
+---
+# Air-gapped environment CA
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: airgap-ca-install
+  description: CA for completely air-gapped environment
+
+spec:
+  # Internal CA for all services
+  caCertPath: /opt/rke2/certs/airgap-root-ca.crt
+  caBundlePath: /opt/rke2/certs/airgap-ca-bundle.crt
+  
+  updateSystemTrust: true
+  
+  configureRegistries: true
+  registry:
+    endpoint: airgap-registry.internal:5000/rke2
+  
+  # Verify after installation
+  verifyRegistry:
+    endpoint: airgap-registry.internal:5000
+    username: rke2-user
+    password: CHANGE-ME
+    insecure: false  # Should work with CA installed
+
+---
+# Minimal CA installation
+apiVersion: rkeprep/v1
+kind: CustomCA
+metadata:
+  name: simple-ca
+
+spec:
+  caCertPath: /etc/ssl/certs/my-ca.crt
+  updateSystemTrust: true
