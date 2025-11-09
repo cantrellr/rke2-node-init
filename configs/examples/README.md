@@ -284,6 +284,18 @@ sudo ./bin/rke2nodeinit.sh -f config.yaml -P
 
 2. **Then deploy cluster** with registry trust already configured
 
+### Recommended: Repeatable CA generation
+
+For repeatable CA generation and offline workflows prefer the repository scripts and Make targets. Examples (run from repo root):
+
+```bash
+# Generate an encrypted root CA (outputs go to outputs/certs/root-<timestamp>/)
+make certs-root-ca
+
+# Generate a subordinate CA from an example YAML
+make certs-sub-ca INPUT=certs/examples/rke2clusterCA-example.yaml
+```
+
 ## Validation
 
 ### Validate YAML Syntax

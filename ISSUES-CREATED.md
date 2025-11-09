@@ -1,8 +1,8 @@
 # RKE2 Node Init - GitHub Issues Created
 
-**Date:** November 8, 2025  
+**Date:** November 9, 2025  
 **Created by:** GitHub Copilot AI Code Review  
-**Total Issues:** 12
+**Total Issues:** 16
 
 ---
 
@@ -83,6 +83,29 @@ All priority action items from the comprehensive code review have been created a
 **Action:** Check certificates and alert before expiration
 
 ---
+
+## 🆕 ADDITIONAL ISSUES CREATED (NEW)
+
+### Issue #60: [P2-FEATURE] Add --encrypt-sub-key option to subordinate CA generator
+**Link:** https://github.com/cantrellr/rke2-node-init/issues/60  
+**Effort:** 2-4 hours  
+**Action:** Implement `--encrypt-sub-key` (plus `--sub-passphrase`/`--sub-passfile`) in `certs/scripts/generate-subordinate-ca.sh`, update `certs/README.md` with examples, and add a smoke verification snippet. Ensure non-interactive error handling and safe file permissions (chmod 600).
+
+### Issue #61: [P2-QUALITY] Add certificate verification script and Make target `certs-assert`
+**Link:** https://github.com/cantrellr/rke2-node-init/issues/61  
+**Effort:** 2-4 hours  
+**Action:** Create `certs/scripts/verify-chain.sh` with checks for file permissions, openssl verification, Basic Constraints/pathlen, EKU serverAuth, and optional key/cert modulus check. Add `certs-assert` to root `Makefile` and document usage in `certs/README.md`.
+
+### Issue #62: [P2-INFRA] Add GitHub Actions template for non-interactive cert generation
+**Link:** https://github.com/cantrellr/rke2-node-init/issues/62  
+**Effort:** 3-6 hours  
+**Action:** Add `.github/workflows/certs-generation-template.yml` showcasing non-interactive `make certs-root-ca` and `make certs-sub-ca` using `${{ secrets.* }}` placeholders, artifact handling, and running the verification script. Include README notes recommending Vault or ephemeral runners.
+
+### Issue #63: [P2-DOCS] Standardize README files and cross-references
+**Link:** https://github.com/cantrellr/rke2-node-init/issues/63  
+**Effort:** 4-8 hours  
+**Action:** Survey all README files, apply a consistent structure (Summary, TOC, Quick Start, Examples, Security, Help), update links to use Makefile cert targets, and add `docs/README_STANDARDIZATION.md` summarizing changes.
+
 
 ## 📋 NEXT STEPS
 
