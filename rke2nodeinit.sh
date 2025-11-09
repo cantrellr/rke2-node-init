@@ -1,1 +1,0 @@
-bin/rke2nodeinit.sh

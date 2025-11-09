@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # If not running under bash, re-exec with bash
-if [ -z "${BASH_VERSION:-}" ]; then
-  exec /usr/bin/env bash "$0" "$@"
+if [[ -z "$BASH_VERSION" ]]; then
+  exec bash "$0" "$@"
 fi
 
 # Fail if not root
@@ -4728,3 +4728,4 @@ case "${ACTION:-}" in
   custom-ca)   action_custom_ca ;;
   *) print_help; exit 1 ;;
 esac
+
