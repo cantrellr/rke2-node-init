@@ -3,6 +3,10 @@
 
 # Disable specific checks that conflict with our coding style
 
+# SC1017: Literal carriage return
+# Rationale: False positives on Windows - VS Code extension bug detecting phantom CRs
+disable=SC1017
+
 # SC2312: Consider invoking this command separately to avoid masking its return value
 # Rationale: We use pipefail mode and deliberate command chaining
 disable=SC2312
