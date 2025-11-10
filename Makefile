@@ -13,7 +13,8 @@ export TOKEN_OUTPUT_DIR := outputs/generated-token
 export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
 
-.PHONY: token sh kubeconfig
+.PHONY: token sh kubeconfig certs-root-ca certs-sub-ca certs-verify
+ .PHONY: certs-assert
 ## Generate a reusable base64 token and persist it for later use.
 token:
 	@set -euo pipefail; \
@@ -40,3 +41,39 @@ kubeconfig:
 		command -v kubectl; \
 		ls -l /usr/local/bin/kubectl; \
 		kubectl get node -o wide
+
+	## Certificates targets - delegate to certs/Makefile
+	certs-root-ca:
+		@set -euo pipefail; \
+			OUTDIR=$${OUTDIR:-outputs/certs}; \
+			TIMESTAMP=$$(date +%Y%m%d-%H%M%S); \
+			mkdir -p "$$OUTDIR"; \
+			./certs/scripts/generate-root-ca.sh --out-dir "$$OUTDIR/root-$$TIMESTAMP";
+
+	certs-sub-ca:
+		@set -euo pipefail; \
+			if [ -z "${INPUT-}" ]; then \
+				echo "Usage: make certs-sub-ca INPUT=path/to/input.yaml"; exit 1; \
+			fi; \
+			OUTDIR=$${OUTDIR:-outputs/certs}; \
+			TIMESTAMP=$$(date +%Y%m%d-%H%M%S); \
+			mkdir -p "$$OUTDIR"; \
+			# Optionally forward subordinate key encryption flags from Make invocation
+			ENCRYPT_FLAG=""; \
+			SUB_PASSFILE_FLAG=""; \
+			if [ "${SUB_ENCRYPT-}" = "true" ]; then ENCRYPT_FLAG="--encrypt-sub-key"; fi; \
+			if [ -n "${SUB_PASSFILE-}" ]; then SUB_PASSFILE_FLAG="--sub-passfile ${SUB_PASSFILE}"; fi; \
+			./certs/scripts/generate-subordinate-ca.sh ${ENCRYPT_FLAG} ${SUB_PASSFILE_FLAG} --input "${INPUT}" --out-dir "$$OUTDIR/subca-$$TIMESTAMP";
+
+	certs-verify:
+		@set -euo pipefail; \
+			command -v openssl >/dev/null 2>&1 || { echo "openssl missing"; exit 2; }; \
+			echo "openssl: $$(openssl version 2>/dev/null)"; \
+			echo "Make sure you move the generated root CA offline and protect private keys.";
+
+		certs-assert:
+			@set -euo pipefail; \
+			if [ -z "${ROOT-}" ] || [ -z "${SUB-}" ]; then echo "Usage: make certs-assert ROOT=path/to/root.crt SUB=path/to/sub.crt"; exit 1; fi; \
+			command -v ./certs/scripts/verify-chain.sh >/dev/null 2>&1 || true; \
+			./certs/scripts/verify-chain.sh --root "${ROOT}" --sub "${SUB}"; \
+			echo "certs-assert: OK";

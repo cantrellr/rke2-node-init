@@ -122,10 +122,20 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ---------- Paths -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-LOG_DIR="$SCRIPT_DIR/logs"
-OUT_DIR="$SCRIPT_DIR/outputs"
-DOWNLOADS_DIR="$SCRIPT_DIR/downloads"
-STAGE_DIR="/opt/rke2/stage"
+
+# Determine repository root. Prefer git top-level (handles symlinks),
+# otherwise assume repo root is parent of the script (script lives in bin/).
+if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+fi
+
+# Allow environment overrides for output/log locations for backward compatibility.
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/outputs}"
+LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
+DOWNLOADS_DIR="${DOWNLOADS_DIR:-$REPO_ROOT/downloads}"
+STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage}"
 SBOM_DIR="$OUT_DIR/sbom"
 
 mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
