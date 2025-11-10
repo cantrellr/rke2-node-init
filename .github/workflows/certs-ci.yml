@@ -1,0 +1,26 @@
+name: certs-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y openssl coreutils
+      - name: Make scripts executable
+        run: |
+          chmod +x certs/scripts/*.sh tests/ci/*.sh || true
+      - name: Run CA generation test
+        run: |
+          bash tests/ci/test_ca_generation.sh
+      - name: Run subordinate encryption test
+        run: |
+          bash tests/ci/test_subordinate_encryption.sh

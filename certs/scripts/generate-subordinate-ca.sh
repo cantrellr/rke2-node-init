@@ -14,8 +14,11 @@ DAYS="3650"
 PATHLEN="0"
 ROOT_KEY=""
 ROOT_CERT=""
+ENCRYPT_SUB_KEY="false"
+SUB_PASSPHRASE=""
+SUB_PASSFILE=""
 
-usage() { echo "Usage: $0 [--out-dir path] [--input file.yaml] [--cn 'Common Name'] [--org 'Org'] [--root-key path] [--root-cert path]"; }
+usage() { echo "Usage: $0 [--out-dir path] [--input file.yaml] [--cn 'Common Name'] [--org 'Org'] [--root-key path] [--root-cert path] [--encrypt-sub-key] [--sub-passphrase 'pass'] [--sub-passfile path]"; }
 
 PASSFLAG=""
 while [[ $# -gt 0 ]]; do
@@ -30,6 +33,9 @@ while [[ $# -gt 0 ]]; do
   --root-key) ROOT_KEY="$2"; shift 2;;
   --root-cert) ROOT_CERT="$2"; shift 2;;
   --root-passphrase) PASSFLAG="$2"; shift 2;;
+  --encrypt-sub-key) ENCRYPT_SUB_KEY="true"; shift 1;;
+  --sub-passphrase) SUB_PASSPHRASE="$2"; shift 2;;
+  --sub-passfile) SUB_PASSFILE="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
   esac
@@ -76,9 +82,35 @@ SUB_CERT="subordinate-ca.crt"
 echo "Generating subordinate private key (${KEY_SIZE} bits)..."
 openssl genrsa -out "${SUB_KEY}" "${KEY_SIZE}"
 chmod 600 "${SUB_KEY}"
-
 echo "Generating CSR for subordinate CA (CN=${CN}, O=${ORG})..."
 openssl req -new -key "${SUB_KEY}" -out "${SUB_CSR}" -subj "/CN=${CN}/O=${ORG}"
+
+# Generate CSR while key is unencrypted, then optionally encrypt the key for storage
+echo "Generating CSR for subordinate CA (CN=${CN}, O=${ORG})..."
+openssl req -new -key "${SUB_KEY}" -out "${SUB_CSR}" -subj "/CN=${CN}/O=${ORG}"
+
+# Optionally encrypt the subordinate private key using AES-256 if requested
+if [[ "${ENCRYPT_SUB_KEY}" == "true" ]]; then
+  echo "Encrypting subordinate private key..."
+  # Determine passphrase source: explicit, file, or prompt
+  if [[ -n "${SUB_PASSPHRASE}" ]]; then
+    ENC_PASS="${SUB_PASSPHRASE}"
+  elif [[ -n "${SUB_PASSFILE}" ]]; then
+    if [[ ! -f "${SUB_PASSFILE}" ]]; then echo "Sub passfile not found: ${SUB_PASSFILE}"; exit 1; fi
+    ENC_PASS="$(<"${SUB_PASSFILE}")"
+  else
+    read -r -s -p "Enter passphrase to encrypt subordinate private key: " ENC_PASS
+    echo
+  fi
+
+  # Write a temporary encrypted key and replace the unencrypted key
+  openssl rsa -in "${SUB_KEY}" -aes256 -passout pass:"${ENC_PASS}" -out "${SUB_KEY}.enc"
+  mv "${SUB_KEY}.enc" "${SUB_KEY}"
+  shred -u -z "${SUB_KEY}.enc" 2>/dev/null || true
+  chmod 600 "${SUB_KEY}"
+  # Clear ENC_PASS from memory
+  unset ENC_PASS
+fi
 
 # Create a config for CA extensions
 cat > ca-sub-ext.cnf <<EOF
