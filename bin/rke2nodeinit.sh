@@ -3387,15 +3387,86 @@ cache_rke2_artifacts() {
   fi
 
   mkdir -p "$STAGE_DIR"
-  for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
-    if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
-      local tmpf="$STAGE_DIR/.tmp-${f}.$$"
-      cp -f "$DOWNLOADS_DIR/$f" "$tmpf"
-      mv -T "$tmpf" "$STAGE_DIR/$f"
-      [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
-      log INFO "Staged $f into $STAGE_DIR"
-    fi
-  done
+  # Stage selected artifacts. We'll stage the rke2 tarball and a filtered
+  # checksum manifest that contains only tarball entries that were actually
+  # staged/cached (images tarball(s) and RKE2 tarball). This avoids shipping
+  # a manifest containing many unrelated files.
+  if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+    local tmpf="$STAGE_DIR/.tmp-${RKE2_TARBALL}.$$"
+    cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"
+    mv -T "$tmpf" "$STAGE_DIR/$RKE2_TARBALL"
+    log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
+  fi
+
+  # Build a filtered sha256 manifest containing only staged/cached tarballs.
+  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    local out_manifest="$STAGE_DIR/$SHA256_FILE"
+    : > "$out_manifest"
+    # Iterate over each line in the downloaded manifest and include only
+    # entries whose basename is a tar archive and which exist in the
+    # staging or images directories. Also produce a JSON metadata file
+    # describing included files (name, sha256, size, location).
+    local tmp_json="$STAGE_DIR/.tmp-sha-manifest-$$.json"
+    : > "$tmp_json"
+    local first=1
+    while read -r h fn; do
+      # skip empty lines
+      [[ -z "${h:-}" || -z "${fn:-}" ]] && continue
+      bn=$(basename "${fn}")
+      # consider common tarball suffixes
+      if [[ "${bn}" =~ \.(tar|tar\.gz|tar\.zst|tgz)$ ]]; then
+        # prefer stage, then images, then downloads when selecting path
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          chosen_path="$STAGE_DIR/$bn"
+          location="stage"
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          chosen_path="$IMAGES_DIR/$bn"
+          location="images"
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          chosen_path="$DOWNLOADS_DIR/$bn"
+          location="downloads"
+        else
+          chosen_path=""
+          location="missing"
+        fi
+
+        if [[ -n "$chosen_path" ]]; then
+          # write manifest line using basename (common usage expects basename)
+          printf '%s  %s\n' "$h" "$bn" >> "$out_manifest"
+
+          # compute actual sha and size for JSON metadata (fallback to h if sha256sum fails)
+          fsha=$(sha256sum "$chosen_path" 2>/dev/null | awk '{print $1}' || true)
+          if [[ -z "$fsha" ]]; then
+            fsha="$h"
+          fi
+          fsize=$(stat -c%s "$chosen_path" 2>/dev/null || echo 0)
+
+          # append JSON entry
+          if [[ $first -eq 1 ]]; then
+            printf '  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+            first=0
+          else
+            printf ',\n  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+          fi
+        fi
+      fi
+    done < "$DOWNLOADS_DIR/$SHA256_FILE"
+
+    # Wrap JSON entries into a structured object with metadata
+    local out_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+    {
+      echo "{"
+      echo "  \"generated_at\": \"$(date -u +%FT%TZ)\"," 
+      echo "  \"arch\": \"${ARCH}\"," 
+      echo "  \"manifest_file\": \"${SHA256_FILE}\"," 
+      echo "  \"files\": ["
+      cat "$tmp_json" || true
+      echo "  ]"
+      echo "}"
+    } > "$out_json"
+    rm -f "$tmp_json" || true
+    log INFO "Wrote filtered checksum manifest to $out_manifest and metadata to $out_json"
+  fi
 
   # Stage custom-CA helper if present in downloads
   if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
@@ -3955,21 +4026,22 @@ action_image() {
     "$DOWNLOADS_DIR/install.sh"
     "$STAGE_DIR/$RKE2_TARBALL"
     "$STAGE_DIR/$SHA256_FILE"
+    "$STAGE_DIR/sha256sum-${ARCH}.json"
     "$STAGE_DIR/install.sh"
   )
   [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
   [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
   # If there's a sha256 file available, load it to verify artifacts when possible.
   declare -A expected_hash=()
-  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
-    log INFO "Found checksum manifest: $DOWNLOADS_DIR/$SHA256_FILE; loading expected checksums"
-    while read -r h fn; do
-      # Normalize filename to basename when checksums reference relative paths
-      expected_hash["$(basename "$fn")"]="$h"
-    done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
-  elif [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+  # Prefer staged manifest (filtered) when present, otherwise fallback to downloads
+  if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
     log INFO "Found checksum manifest in stage: $STAGE_DIR/$SHA256_FILE; loading expected checksums"
     while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
+  elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    log INFO "Found checksum manifest: $DOWNLOADS_DIR/$SHA256_FILE; loading expected checksums"
+    while read -r h fn; do
+      expected_hash["$(basename "$fn")"]="$h"
+    done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
   else
     log WARN "No SHA256 manifest located in $DOWNLOADS_DIR or $STAGE_DIR; per-artifact verification will be limited"
   fi
@@ -4055,10 +4127,12 @@ action_image() {
   local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
   if command -v python3 >/dev/null 2>&1; then
   log INFO "Generating JSON SBOM: $sbom_json_file"
-  python3 - "$sbom_file" "$sbom_json_file" <<'PY'
+  local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+  python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
 import sys, json
 sbom_txt = sys.argv[1]
 sbom_json = sys.argv[2]
+staged_json = sys.argv[3] if len(sys.argv) > 3 else None
 
 artifacts = []
 header = { 'generated': None, 'rke2_version': None, 'registry': None }
@@ -4118,6 +4192,15 @@ data = {
   'artifacts': artifacts,
   'summary': summary,
 }
+
+# If a staged manifest JSON file exists, attempt to include it under 'staged_manifest'
+if staged_json:
+  try:
+    with open(staged_json, 'r', encoding='utf-8') as sf:
+      staged = json.load(sf)
+    data['staged_manifest'] = staged
+  except Exception:
+    data['staged_manifest'] = None
 
 with open(sbom_json, 'w', encoding='utf-8') as out:
   json.dump(data, out, indent=2, sort_keys=True)
