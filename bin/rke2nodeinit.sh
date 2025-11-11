@@ -4102,6 +4102,72 @@ PY
   prompt_reboot
 }
 
+# ------------------------------------------------------------------------------
+# Function: action_list_images
+# Purpose : Emit a full list of files contained in the RKE2 images archive
+#           (and optionally the release manifest entries) so operators can
+#           inspect exactly which component bundles are present in a release.
+# Arguments:
+#   None
+# Returns :
+#   0 on success, non-zero on error
+# ------------------------------------------------------------------------------
+action_list_images() {
+  initialize_action_context false "list-images"
+  log INFO "Listing RKE2 images archive contents and manifest entries (if present)"
+
+  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local images_candidate=""
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+
+  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$DOWNLOADS_DIR/$IMAGES_TAR"
+  elif [[ -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$IMAGES_DIR/$IMAGES_TAR"
+  fi
+
+  if [[ -z "$images_candidate" ]]; then
+    log ERROR "Images archive not found in $DOWNLOADS_DIR or $IMAGES_DIR: $IMAGES_TAR"
+    return 3
+  fi
+
+  log INFO "Found images archive: $images_candidate"
+
+  # Prefer zstd tools to stream the archive listing
+  # We intentionally hide the OCI blob files (under blobs/) which are
+  # internal layer storage and not useful to operators when listing bundle
+  # contents; filter them out for readability.
+  local _filter="grep -v -E '^blobs(/|$)'"
+  if command -v zstd >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstd -dc | tar -tf) — hiding blobs/ entries"
+    zstd -dc "$images_candidate" | tar -tf - | eval "$_filter"
+  elif command -v zstdcat >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstdcat | tar -tf) — hiding blobs/ entries"
+    zstdcat "$images_candidate" | tar -tf - | eval "$_filter"
+  else
+    # If it's a plain gzip or tar, attempt fallback
+    if [[ "$images_candidate" == *.tar.gz ]]; then
+      log INFO "Listing gzip-compressed archive (tar -tzf) — hiding blobs/ entries"
+      tar -tzf "$images_candidate" | eval "$_filter"
+    else
+      log ERROR "No zstd available to read $images_candidate; please install zstd to list .zst archives"
+      return 2
+    fi
+  fi
+
+  # Also show manifest entries if available in downloads or stage
+  local sha_file="$DOWNLOADS_DIR/${SHA256_FILE:-sha256sum-${ARCH}.txt}"
+  if [[ -f "$sha_file" ]]; then
+    echo
+    log INFO "Release manifest entries from: $sha_file"
+    awk '{print $2}' "$sha_file" | sort -u
+  else
+    log INFO "No release sha256 manifest found in $DOWNLOADS_DIR"
+  fi
+
+  return 0
+}
+
 # ==============
 # Action: SERVER (bootstrap a brand-new control plane)
 # Uses cached artifacts from action_image() and writes /etc/rancher/rke2/config.yaml
@@ -5153,6 +5219,7 @@ NODE_NAME="${NODE_NAME:-$(default_node_hostname)}"
 
 case "${ACTION:-}" in
   image)       action_image  ;;
+  list-images) action_list_images ;;
   server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;
