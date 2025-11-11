@@ -1,0 +1,10 @@
+apiVersion: certs/v1
+kind: SubordinateCARequest
+metadata:
+  name: example-subca
+spec:
+  subject:
+    commonName: "Example RKE2 Cluster CA"
+    organization: "Example Co"
+  keySize: 4096
+  validityDays: 3650
