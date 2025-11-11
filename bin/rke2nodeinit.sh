@@ -311,7 +311,7 @@ OUTPUTS:
                (SHA256 checksums and sizes of cached artifacts)
   - Run log:   outputs/<metadata.name>/README.txt
                (Summary of image preparation steps)
-  - Token:     outputs/generated-token/<cluster>-token.txt
+  - Token:     outputs/tokens/<cluster>-token.txt
                (Generated cluster token for Server with clusterInit: true)
 
 EXIT CODES:
@@ -752,7 +752,7 @@ append_spec_config_extras() {
   # Scalars we pass through as-is if present
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
-    "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
+    "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
     "enable-servicelb" "node-ip" "bind-address" "advertise-address"
@@ -761,18 +761,27 @@ append_spec_config_extras() {
   local k v
   for k in "${scalars[@]}"; do
     _cfg_has_key "$k" && continue
-    v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
+    # Try the hyphenated key first, then a lower-camelCase variant that many
+    # example YAML files use (e.g., nodeIp, bindAddress).
+  # build camelCase (node-ip -> nodeIp)
+  camel_case="$(echo "$k" | awk -F- '{printf "%s", $1; for(i=2;i<=NF;i++){printf toupper(substr($i,1,1)) substr($i,2)}}')" || true
+  v="$(yaml_spec_get_any "$file" "$k" "$camel_case" || true)"
     if [[ -n "$v" ]]; then
       local normalized=""
-      normalized="$(normalize_bool_value "$v")"
-      echo "$k: $normalized" >> "$cfg"
+      # If value looks like true/false, normalize; otherwise emit raw value
+      if [[ "$v" =~ ^(true|false|True|False|TRUE|FALSE)$ ]]; then
+        normalized="$(normalize_bool_value "$v")"
+        echo "$k: $normalized" >> "$cfg"
+      else
+        echo "$k: $v" >> "$cfg"
+      fi
     fi
   done
 
   # Lists we support (emit YAML arrays)
   local -a lists=(
     "kube-apiserver-arg" "kube-controller-manager-arg" "kube-scheduler-arg" "kube-proxy-arg"
-    "node-taint" "node-label" "tls-san"
+    "node-taint" "node-label" "tls-san" "cni" "disable"
   )
 
   for k in "${lists[@]}"; do
