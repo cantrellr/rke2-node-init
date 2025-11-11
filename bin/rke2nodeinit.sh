@@ -3901,7 +3901,9 @@ action_image() {
 
   for f in "${sbom_targets[@]}"; do
     [[ -f "$f" ]] || continue
-    ((total_count++))
+    # Use POSIX arithmetic expansion to increment counters to avoid failures
+    # in environments where ((..)) might not be supported (defensive).
+    total_count=$((total_count + 1))
     local fname size sha mtime src verified
     fname="$(basename "$f")"
     size=$(stat -c%s "$f" 2>/dev/null || echo 0)
@@ -3912,7 +3914,7 @@ action_image() {
     if [[ -n "${expected_hash[$fname]:-}" ]]; then
       if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
         verified="yes"
-        ((verified_count++))
+        verified_count=$((verified_count + 1))
       else
         verified="NO (mismatch)"
       fi
@@ -3935,12 +3937,17 @@ action_image() {
   #   +40 if all discovered artifacts were verified against manifest
   #   +20 if SBOM contains at least one artifact entry
   local security_score=0
-  (( security_score += manifest_present ? 40 : 0 ))
-  if (( total_count > 0 )); then
-    if (( manifest_present == 1 && verified_count == total_count )); then
-      (( security_score += 40 ))
+  # Add 40 points if a manifest was present
+  if [[ $manifest_present -eq 1 ]]; then
+    security_score=$((security_score + 40))
+  fi
+  if [[ $total_count -gt 0 ]]; then
+    # Add 40 points if all artifacts were verified
+    if [[ $manifest_present -eq 1 && $verified_count -eq $total_count ]]; then
+      security_score=$((security_score + 40))
     fi
-    (( security_score += (total_count > 0) ? 20 : 0 ))
+    # Add 20 points if there is at least one artifact
+    security_score=$((security_score + 20))
   fi
 
   {
