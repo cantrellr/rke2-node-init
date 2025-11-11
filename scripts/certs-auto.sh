@@ -12,7 +12,8 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 ROOT_OUT="${OUTDIR}/root-${TIMESTAMP}"
 SUB_OUT="${OUTDIR}/subca-${TIMESTAMP}"
 STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}"
-TOKEN_DIR="${TOKEN_OUTPUT_DIR:-outputs/generated-token}"
+TOKEN_DIR="${TOKEN_OUTPUT_DIR:-outputs/tokens}"
+GENERATE_TOKEN="${GENERATE_TOKEN:-true}"
 
 ROOT_CN="${ROOT_CN:-Offline Root CA}"
 ROOT_PASS="${ROOT_PASS:-}"
@@ -38,8 +39,10 @@ ensure_dir() {
 ensure_dir "${ROOT_OUT}"
 ensure_dir "${SUB_OUT}"
 
-# Ensure token dir
-ensure_dir "${TOKEN_DIR}"
+# Ensure token dir only when token generation is enabled
+if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
+  ensure_dir "${TOKEN_DIR}"
+fi
 
 # Generate or use provided root passphrase
 if [[ -z "${ROOT_PASS}" ]]; then
@@ -113,16 +116,35 @@ sudo install -m 644 "${ROOT_CERT_PATH}" "${STAGE_DIR}/root-ca.crt"
 sudo install -m 644 "${SUB_CERT_PATH}" "${STAGE_DIR}/subordinate-ca.crt"
 sudo install -m 600 "${SUB_KEY_PATH}" "${STAGE_DIR}/subordinate-ca-key.pem" || true
 
-# Generate bootstrap token: random token + '.' + subCA SHA256 fingerprint (no colons)
-BOOT_TOKEN=$(openssl rand -base64 24 | tr -d '=+/')
-SUB_SHA=$(openssl x509 -in "${SUB_CERT_PATH}" -noout -sha256 -fingerprint | sed -E 's/SHA256 Fingerprint=//; s/://g' | tr -d '\n')
-FULL_TOKEN="${BOOT_TOKEN}.${SUB_SHA}"
+## Generate bootstrap token in the canonical RKE2 format used by rke2nodeinit:
+##   - passphrase: 20 bytes, hex
+##   - ca_hash: sha256 of CA in DER form
+##   - token format: K10<ca_hash>::server:<passphrase>
+PASSHEX="$(openssl rand -hex 20 2>/dev/null || true)"
+PASSHEX="${PASSHEX//$'\n'/}"
+if [[ -z "${PASSHEX}" ]]; then
+  PASSHEX="$(dd if=/dev/urandom bs=1 count=40 2>/dev/null | od -An -v -t x1 | tr -d ' \n' | cut -c1-40 || true)"
+  PASSHEX="${PASSHEX//$'\n'/}"
+fi
 
-TOKEN_FILE="${TOKEN_DIR}/bootstrap-${TIMESTAMP}.token"
-echo "${FULL_TOKEN}" > "${TOKEN_FILE}"
-chmod 600 "${TOKEN_FILE}"
-echo "Staging token to ${STAGE_DIR}/bootstrap.token"
-sudo install -m 600 "${TOKEN_FILE}" "${STAGE_DIR}/bootstrap.token" || true
+# Compute ca_hash from subordinate cert (DER -> sha256)
+if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
+  CA_HASH="$(openssl x509 -outform der -in "${SUB_CERT_PATH}" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -z "${CA_HASH}" ]]; then
+    echo "WARNING: failed to compute CA_HASH from ${SUB_CERT_PATH}; falling back to simple token" >&2
+    FULL_TOKEN="${PASSHEX}"
+  else
+    FULL_TOKEN="K10${CA_HASH}::server:${PASSHEX}"
+  fi
+
+  TOKEN_FILE="${TOKEN_DIR}/bootstrap-${TIMESTAMP}.token"
+  echo "${FULL_TOKEN}" > "${TOKEN_FILE}"
+  chmod 600 "${TOKEN_FILE}"
+  echo "Staging token to ${STAGE_DIR}/bootstrap.token"
+  sudo install -m 600 "${TOKEN_FILE}" "${STAGE_DIR}/bootstrap.token" || true
+else
+  echo "GENERATE_TOKEN is disabled; skipping token creation and token staging"
+fi
 
 echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: ${TOKEN_FILE}"
 

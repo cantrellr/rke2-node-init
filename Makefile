@@ -9,7 +9,7 @@
 
 export SHELL := /bin/bash
 export TOKEN_SIZE ?= 32
-export TOKEN_OUTPUT_DIR := outputs/generated-token
+export TOKEN_OUTPUT_DIR := outputs/tokens
 export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
 
@@ -144,4 +144,4 @@ certs-auto:
 	fi
 	@echo "Running scripts/certs-auto.sh to perform CA automation"
 	@chmod +x scripts/certs-auto.sh
-	@OUTDIR="${OUTDIR:-outputs/certs}" STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}" TOKEN_OUTPUT_DIR="${TOKEN_OUTPUT_DIR:-outputs/generated-token}" ROOT_CN="${ROOT_CN}" ROOT_PASS="${ROOT_PASS}" SUB_CN="${SUB_CN}" SUB_ORG="${SUB_ORG}" SUB_ENCRYPT="${SUB_ENCRYPT}" SUB_PASSFILE="${SUB_PASSFILE}" SUB_PATHLEN="${SUB_PATHLEN}" ./scripts/certs-auto.sh
+	@OUTDIR="${OUTDIR:-outputs/certs}" STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}" TOKEN_OUTPUT_DIR="${TOKEN_OUTPUT_DIR:-outputs/tokens}" GENERATE_TOKEN="false" ROOT_CN="${ROOT_CN}" ROOT_PASS="${ROOT_PASS}" SUB_CN="${SUB_CN}" SUB_ORG="${SUB_ORG}" SUB_ENCRYPT="${SUB_ENCRYPT}" SUB_PASSFILE="${SUB_PASSFILE}" SUB_PATHLEN="${SUB_PATHLEN}" ./scripts/certs-auto.sh
