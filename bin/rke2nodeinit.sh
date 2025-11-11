@@ -144,7 +144,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 RKE2_VERSION=""                                       # auto-detect if empty
 # WARNING: These are EXAMPLE defaults only. Override with -r/-u/-p or via YAML config.
 #          DO NOT use these default credentials in production environments.
-REGISTRY="rke2registry.dev.local"
+REGISTRY=""
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
@@ -3064,6 +3064,22 @@ ensure_staged_artifacts() {
   if (( missing != 0 )); then
     exit 3
   fi
+
+  # Runtime verification: validate staged files against the provided sha256 file
+  if command -v sha256sum >/dev/null 2>&1; then
+    if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+      log INFO "Verifying staged artifacts checksums in $STAGE_DIR"
+      (cd "$STAGE_DIR" && sha256sum -c "$SHA256_FILE" >>"$LOG_FILE" 2>&1) || {
+        log ERROR "Staged artifact checksum verification FAILED. Aborting install. Remove bad artifacts and re-run 'image'."
+        exit 3
+      }
+      log INFO "Staged artifacts checksum verification passed"
+    else
+      log WARN "No checksum file present in $STAGE_DIR; cannot verify staged artifacts"
+    fi
+  else
+    log WARN "sha256sum not available; skipping staged artifact verification"
+  fi
 }
 
 # ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
@@ -3244,29 +3260,49 @@ cache_rke2_artifacts() {
   [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
   chmod +x install.sh || true
 
-  # Verify checksums when possible
+  # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
     if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
-      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $IMAGES_TAR; aborting"
+        popd >/dev/null || true
+        return 2
+      fi
+    else
+      log ERROR "Checksum entry for $IMAGES_TAR not found in $SHA256_FILE; aborting"
+      popd >/dev/null || true
+      return 2
     fi
+
     if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
-      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $RKE2_TARBALL; aborting"
+        popd >/dev/null || true
+        return 3
+      fi
+    else
+      log WARN "Checksum entry for $RKE2_TARBALL not found in $SHA256_FILE; continuing but installer may attempt network access"
     fi
   fi
 
   popd >/dev/null
 
   # --- Stage artifacts for offline install -----------------------------------
-  mkdir -p /var/lib/rancher/rke2/agent/images/
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  mkdir -p "$IMAGES_DIR"
   if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
-    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
+    local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+    mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+    log INFO "Staged ${IMAGES_TAR} into $IMAGES_DIR/"
   fi
 
   mkdir -p "$STAGE_DIR"
   for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
     if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
-      cp -f "$DOWNLOADS_DIR/$f" "$STAGE_DIR/"
+      local tmpf="$STAGE_DIR/.tmp-${f}.$$"
+      cp -f "$DOWNLOADS_DIR/$f" "$tmpf"
+      mv -T "$tmpf" "$STAGE_DIR/$f"
       [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
       log INFO "Staged $f into $STAGE_DIR"
     fi

@@ -377,3 +377,20 @@ The script honors several environment variables that can be set prior to executi
 ---
 
 For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh -h`.
+
+## Artifact staging & verification (quick reference)
+
+When you bring your own artifact directory to an air-gapped host using `INSTALL_RKE2_ARTIFACT_PATH`, the script will strictly verify checksums and stage artifacts into `/opt/rke2/stage` and `/var/lib/rancher/rke2/agent/images`.
+
+Quick steps to verify staged artifacts:
+
+```bash
+# list staged images
+ls -lh /var/lib/rancher/rke2/agent/images/
+
+# verify staged checksum file (arch-specific)
+cd /opt/rke2/stage
+sha256sum -c sha256sum-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/').txt
+```
+
+If checksum verification fails, delete the mismatched files from the staged locations and re-run `image` to re-stage clean artifacts.
