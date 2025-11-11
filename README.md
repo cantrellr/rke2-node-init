@@ -238,6 +238,33 @@ When `spec.interfaces` is supplied, the first entry is treated as the primary ad
 ## Offline Registry & CA Handling
 
 - Custom CA bundles can be referenced by relative or absolute paths. They are installed into `/usr/local/share/ca-certificates` when `installToOSTrust: true`.
+
+## Testing the offline artifact staging (INSTALL_RKE2_ARTIFACT_PATH)
+
+To test the new staging workflow locally before applying to an air-gapped environment, prepare a small artifact directory on a host that has access to the release assets:
+
+```bash
+mkdir -p /root/rke2-artifacts && cd /root/rke2-artifacts
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/rke2-images.linux-amd64.tar.zst'
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/rke2.linux-amd64.tar.gz'
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/sha256sum-amd64.txt'
+curl -sfL https://get.rke2.io --output install.sh
+chmod +x install.sh
+```
+
+Then, on the offline target node (or on the same machine for a dry run), run the server/agent action with the env var set and the script will stage artifacts into `/opt/rke2/stage` and proceed:
+
+```bash
+INSTALL_RKE2_ARTIFACT_PATH=/root/rke2-artifacts sudo ./bin/rke2nodeinit.sh server
+# or for agent:
+INSTALL_RKE2_ARTIFACT_PATH=/root/rke2-artifacts sudo ./bin/rke2nodeinit.sh agent
+```
+
+Notes:
+- The script enforces strict checksum verification using `sha256sum-<arch>.txt`. If checksums are missing or invalid, staging will fail.
+- Existing staged files that do not match checksums will NOT be overwritten; remove them and re-run the command.
+- Staged artifacts are placed into `/opt/rke2/stage` and images into `/var/lib/rancher/rke2/agent/images`.
+
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.
