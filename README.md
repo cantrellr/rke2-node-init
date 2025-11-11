@@ -195,9 +195,17 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
 | `-h` | Display built-in help |
 
-### Makefile Helpers
+-### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL and saves it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+- `make token` generates a base64 token using OpenSSL and saves it under `outputs/tokens/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+
+- `make certs-auto` will generate a Root CA and subordinate CA and stage them under `outputs/certs/` and the system stage directory (`/opt/rke2/stage/certs`). Note: by default `make certs-auto` will NOT create a bootstrap token or a tokens folder. To enable token generation (for testing or non-production workflows), run:
+
+```bash
+make certs-auto GENERATE_TOKEN=true
+```
+
+When enabled, tokens are written under `outputs/tokens/` and a staged copy is placed at `/opt/rke2/stage/certs/bootstrap.token`.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
 
