@@ -142,10 +142,11 @@ if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
   chmod 600 "${TOKEN_FILE}"
   echo "Staging token to ${STAGE_DIR}/bootstrap.token"
   sudo install -m 600 "${TOKEN_FILE}" "${STAGE_DIR}/bootstrap.token" || true
+  echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: ${TOKEN_FILE}"
 else
+  TOKEN_FILE=""
   echo "GENERATE_TOKEN is disabled; skipping token creation and token staging"
+  echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: <skipped>"
 fi
-
-echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: ${TOKEN_FILE}"
 
 exit 0
