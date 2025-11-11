@@ -3068,11 +3068,36 @@ ensure_staged_artifacts() {
   # Runtime verification: validate staged files against the provided sha256 file
   if command -v sha256sum >/dev/null 2>&1; then
     if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
-      log INFO "Verifying staged artifacts checksums in $STAGE_DIR"
-      (cd "$STAGE_DIR" && sha256sum -c "$SHA256_FILE" >>"$LOG_FILE" 2>&1) || {
+      # Some artifacts (image bundles) are staged into a separate images dir
+      # (IMAGES_DIR). Build a temporary manifest that maps manifest entries to
+      # their actual staged locations (STAGE_DIR or IMAGES_DIR) so sha256sum
+      # can validate them regardless of which staging target holds the file.
+      local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+      log INFO "Verifying staged artifacts checksums in $STAGE_DIR (including $IMAGES_DIR)"
+      local tmp_manifest
+      tmp_manifest=$(mktemp)
+      # Read original manifest and map each entry to where the file actually lives
+      while read -r h fn; do
+        # Normalize to basename when manifest references relative paths
+        local bn
+        bn=$(basename "${fn}")
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          printf '%s  %s\n' "$h" "$STAGE_DIR/$bn" >>"$tmp_manifest"
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          printf '%s  %s\n' "$h" "$IMAGES_DIR/$bn" >>"$tmp_manifest"
+        else
+          # Leave as basename so sha256sum reports missing files in a helpful way
+          printf '%s  %s\n' "$h" "$bn" >>"$tmp_manifest"
+        fi
+      done < "$STAGE_DIR/$SHA256_FILE"
+
+      # Run verification against the normalized manifest
+      if ! sha256sum -c "$tmp_manifest" >>"$LOG_FILE" 2>&1; then
         log ERROR "Staged artifact checksum verification FAILED. Aborting install. Remove bad artifacts and re-run 'image'."
+        rm -f "$tmp_manifest" || true
         exit 3
-      }
+      fi
+      rm -f "$tmp_manifest" || true
       log INFO "Staged artifacts checksum verification passed"
     else
       log WARN "No checksum file present in $STAGE_DIR; cannot verify staged artifacts"
