@@ -24,7 +24,7 @@ esac
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
-#            
+#
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
@@ -45,7 +45,7 @@ esac
 #
 # Connectivity expectations:
 #   - image is the ONLY action that requires Internet access to gather artifacts
-#   - All other actions (push, server, add-server, agent, verify, label-node, 
+#   - All other actions (push, server, add-server, agent, verify, label-node,
 #     taint-node, custom-ca) are designed to run fully offline
 #
 # Key features in this version:
@@ -890,7 +890,7 @@ trim_whitespace() {
   local _s="$1"
   # Handle empty or whitespace-only strings
   [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
-  # Strip leading whitespace: 
+  # Strip leading whitespace:
   #   ${_s%%[![:space:]]*} finds everything up to first non-space
   #   ${_s#...} removes that prefix, leaving string from first non-space onward
   _s="${_s#${_s%%[![:space:]]*}}"
@@ -947,12 +947,12 @@ interface_decode_entry() {
 
   # Split on pipe delimiter into array of key=value pairs
   IFS='|' read -r -a _pairs <<<"$_entry"
-  
+
   # Validate we have at least one pair
   if (( ${#_pairs[@]} == 0 )); then
     return 1
   fi
-  
+
   local _pair _key _value
   for _pair in "${_pairs[@]}"; do
     [[ -z "$_pair" ]] && continue
@@ -970,7 +970,7 @@ interface_decode_entry() {
     esac
     _dest["$_key"]="$_value"
   done
-  
+
   return 0
 }
 
@@ -1108,7 +1108,7 @@ for raw in lines:
         continue
 
     indent = len(line) - len(line.lstrip(' '))
-    
+
     # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
     # This must be checked before dash_match to avoid treating sibling list items as interface items
     if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
@@ -2067,7 +2067,7 @@ write_netplan_multi() {
       if [[ -n "${_nic[mtu]:-}" ]]; then
         echo "      mtu: ${_nic[mtu]}"
       fi
-      
+
       # Disable IPv6 on all interfaces
       echo "      accept-ra: false"
       echo "      link-local: []"
@@ -3029,6 +3029,14 @@ verify_custom_cluster_ca() {
 # ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
+  # If operator provided a local artifact path, attempt to stage from it into STAGE_DIR
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; attempting to stage artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}' into '$STAGE_DIR'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}" || {
+      log ERROR "Staging artifacts from INSTALL_RKE2_ARTIFACT_PATH failed. Aborting."
+      exit 3
+    }
+  fi
   if [[ ! -f "$STAGE_DIR/install.sh" ]]; then
     if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
@@ -3182,7 +3190,7 @@ EOF
 # Returns :
 #   Returns 0 on success.
 # ------------------------------------------------------------------------------
-fetch_rke2_ca_generator() { 
+fetch_rke2_ca_generator() {
   # Prefetch custom-CA helper for offline use
   if command -v curl >/dev/null 2>&1; then
     local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
@@ -3206,6 +3214,14 @@ fetch_rke2_ca_generator() {
 # ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
+
+  # If operator provided a local artifact path, prefer it and stage from there
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; staging artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}"
+    return $?
+  fi
+
   pushd "$DOWNLOADS_DIR" >/dev/null
 
   # Pick version: from config/env or latest online
@@ -3309,6 +3325,177 @@ ca_trust_registries() {
   fi
   : > /etc/rancher/rke2/config.yaml
 }
+
+# ----------------------------------------------------------------------------
+# Function: stage_from_artifact_path
+# Purpose : Stage RKE2 artifacts from a local artifact path when
+#           INSTALL_RKE2_ARTIFACT_PATH is set. Strict checksum verification
+#           is performed. Files are not overwritten silently; operator must
+#           delete existing mismatched files manually.
+# Arguments:
+#   $1 - Path to artifacts (INSTALL_RKE2_ARTIFACT_PATH)
+# Returns :
+#   0 on success, non-zero on verification or staging error
+# ----------------------------------------------------------------------------
+stage_from_artifact_path() {
+  set -euo pipefail
+  local ART_PATH="$1"
+  local ARCH="${ARCH:-$(uname -m)}"
+  # normalize ARCH to expected values (amd64/arm64)
+  case "$ARCH" in
+    x86_64|amd64) ARCH="amd64" ; SUFFIX="linux-amd64" ;;
+    aarch64|arm64) ARCH="arm64" ; SUFFIX="linux-arm64" ;;
+    *) log ERROR "Unsupported architecture: $ARCH" ; return 1 ;;
+  esac
+
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage}"
+  mkdir -p "$IMAGES_DIR" "$STAGE_DIR"
+
+  # Find checksum file
+  local SHA_FILE="${ART_PATH}/sha256sum-${ARCH}.txt"
+  if [[ -f "$SHA_FILE" ]]; then
+    log INFO "Found checksum file: $SHA_FILE"
+  else
+    log ERROR "Checksum file sha256sum-${ARCH}.txt not found in $ART_PATH; strict mode requires it"
+    return 2
+  fi
+
+  # Helper to check checksum for a single file (must exist in ART_PATH)
+  verify_checksum_for() {
+    local fname="$1"
+    if ! grep -q "$(basename "$fname")" "$SHA_FILE" 2>/dev/null; then
+      log ERROR "No checksum entry for $(basename "$fname") in $SHA_FILE"
+      return 3
+    fi
+    (cd "$ART_PATH" && grep "$(basename "$fname")" "$SHA_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1 || return 4
+    return 0
+  }
+
+  # Determine image tar candidates (prefer zst, commit suffix optional)
+  local IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}.tar.zst"
+  local IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}.tar.gz"
+  # also accept commit-suffixed variants if present
+  if [[ -n "${INSTALL_RKE2_COMMIT:-}" ]]; then
+    IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.zst"
+    IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.gz"
+  fi
+
+  local selected_image_tar=""
+  if [[ -f "$IMAGES_ZST" ]]; then
+    selected_image_tar="$IMAGES_ZST"
+  elif [[ -f "$IMAGES_GZ" ]]; then
+    selected_image_tar="$IMAGES_GZ"
+  else
+    # try un-suffixed search for any rke2-images-* bundles
+    local extra
+    extra=$(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" | sort)
+    if [[ -n "$extra" ]]; then
+      # pick first as the primary image bundle
+      selected_image_tar="$(echo "$extra" | head -n1)"
+    fi
+  fi
+
+  if [[ -z "$selected_image_tar" ]]; then
+    log ERROR "No rke2-images tarball found in $ART_PATH"
+    return 5
+  fi
+
+  log INFO "Selected image tar: $(basename "$selected_image_tar")"
+
+  # Verify checksum for selected image tar and rke2 tarball and install.sh if present
+  local RKE2_TARBALL="${ART_PATH}/rke2.${SUFFIX}.tar.gz"
+  local INSTALL_SH="${ART_PATH}/install.sh"
+
+  verify_checksum_for "$selected_image_tar" || { log ERROR "Image checksum verification failed"; return 6; }
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    verify_checksum_for "$RKE2_TARBALL" || { log ERROR "RKE2 tarball checksum verification failed"; return 7; }
+  else
+    log WARN "rke2.${SUFFIX}.tar.gz not present in artifact path; installer may attempt network download unless install.sh also present in stage"
+  fi
+  if [[ -f "$INSTALL_SH" ]]; then
+    # no checksum expected for install.sh but ensure it's present
+    log INFO "Found local install.sh; will stage it into $STAGE_DIR"
+  fi
+
+  # Before moving, check for existing target file and avoid overwrite
+  local target_images_name="$(basename "$selected_image_tar")"
+  local target_images_path="$IMAGES_DIR/$target_images_name"
+  if [[ -f "$target_images_path" ]]; then
+    # verify existing file matches checksum; if not, do NOT overwrite
+    (cd "$IMAGES_DIR" && sha256sum "$target_images_name" | awk '{print $1}') >/tmp/existing.sum 2>/dev/null || true
+    local existing_sum
+    existing_sum=$(awk '{print $1}' /tmp/existing.sum 2>/dev/null || true)
+    local expected_sum
+    expected_sum=$(grep "$(basename "$selected_image_tar")" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+    if [[ -n "$existing_sum" && "$existing_sum" == "$expected_sum" ]]; then
+      log INFO "Target image $target_images_path already present and checksum matches; skipping move."
+    else
+      log ERROR "Target image $target_images_path already exists and checksum does not match expected value. Will NOT overwrite. Please delete the file and re-run."
+      return 8
+    fi
+  else
+    # atomic copy then move
+    local tmp_dest
+    tmp_dest="$IMAGES_DIR/.tmp-$(basename "$selected_image_tar").$$"
+    cp -f "$selected_image_tar" "$tmp_dest"
+    mv -T "$tmp_dest" "$target_images_path"
+    log INFO "Moved $(basename "$selected_image_tar") -> $target_images_path"
+  fi
+
+  # Stage additional rke2-images-* bundles
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local bn
+    bn=$(basename "$f")
+    if [[ -f "$IMAGES_DIR/$bn" ]]; then
+      log INFO "Additional image bundle $bn already exists in $IMAGES_DIR; skipping"
+      continue
+    fi
+    cp -f "$f" "$IMAGES_DIR/"
+    log INFO "Staged additional image bundle $bn into $IMAGES_DIR"
+  done < <(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" ! -name "$(basename "$selected_image_tar")" | sort)
+
+  # Stage rke2 tarball and install.sh into STAGE_DIR (do not overwrite existing mismatching files)
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    local bn_rke2
+    bn_rke2=$(basename "$RKE2_TARBALL")
+    if [[ -f "$STAGE_DIR/$bn_rke2" ]]; then
+      # verify checksum
+      local existing
+      existing=$(sha256sum "$STAGE_DIR/$bn_rke2" | awk '{print $1}' 2>/dev/null || true)
+      local expected
+      expected=$(grep "${bn_rke2}" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+      if [[ -n "$existing" && "$existing" == "$expected" ]]; then
+        log INFO "RKE2 tarball already staged and checksum matches; skipping"
+      else
+        log ERROR "RKE2 tarball already exists at $STAGE_DIR/$bn_rke2 and does not match checksum; will NOT overwrite. Please remove it to proceed."
+        return 9
+      fi
+    else
+      cp -f "$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged $bn_rke2 into $STAGE_DIR"
+    fi
+  fi
+
+  if [[ -f "$INSTALL_SH" ]]; then
+    if [[ -f "$STAGE_DIR/install.sh" ]]; then
+      # if already present, do not overwrite
+      log INFO "install.sh already exists in $STAGE_DIR; leaving in place"
+    else
+      cp -f "$INSTALL_SH" "$STAGE_DIR/install.sh"
+      chmod 0755 "$STAGE_DIR/install.sh" || true
+      log INFO "Staged install.sh into $STAGE_DIR/install.sh"
+    fi
+  fi
+
+  # Finally, ensure environment points to stage dir for installer
+  export INSTALL_RKE2_ARTIFACT_PATH="$STAGE_DIR"
+  log INFO "Set INSTALL_RKE2_ARTIFACT_PATH=$STAGE_DIR for installer"
+
+  return 0
+}
+
 
 # ------------------------------------------------------------------------------
 # Function: install_nerdctl
@@ -3905,7 +4092,7 @@ action_server() {
 
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
-  
+
   log INFO "Writing netplan configuration and applying network settings..."
   if (( ${#NET_INTERFACES[@]} )); then
     write_netplan --interfaces "${NET_INTERFACES[@]}"
@@ -4624,7 +4811,7 @@ action_custom_ca() {
   local TOKEN="" TOKEN_FILE=""
   generate_bootstrap_token
   TOKEN=$token
-  
+
   if [[ -z "$TOKEN" ]]; then
     log ERROR "Failed to generate bootstrap token."
     exit 1
