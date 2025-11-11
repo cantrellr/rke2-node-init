@@ -3763,6 +3763,11 @@ action_push() {
 action_image() {
   initialize_action_context true "image"
 
+  # Detailed run-level logging: capture key inputs and paths so operators
+  # and auditors can see what decisions were made by the image action.
+  log INFO "Starting action_image: RKE2_VERSION='${RKE2_VERSION:-<auto>}' REGISTRY='${REGISTRY:-<none>}' REG_USER='${REG_USER:-<none>}'"
+  log INFO "Paths: DOWNLOADS_DIR='$DOWNLOADS_DIR' STAGE_DIR='$STAGE_DIR' SBOM_DIR='$SBOM_DIR' OUT_DIR='$OUT_DIR'"
+
   # --- Read YAML (optional) -------------------------------------------------
   local REQ_VER="${RKE2_VERSION:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
@@ -3811,8 +3816,20 @@ action_image() {
 
   # install_nerdctl
   fetch_rke2_ca_generator
-  cache_rke2_artifacts
-  ca_trust_registries
+    # cache_rke2_artifacts downloads / stages required artifacts into
+    # $DOWNLOADS_DIR and $STAGE_DIR. It emits its own logging, but record
+    # the start/end here for clearer run traces.
+    log INFO "Caching RKE2 artifacts (downloads -> $DOWNLOADS_DIR, stage -> $STAGE_DIR)"
+    cache_rke2_artifacts
+    log INFO "Completed artifact caching; scanning staged/downloaded artifacts for verification"
+
+    # Trust any configured registries (may install custom CA into registries.yaml)
+    ca_trust_registries
+
+    # Immediately collect a list of relevant artifacts for reporting and checksum verification.
+    # We will inspect both downloads and staged paths so the SBOM and logs accurately reflect
+    # what the image action produced.
+    log INFO "Collecting artifact inventory for verification"
 
   # --- Save site defaults (DNS/search) ---------------------------------------
   local STATE="/etc/rke2image.defaults"
@@ -3841,29 +3858,183 @@ action_image() {
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  # Build sbom_targets to include both downloads and files staged into STAGE_DIR.
   local sbom_targets=(
     "$DOWNLOADS_DIR/$IMAGES_TAR"
     "$DOWNLOADS_DIR/$RKE2_TARBALL"
     "$DOWNLOADS_DIR/$SHA256_FILE"
     "$DOWNLOADS_DIR/install.sh"
+    "$STAGE_DIR/$RKE2_TARBALL"
+    "$STAGE_DIR/$SHA256_FILE"
+    "$STAGE_DIR/install.sh"
   )
   [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
   [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
+  # If there's a sha256 file available, load it to verify artifacts when possible.
+  declare -A expected_hash=()
+  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    log INFO "Found checksum manifest: $DOWNLOADS_DIR/$SHA256_FILE; loading expected checksums"
+    while read -r h fn; do
+      # Normalize filename to basename when checksums reference relative paths
+      expected_hash["$(basename "$fn")"]="$h"
+    done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
+  elif [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+    log INFO "Found checksum manifest in stage: $STAGE_DIR/$SHA256_FILE; loading expected checksums"
+    while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
+  else
+    log WARN "No SHA256 manifest located in $DOWNLOADS_DIR or $STAGE_DIR; per-artifact verification will be limited"
+  fi
+
+  # Prepare sbom header
   {
     echo "# RKE2 Image Prep SBOM"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "RKE2_VERSION: ${RKE2_VERSION}"
-    echo "REGISTRY: ${REGISTRY}"
+    echo "RKE2_VERSION: ${RKE2_VERSION:-<auto>}"
+    echo "REGISTRY: ${REGISTRY:-<none>}"
     echo
-        log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
-        echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
-    for f in "${sbom_targets[@]}"; do
-      [[ -f "$f" ]] || continue
-      sha256sum "$f"
-      ls -l "$f" | awk '{print "SIZE " $5 "  " $9}'
-    done
+    echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
   } > "$sbom_file"
-  log INFO "SBOM written to $sbom_file"
+
+  # Track verification metrics for a simple security score
+  local total_count=0 verified_count=0 manifest_present=0
+  [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
+
+  for f in "${sbom_targets[@]}"; do
+    [[ -f "$f" ]] || continue
+    ((total_count++))
+    local fname size sha mtime src verified
+    fname="$(basename "$f")"
+    size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    mtime=$(date -u -r "$f" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>")
+    sha=$(sha256sum "$f" | awk '{print $1}')
+    src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
+    verified="unknown"
+    if [[ -n "${expected_hash[$fname]:-}" ]]; then
+      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+        verified="yes"
+        ((verified_count++))
+      else
+        verified="NO (mismatch)"
+      fi
+    else
+      # No expected checksum: still report computed sha
+      verified="no-manifest"
+    fi
+
+    # Append detailed entry to SBOM
+    printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
+    # Also log the verification outcome for runtime visibility
+    log INFO "Artifact: $f size=$size sha256=$sha verified=$verified"
+  done
+
+  # Compute a simple security score (0-100) so operators can quickly see if
+  # the image collected expected metadata. This is intentionally simple and
+  # conservative; projects wanting a richer score should integrate scanners.
+  # Scoring heuristic (example):
+  #   +40 if checksum manifest present
+  #   +40 if all discovered artifacts were verified against manifest
+  #   +20 if SBOM contains at least one artifact entry
+  local security_score=0
+  (( security_score += manifest_present ? 40 : 0 ))
+  if (( total_count > 0 )); then
+    if (( manifest_present == 1 && verified_count == total_count )); then
+      (( security_score += 40 ))
+    fi
+    (( security_score += (total_count > 0) ? 20 : 0 ))
+  fi
+
+  {
+    echo
+    echo "# Summary"
+    echo "Artifacts discovered: $total_count"
+    echo "Artifacts verified against manifest: $verified_count"
+    echo "SHA256 manifest present: ${manifest_present}" 
+    echo "security_score: ${security_score}"
+  } >> "$sbom_file"
+
+  log INFO "SBOM written to $sbom_file (artifacts=$total_count verified=$verified_count security_score=$security_score)"
+
+  # Also emit a machine-friendly JSON SBOM for tooling compatibility. We use
+  # a small Python helper here to avoid fragile shell JSON escaping.
+  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
+  if command -v python3 >/dev/null 2>&1; then
+  log INFO "Generating JSON SBOM: $sbom_json_file"
+  python3 - "$sbom_file" "$sbom_json_file" <<'PY'
+import sys, json
+sbom_txt = sys.argv[1]
+sbom_json = sys.argv[2]
+
+artifacts = []
+header = { 'generated': None, 'rke2_version': None, 'registry': None }
+summary = {}
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    line = line.rstrip('\n')
+    if not line or line.startswith('#'):
+      continue
+    # artifact lines use a pipe delimiter: path | size | sha | verified | mtime | source
+    if '|' in line:
+      parts = [p.strip() for p in line.split('|')]
+      if len(parts) >= 6:
+        size = parts[1]
+        try:
+          size = int(size)
+        except Exception:
+          pass
+        artifacts.append({
+          'path': parts[0],
+          'size_bytes': size,
+          'sha256': parts[2],
+          'verified': parts[3],
+          'mtime': parts[4],
+          'source': parts[5]
+        })
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    if line.startswith('Generated:'):
+      header['generated'] = line.split('Generated:',1)[1].strip()
+    elif line.startswith('RKE2_VERSION:'):
+      header['rke2_version'] = line.split('RKE2_VERSION:',1)[1].strip()
+    elif line.startswith('REGISTRY:'):
+      header['registry'] = line.split('REGISTRY:',1)[1].strip()
+    elif line.startswith('Artifacts discovered:'):
+      try:
+        summary['artifacts_discovered'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_discovered'] = line.split(':',1)[1].strip()
+    elif line.startswith('Artifacts verified against manifest:'):
+      try:
+        summary['artifacts_verified'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_verified'] = line.split(':',1)[1].strip()
+    elif line.startswith('SHA256 manifest present:'):
+      summary['sha256_manifest_present'] = line.split(':',1)[1].strip()
+    elif line.startswith('security_score:'):
+      try:
+        summary['security_score'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['security_score'] = line.split(':',1)[1].strip()
+
+data = {
+  'metadata': header,
+  'artifacts': artifacts,
+  'summary': summary,
+}
+
+with open(sbom_json, 'w', encoding='utf-8') as out:
+  json.dump(data, out, indent=2, sort_keys=True)
+print(sbom_json)
+PY
+  if [[ $? -eq 0 ]]; then
+    log INFO "JSON SBOM written to $sbom_json_file"
+  else
+    log WARN "Failed to generate JSON SBOM ($sbom_json_file)"
+  fi
+  else
+  log WARN "python3 not available; skipping JSON SBOM generation"
+  fi
 
   # README in outputs/<SPEC_NAME>
   log INFO "Write README in Outputs directory..."
