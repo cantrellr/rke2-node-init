@@ -755,7 +755,7 @@ append_spec_config_extras() {
     "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
-    "enable-servicelb" "node-ip" "bind-address" "advertise-address"
+    "enable-servicelb" "node-ip" "bind-address" "advertise-address" "token-file"
   )
 
   local k v
@@ -789,6 +789,21 @@ append_spec_config_extras() {
     if yaml_spec_has_list "$file" "$k"; then
       echo "$k:" >> "$cfg"
       yaml_spec_list_items "$file" "$k" | sed 's/^/  - /' >> "$cfg"
+    else
+      # Fallback: some manifests express these as scalars (e.g., cni: "cilium")
+      local scalar_val
+      scalar_val="$(yaml_spec_get "$file" "$k" || true)"
+      if [[ -n "$scalar_val" ]]; then
+        # Emit either a scalar or a single-item list depending on key semantics
+        if [[ "$k" == "cni" ]]; then
+          # cni can be a scalar in RKE2 config
+          echo "$k: \"$scalar_val\"" >> "$cfg"
+        else
+          # default: emit as a single item list
+          echo "$k:" >> "$cfg"
+          echo "  - $scalar_val" >> "$cfg"
+        fi
+      fi
     fi
   done
 }
