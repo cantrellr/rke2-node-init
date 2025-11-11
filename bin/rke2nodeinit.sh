@@ -3077,19 +3077,83 @@ ensure_staged_artifacts() {
       local tmp_manifest
       tmp_manifest=$(mktemp)
       # Read original manifest and map each entry to where the file actually lives
+      # We collect three lists:
+      #  - mapped_lines: entries we can point at an existing file
+      #  - missing_entries: entries not found as standalone files
+      #  - image_like_missing: subset of missing_entries that look like per-flavor image bundles
+      local -a mapped_lines=()
+      local -a missing_entries=()
+      local -a image_like_missing=()
       while read -r h fn; do
         # Normalize to basename when manifest references relative paths
         local bn
         bn=$(basename "${fn}")
         if [[ -f "$STAGE_DIR/$bn" ]]; then
-          printf '%s  %s\n' "$h" "$STAGE_DIR/$bn" >>"$tmp_manifest"
+          mapped_lines+=("$h  $STAGE_DIR/$bn")
         elif [[ -f "$IMAGES_DIR/$bn" ]]; then
-          printf '%s  %s\n' "$h" "$IMAGES_DIR/$bn" >>"$tmp_manifest"
+          mapped_lines+=("$h  $IMAGES_DIR/$bn")
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $DOWNLOADS_DIR/$bn")
         else
-          # Leave as basename so sha256sum reports missing files in a helpful way
-          printf '%s  %s\n' "$h" "$bn" >>"$tmp_manifest"
+          # Not present as a standalone file; record for later decision
+          missing_entries+=("$h  $bn")
+          # Heuristic: many per-flavor image bundles are named rke2-images-*. Treat
+          # those as image-like so they can be considered satisfied by a consolidated
+          # images tarball when present and verified.
+          if [[ "$bn" == rke2-images-* ]]; then
+            image_like_missing+=("$h  $bn")
+          fi
         fi
       done < "$STAGE_DIR/$SHA256_FILE"
+
+      # Verify consolidated images tarball first (if present in stage/downloads/images dir)
+      local images_tar_candidate=""
+      for p in "$STAGE_DIR/$IMAGES_TAR" "$IMAGES_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$IMAGES_TAR"; do
+        if [[ -f "$p" ]]; then images_tar_candidate="$p"; break; fi
+      done
+
+      local images_consolidated_verified=0
+      if [[ -n "$images_tar_candidate" ]]; then
+        # If the manifest contains an entry for the consolidated images tar, prefer
+        # to verify that explicitly. Otherwise, we'll verify mapped_lines below
+        # and treat image-like missing entries as covered by the consolidated tar.
+        if grep -Fq "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE"; then
+          if (grep "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+            images_consolidated_verified=1
+            log INFO "Consolidated images archive verified: $images_tar_candidate"
+          else
+            log WARN "Consolidated images archive present but failed checksum: $images_tar_candidate"
+          fi
+        else
+          # No manifest line for consolidated tar in stage manifest; attempt to verify
+          # it against downloads manifest if available
+          if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" && $(grep -F "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | wc -l) -gt 0 ]]; then
+            if (grep "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+              images_consolidated_verified=1
+              log INFO "Consolidated images archive verified via downloads manifest: $images_tar_candidate"
+            else
+              log WARN "Consolidated images archive present but failed verification against downloads manifest"
+            fi
+          fi
+        fi
+      fi
+
+      # Build the temporary manifest to validate with sha256sum: include mapped lines
+      # and any missing_entries that are not image-like (or image-like but not covered).
+      local line
+      for line in "${mapped_lines[@]}"; do printf '%s\n' "$line" >>"$tmp_manifest"; done
+      for line in "${missing_entries[@]}"; do
+        local bn
+        bn=$(basename "${line#*  }")
+        # If this missing entry is image-like and we have a verified consolidated tar,
+        # skip adding it to the temporary manifest (consider it satisfied).
+        if [[ "$bn" == rke2-images-* && $images_consolidated_verified -eq 1 ]]; then
+          log INFO "Treating missing image-like manifest entry as satisfied by consolidated tar: $bn"
+          continue
+        fi
+        # Otherwise include it (will cause sha256sum to report missing) so operator sees it
+        printf '%s\n' "$line" >>"$tmp_manifest"
+      done
 
       # Run verification against the normalized manifest
       if ! sha256sum -c "$tmp_manifest" >>"$LOG_FILE" 2>&1; then
