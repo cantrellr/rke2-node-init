@@ -7,13 +7,12 @@ metadata:
 spec:
   # EXAMPLE CONFIGURATION - UPDATE WITH YOUR VALUES
   
-  # Path to CA certificate file
-  # This should point to your actual CA certificate
-  caCert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
+  # Path to CA certificate file (kebab-case preferred)
+  ca-cert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
   
   # Path to CA private key
   # KEEP THIS SECURE - Never commit to version control
-  caKey: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca-key.pem
+  ca-key: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca-key.pem
   
   # Optional: Custom subject for server certificates
   subject:
@@ -25,11 +24,11 @@ spec:
     country: "US"
   
   # Optional: Certificate validity period (days)
-  validityDays: 365
+  validity-days: 365
   
   # Optional: Key algorithm and size
-  keyAlgorithm: "RSA"
-  keySize: 4096
+  key-algorithm: "RSA"
+  key-size: 4096
 
 ---
 # Example for a specific domain/environment
@@ -40,8 +39,8 @@ metadata:
   description: Production environment CA
 
 spec:
-  caCert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
-  caKey: /etc/rke2/certs/prod-ca-key.pem
+  ca-cert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
+  ca-key: /etc/rke2/certs/prod-ca-key.pem
   
   subject:
     commonName: "production-rke2-cluster"

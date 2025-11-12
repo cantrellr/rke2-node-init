@@ -161,10 +161,10 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 
 ```bash
 # With a manifest
-sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f examples/config/image-example.yaml image
 
 # Control plane using manifest-provided interfaces (no additional NIC prompt)
-sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-ctrl01.yaml server
+sudo ./bin/rke2nodeinit.sh -f examples/config/server-example.yaml server
 
 # Worker join pulling networking from YAML and overriding the token file via CLI
 sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-work01.yaml agent --token-file /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
@@ -195,11 +195,12 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
 | `-h` | Display built-in help |
 
--### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL and saves it under `outputs/tokens/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+### Makefile Helpers
 
-- `make certs-auto` will generate a Root CA and subordinate CA and stage them under `outputs/certs/` and the system stage directory (`/opt/rke2/stage/certs`). Note: by default `make certs-auto` will NOT create a bootstrap token or a tokens folder. To enable token generation (for testing or non-production workflows), run:
+`make token` generates a base64 token using OpenSSL and saves it under `outputs/tokens/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+
+`make certs-auto` will generate a Root CA and subordinate CA and stage them under `outputs/certs/` and the system stage directory (`/opt/rke2/stage/certs`). By default `make certs-auto` will NOT create a bootstrap token or create a tokens folder. To enable token generation (for testing or non-production workflows), run:
 
 ```bash
 make certs-auto GENERATE_TOKEN=true

@@ -6,16 +6,16 @@ Usage
 
 Interactive (Make will prompt for missing values):
 
-    make certs-sub-ca INPUT=certs/examples/subca-input.yaml
+  make certs-sub-ca INPUT=examples/certs/subca-input.yaml
 
 Fully non-interactive (provide root key/cert/pass when calling Make):
 
-    make certs-sub-ca INPUT=certs/examples/subca-input.yaml ROOT_KEY=/path/to/root-key.pem \
+    make certs-sub-ca INPUT=examples/certs/subca-input.yaml ROOT_KEY=/path/to/root-key.pem \
       ROOT_CERT=/path/to/root-cert.pem ROOT_PASS='rootpassphrase'
 
 Or run the generator directly:
 
-    ./certs/scripts/generate-subordinate-ca.sh --input certs/examples/subca-input.yaml \
+    ./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
       --root-key /path/to/root-key.pem --root-cert /path/to/root-cert.pem
 
 Notes

@@ -22,8 +22,8 @@ spec:
   # Optional: Dry run mode - simulate push without actually pushing
   # dryRun: true
   
-  # Optional: Custom CA certificate for registry
-  # caCertPath: /path/to/registry-ca.crt
+  # Optional: Custom CA certificate for registry (camelCase preferred)
+  # caCert: /path/to/registry-ca.crt
 
 ---
 # Example using environment variables for credentials
@@ -43,7 +43,7 @@ spec:
     # Then omit username/password from YAML
   
   # Custom CA for self-signed registry certificates
-  caCertPath: /etc/ssl/certs/corporate-registry-ca.crt
+  caCert: /etc/ssl/certs/corporate-registry-ca.crt
 
 ---
 # Harbor registry example
@@ -59,7 +59,7 @@ spec:
     username: robot$rke2-pusher
     password: CHANGE-ME-HARBOR-ROBOT-TOKEN
   
-  caCertPath: /etc/ssl/certs/harbor-ca.crt
+  caCert: /etc/ssl/certs/harbor-ca.crt
 
 ---
 # JFrog Artifactory example
@@ -75,7 +75,7 @@ spec:
     username: rke2-service-account
     password: CHANGE-ME-ARTIFACTORY-TOKEN
   
-  # Dry run for testing
+  # Dry run for testing (camelCase preferred)
   dryRun: false
 
 ---

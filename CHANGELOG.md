@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved `test-interface-detection.sh` to `scripts/test/`
 - Reorganized VM directory structure for better separation of concerns
 - Updated `.gitignore` with production configuration paths
+ - Docs: aligned example paths to `examples/` and updated examples to prefer kebab-case keys; clarified that camelCase aliases are supported
+ - CI: added example YAML validation and duplicate-token-file verification workflow
 
 ### Deprecated
 - Direct path to `rke2nodeinit.sh` in repository root (use `bin/rke2nodeinit.sh`)

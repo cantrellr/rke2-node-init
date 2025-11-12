@@ -20,6 +20,9 @@ spec:
       searchDomains:
         - cluster.local
         - example.com
+      
+  # Note: camelCase is preferred in examples (e.g., `searchDomains`),
+  # but kebab-case aliases (e.g., `search-domains`) are accepted by the script.
       mtu: 1500
   
   # Cluster join information
@@ -99,7 +102,7 @@ spec:
   
   rke2:
     version: v1.34.1+rke2r1
-    nodeIp: 192.168.1.51  # Use pod network interface
+    nodeIp: 192.168.1.51  # Use pod network interface (camelCase preferred)
   
   registry:
     endpoint: registry.example.com:5000/rke2
@@ -127,7 +130,7 @@ spec:
       prefix: 24
       gateway: 10.0.100.1
       dns: [10.0.0.10, 10.0.0.11]
-      searchDomains: [cluster.local, example.com]
+  searchDomains: [cluster.local, example.com]
   
   cluster:
     serverUrl: https://rke2-api.example.com:9345

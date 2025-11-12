@@ -29,6 +29,23 @@ jobs:
           chmod +x scripts/render_rke2_config.py || true
           chmod +x tests/verify_no_duplicate_tokenfile.sh || true
 
+    - name: Validate example YAML files
+    run: |
+      python - <<'PY'
+import sys,glob,yaml
+errs=0
+for f in glob.glob('examples/**/*.yaml', recursive=True):
+  try:
+    with open(f,'r') as fh:
+      list(yaml.safe_load_all(fh))
+  except Exception as e:
+    print(f'YAML parse error in {f}: {e}', file=sys.stderr)
+    errs+=1
+if errs:
+  sys.exit(2)
+print('All example YAML files parsed successfully')
+PY
+
       - name: Run duplicate-token-file verification
         run: |
           ./tests/verify_no_duplicate_tokenfile.sh

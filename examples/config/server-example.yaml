@@ -26,24 +26,24 @@ spec:
   # RKE2 configuration
   rke2:
     version: v1.34.1+rke2r1
-    
-    # TLS SANs for API server certificate
+
+    # TLS SANs for API server certificate (camelCase preferred; kebab-case aliases are supported)
     tlsSans:
       - rke2-api.example.com
       - 10.0.100.10
       - 10.0.100.100  # VIP for load balancer
-    
-    # Cluster CIDR (pod network)
-    clusterCidr: 10.42.0.0/16
-    
-    # Service CIDR
-    serviceCidr: 10.43.0.0/16
-    
-    # Cluster DNS
-    clusterDns: 10.43.0.10
-    
-    # Cluster domain
-    clusterDomain: cluster.local
+
+  # Cluster CIDR (pod network)
+  clusterCidr: 10.42.0.0/16
+
+  # Service CIDR
+  serviceCidr: 10.43.0.0/16
+
+  # Cluster DNS
+  clusterDns: 10.43.0.10
+
+  # Cluster domain
+  clusterDomain: cluster.local
   
   # Private registry configuration
   registry:
@@ -95,12 +95,12 @@ spec:
   
   rke2:
     version: v1.34.1+rke2r1
-    
-    # Bind to cluster communication interface
+
+    # Bind to cluster communication interface (camelCase preferred; kebab-case aliases are supported)
     nodeIp: 192.168.1.10
     bindAddress: 192.168.1.10
     advertiseAddress: 192.168.1.10
-    
+
     tlsSans:
       - rke2-api.example.com
       - 192.168.1.10
@@ -154,8 +154,8 @@ spec:
   
   rke2:
     version: v1.34.1+rke2r1
-    
-    # Multiple TLS SANs for HA
+
+    # Multiple TLS SANs for HA (camelCase preferred; kebab-case aliases supported)
     tlsSans:
       - rke2-api.example.com      # Load balancer DNS
       - 10.0.100.100               # Load balancer VIP
@@ -166,8 +166,8 @@ spec:
       - rke2-server-ha-03.k8s.example.com
       - 10.0.100.13
     
-    clusterCidr: 10.42.0.0/16
-    serviceCidr: 10.43.0.0/16
+  clusterCidr: 10.42.0.0/16
+  serviceCidr: 10.43.0.0/16
   
   registry:
     endpoint: registry.example.com:5000/rke2

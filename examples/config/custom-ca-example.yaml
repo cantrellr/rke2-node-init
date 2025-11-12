@@ -5,11 +5,11 @@ metadata:
   description: Install custom CA certificates for registry trust
 
 spec:
-  # Path to CA certificate file to install
-  caCertPath: /path/to/custom-ca.crt
+  # Path to CA certificate file to install (camelCase preferred)
+  caCert: /path/to/custom-ca.crt
   
   # Optional: CA certificate bundle (multiple CAs)
-  # caBundlePath: /path/to/ca-bundle.crt
+  # caBundle: /path/to/ca-bundle.crt
   
   # Optional: Target locations for CA installation
   installLocations:
@@ -35,10 +35,10 @@ metadata:
 
 spec:
   # Root CA certificate
-  caCertPath: /etc/ssl/enterprise/root-ca.crt
+  caCert: /etc/ssl/enterprise/root-ca.crt
   
   # Intermediate CA bundle
-  caBundlePath: /etc/ssl/enterprise/intermediate-ca-bundle.crt
+  caBundle: /etc/ssl/enterprise/intermediate-ca-bundle.crt
   
   updateSystemTrust: true
   
@@ -57,7 +57,7 @@ metadata:
   description: Install CA for private registry only
 
 spec:
-  caCertPath: /etc/ssl/certs/registry-ca.crt
+  caCert: /etc/ssl/certs/registry-ca.crt
   
   installLocations:
     - /etc/rancher/rke2/
@@ -78,7 +78,7 @@ metadata:
   description: Install Harbor registry CA certificate
 
 spec:
-  caCertPath: /etc/ssl/harbor/ca.crt
+  caCert: /etc/ssl/harbor/ca.crt
   
   updateSystemTrust: true
   
@@ -97,7 +97,7 @@ metadata:
 
 spec:
   # Bundle containing multiple CA certificates
-  caBundlePath: /etc/ssl/company/ca-bundle.pem
+  caBundle: /etc/ssl/company/ca-bundle.pem
   
   updateSystemTrust: true
   
@@ -120,8 +120,8 @@ metadata:
 
 spec:
   # Internal CA for all services
-  caCertPath: /opt/rke2/certs/airgap-root-ca.crt
-  caBundlePath: /opt/rke2/certs/airgap-ca-bundle.crt
+  caCert: /opt/rke2/certs/airgap-root-ca.crt
+  caBundle: /opt/rke2/certs/airgap-ca-bundle.crt
   
   updateSystemTrust: true
   
@@ -144,5 +144,5 @@ metadata:
   name: simple-ca
 
 spec:
-  caCertPath: /etc/ssl/certs/my-ca.crt
+  caCert: /etc/ssl/certs/my-ca.crt
   updateSystemTrust: true

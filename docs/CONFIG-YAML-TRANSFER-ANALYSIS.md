@@ -28,6 +28,8 @@ This function is responsible for transferring YAML spec options to the RKE2 conf
 3. **List Values:** Processes array-type options (like node-labels, taints, etc.)
 4. **Name Normalization:** Supports both hyphenated and camelCase variants
 
+**Note (Nov 2025):** The implementation was updated to prefer kebab-case keys in examples while still accepting lowerCamelCase aliases (e.g., `node-ip` or `nodeIp`). A previous duplication issue where `token-file` could be emitted twice has been resolved — the script now emits `token` or `token-file` once and the preview helper was aligned.
+
 ---
 
 ## Supported Scalar Options
