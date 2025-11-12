@@ -1,0 +1,34 @@
+name: CI — verify token-file uniqueness
+
+on:
+  push:
+    branches: [ main, feat/** ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-tokenfile:
+    name: Verify no duplicate token-file
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Ensure scripts are executable
+        run: |
+          chmod +x scripts/render_rke2_config.py || true
+          chmod +x tests/verify_no_duplicate_tokenfile.sh || true
+
+      - name: Run duplicate-token-file verification
+        run: |
+          ./tests/verify_no_duplicate_tokenfile.sh

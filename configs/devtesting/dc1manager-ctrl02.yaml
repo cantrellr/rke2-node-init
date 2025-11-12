@@ -1,0 +1,55 @@
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: dc1manager-ctrl02
+spec:
+  hostname: dc1manager-ctrl02
+  # Bind to cluster communication interface
+  nodeIp: 10.0.69.61
+  bindAddress: 10.0.69.61
+  advertiseAddress: 10.0.69.61
+  cni:
+   - multus
+   - canal
+  interfaces:
+    # vlan118
+    - name: eth0
+      ip: 10.0.69.61
+      prefix: 27
+      gateway: 10.0.69.33
+      dns: ["172.16.69.71", "172.16.69.72"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan18
+    - name: eth1
+      ip: 172.16.69.61
+      prefix: 27
+      gateway:
+      dns: ["172.16.69.71", "172.16.69.72"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan9
+    - name: eth2
+      ip: 172.16.255.241
+      prefix: 27
+      gateway:
+      dns: ["10.0.69.41"]
+      searchDomains: ["cantrell.cloud"]
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=preprod"
+  tls-san:
+    - dc1manager-ctrl02
+    - dc1manager-ctrl02.dev.kube
+    - dc1manager-cluster
+    - dc1manager-cluster.dev.kube
+    - 10.0.69.61
+  service-cidr: 10.93.0.0/16
+  cluster-cidr: 10.243.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+  serverURL: https://10.0.69.61:9345
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  disable:
+  - rke2-ingress-nginx

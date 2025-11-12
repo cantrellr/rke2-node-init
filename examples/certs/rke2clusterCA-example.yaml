@@ -9,11 +9,11 @@ spec:
   
   # Path to CA certificate file
   # This should point to your actual CA certificate
-  caCert: /path/to/certs/rke2ca-cert.crt
+  caCert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
   
   # Path to CA private key
   # KEEP THIS SECURE - Never commit to version control
-  caKey: /path/to/certs/rke2ca-cert-key.pem
+  caKey: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca-key.pem
   
   # Optional: Custom subject for server certificates
   subject:
@@ -40,7 +40,7 @@ metadata:
   description: Production environment CA
 
 spec:
-  caCert: /etc/rke2/certs/prod-ca.crt
+  caCert: /rke2-node-init/outputs/certs/root-20251111-202845/root-ca.crt
   caKey: /etc/rke2/certs/prod-ca-key.pem
   
   subject:

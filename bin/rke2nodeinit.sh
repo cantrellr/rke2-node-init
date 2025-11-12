@@ -755,8 +755,9 @@ append_spec_config_extras() {
     "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
-    "enable-servicelb" "node-ip" "bind-address" "advertise-address" "token-file"
+    "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
+
 
   local k v
   for k in "${scalars[@]}"; do
