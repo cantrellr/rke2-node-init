@@ -58,6 +58,7 @@
 ## Workflow Overview
 
 1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+  By default the downloaded images are left as a staged tarball on the node (`/var/lib/rancher/rke2/agent/images`); use the `--load-images` flag to import the staged tarball into the local container runtime (nerdctl/ctr) when you want images available without remote pulls.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
@@ -174,7 +175,7 @@ sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secr
 
 # Multiple interfaces provided via CLI
 sudo ./rke2nodeinit.sh server --hostname ctrl01 \
-  --interface name=eth0 ip=10.0.4.161 prefix=24 gateway=10.0.4.1 dns=10.0.1.34,10.231.1.34 \
+  --interface name=eth0 ip=10.0.69.161 prefix=24 gateway=10.0.69.1 dns=10.0.1.34,10.231.1.34 \
   --interface name=eth1 dhcp4=true
 
 # Print sanitized manifest for auditing
@@ -194,6 +195,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
 | `-h` | Display built-in help |
+| `--load-images` | Import staged RKE2 images from the tarball into the local container runtime (nerdctl/ctr). This is opt-in; the default behavior is to keep the tarball staged for template/image-based workflows. |
 
 
 ### Makefile Helpers
@@ -296,9 +298,9 @@ Notes:
     hostname: ctrl01
     interfaces:
       - name: eth0
-        ip: 10.0.4.161
+        ip: 10.0.69.161
         prefix: 24
-        gateway: 10.0.4.1
+        gateway: 10.0.69.1
         dns: ["10.0.1.34", "10.231.1.34"]
         searchDomains: ["dev.kube", "dev.local"]
       - name: eth1

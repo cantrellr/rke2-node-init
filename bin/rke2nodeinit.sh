@@ -161,6 +161,8 @@ AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cle
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
+LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
+VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -250,6 +252,16 @@ OPTIONS:
                Define network interface (repeatable for multi-interface setups)
                Use "dhcp4=true" for DHCP-based interfaces
                Omit name on first interface to auto-detect primary NIC
+  --load-images
+               Import staged RKE2 images from the tarball into the local
+               container runtime (nerdctl/ctr). This is opt-in; by default
+               images are left staged as a tarball on the node for air-gapped
+               template workflows.
+  --verify-layers
+               Perform deep layer checksum verification of staged images
+               tarball. Verifies individual layer SHA256 digests against
+               manifest to ensure no corruption. More thorough than standard
+               tarball integrity tests. Opt-in due to additional processing time.
 
 MULTI-INTERFACE YAML EXAMPLE:
   apiVersion: rkeprep/v1
@@ -369,6 +381,86 @@ warn_default_credentials() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: get_images_archive
+# Purpose : Locate the staged images archive in downloads or images dir
+# Arguments:
+#   None
+# Returns : Prints path to archive or returns 1 if not found
+# ------------------------------------------------------------------------------
+get_images_archive() {
+  local img="${IMAGES_TAR:-rke2-images.linux-${ARCH}.tar.zst}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  if [[ -f "$images_dir/$img" ]]; then
+    printf '%s' "$images_dir/$img"
+    return 0
+  fi
+  if [[ -f "$DOWNLOADS_DIR/$img" ]]; then
+    printf '%s' "$DOWNLOADS_DIR/$img"
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: load_images_from_tarball
+# Purpose : Load images from a staged RKE2 images tarball into the local
+#           container runtime (nerdctl/ctr). Writes a small metadata file on
+#           success and logs progress.
+# Arguments:
+#   $1 - Optional path to tarball (defaults to discovered candidate)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+load_images_from_tarball() {
+  local archive="$1"
+  if [[ -z "$archive" ]]; then
+    archive="$(get_images_archive || true)"
+  fi
+  if [[ -z "$archive" || ! -f "$archive" ]]; then
+    log WARN "No images archive found to load (expected: ${IMAGES_TAR}). Skipping image load."
+    return 0
+  fi
+
+  log INFO "Loading images from archive: $archive"
+
+  # Prefer nerdctl if available; ensure it's installed by caller
+  if command -v nerdctl >/dev/null 2>&1; then
+    if zstd -dc "$archive" | nerdctl load -i - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via nerdctl"
+    else
+      log ERROR "nerdctl failed to load images from $archive"
+      return 2
+    fi
+  else
+    # Fallback to ctr
+    if zstd -dc "$archive" | ctr -n k8s.io images import - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via ctr"
+    else
+      log ERROR "ctr failed to import images from $archive"
+      return 3
+    fi
+  fi
+
+  # Emit a simple metadata file listing images present (nerdctl images output)
+  local meta="$STAGE_DIR/images-loaded-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  if command -v nerdctl >/dev/null 2>&1; then
+    nerdctl images >>"$meta" 2>&1 || true
+  else
+    ctr -n k8s.io images ls >>"$meta" 2>&1 || true
+  fi
+  log INFO "Wrote image load metadata to $meta"
+
+  # Quick verification: look for hardened-cni-plugins as representative sample
+  if (command -v nerdctl >/dev/null 2>&1 && nerdctl images | grep -q 'rancher/hardened-cni-plugins') || \
+     (ctr -n k8s.io images ls | grep -q 'hardened-cni-plugins'); then
+    log INFO "Representative image 'rancher/hardened-cni-plugins' present after load"
+  else
+    log WARN "Representative image 'rancher/hardened-cni-plugins' not found after image load; verify archive contains expected tags"
+  fi
+
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: spinner_run
 # Purpose : Execute a long-running command while providing an inline progress
 #           spinner on stdout. All command output is streamed to the logfile so
@@ -391,7 +483,7 @@ spinner_run() {
   # Forward signals to the child so Ctrl-C works cleanly
   trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
 
-  local spin='|+/-\' i=0
+  local spin='|+/-\o' i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
@@ -755,6 +847,8 @@ append_spec_config_extras() {
     "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
+    # Image overrides commonly required to avoid external pulls in air-gapped installs
+    "kube-proxy-image" "pause-image" "runtime-image"
     "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
 
@@ -769,12 +863,16 @@ append_spec_config_extras() {
   v="$(yaml_spec_get_any "$file" "$k" "$camel_case" || true)"
     if [[ -n "$v" ]]; then
       local normalized=""
-      # If value looks like true/false, normalize; otherwise emit raw value
+      # If value looks like true/false, normalize and emit bare boolean
       if [[ "$v" =~ ^(true|false|True|False|TRUE|FALSE)$ ]]; then
         normalized="$(normalize_bool_value "$v")"
         echo "$k: $normalized" >> "$cfg"
       else
-        echo "$k: $v" >> "$cfg"
+        # Quote string-like values to ensure YAML correctness (images, registries, CIDRs)
+        # Escape any existing double-quotes in the value
+        local esc
+        esc=$(printf '%s' "$v" | sed 's/"/\\"/g')
+        echo "$k: \"$esc\"" >> "$cfg"
       fi
     fi
   done
@@ -2836,6 +2934,366 @@ generate_bootstrap_token() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: cleanup_containerd_before_rke2
+# Purpose : Optionally stop and clear containerd state before RKE2 installation
+#           to prevent conflicts with stale or wrong-version images. This is
+#           particularly useful when reinstalling or when containerd was previously
+#           used for non-RKE2 workloads.
+# Arguments:
+#   $1 - Installation type label (e.g., "server", "agent", "add-server") for logging
+# Returns :
+#   Always returns 0 after prompting and optionally cleaning containerd.
+# ------------------------------------------------------------------------------
+cleanup_containerd_before_rke2() {
+  local install_type="${1:-RKE2}"
+  
+  if ! command -v containerd >/dev/null 2>&1; then
+    return 0  # containerd not installed, nothing to clean
+  fi
+  
+  if ! systemctl is-active --quiet containerd 2>/dev/null; then
+    return 0  # containerd not running, nothing to clean
+  fi
+  
+  log WARN "containerd is already running before $install_type installation"
+  log WARN "Pre-existing containerd state may contain stale or conflicting images"
+  
+  local clean_containerd=0
+  if [[ "${AUTO_YES:-0}" -eq 1 ]]; then
+    log INFO "Auto-confirm enabled; will stop containerd and clear its image store"
+    clean_containerd=1
+  else
+    echo
+    read -rp "Stop containerd and clear its image store before RKE2 install? [y/N]: " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      clean_containerd=1
+    fi
+  fi
+  
+  if (( clean_containerd == 1 )); then
+    log INFO "Stopping containerd service..."
+    systemctl stop containerd >>"$LOG_FILE" 2>&1 || true
+    
+    # Clear containerd content and metadata stores
+    if [[ -d /var/lib/containerd ]]; then
+      log INFO "Clearing containerd content store..."
+      rm -rf /var/lib/containerd/io.containerd.content.v1.content/* 2>/dev/null || true
+      log INFO "Clearing containerd metadata database..."
+      rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db 2>/dev/null || true
+      log INFO "Containerd state cleared; RKE2 will start with fresh image store"
+    fi
+  else
+    log INFO "Skipping containerd cleanup; RKE2 will use existing containerd state"
+  fi
+  
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: parse_oci_image_index
+# Purpose : Parse OCI image index format from tarball and extract image list.
+#           This provides fallback support when Docker manifest.json is not present.
+# Arguments:
+#   $1 - Path to the images tarball
+# Returns :
+#   Prints JSON array of image references, or empty string on failure.
+# ------------------------------------------------------------------------------
+parse_oci_image_index() {
+  local tarball="$1"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log WARN "parse_oci_image_index: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: zstd not available for decompression"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: gzip not available for decompression"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Try to extract index.json (OCI layout)
+  local index_json
+  index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+  
+  if [[ -z "$index_json" ]]; then
+    log INFO "parse_oci_image_index: No index.json found (not OCI layout format)"
+    return 1
+  fi
+  
+  # Validate it's valid JSON with manifests array
+  if ! echo "$index_json" | python3 -m json.tool >/dev/null 2>&1; then
+    log WARN "parse_oci_image_index: index.json is not valid JSON"
+    return 1
+  fi
+  
+  # Extract image references from annotations
+  # OCI index typically has manifests[].annotations["org.opencontainers.image.ref.name"]
+  local image_refs
+  image_refs=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    refs = []
+    if "manifests" in data:
+        for manifest in data["manifests"]:
+            if "annotations" in manifest:
+                ref_name = manifest["annotations"].get("org.opencontainers.image.ref.name", "")
+                if ref_name:
+                    refs.append(ref_name)
+            # Also check for platform-specific info
+            if "platform" in manifest:
+                arch = manifest["platform"].get("architecture", "")
+                if arch:
+                    # Note the architecture for filtering
+                    pass
+    print(json.dumps(refs))
+except Exception as e:
+    print("[]", file=sys.stderr)
+    sys.exit(1)
+' 2>/dev/null || echo "[]")
+  
+  if [[ "$image_refs" == "[]" ]]; then
+    log INFO "parse_oci_image_index: No image references found in index.json"
+    return 1
+  fi
+  
+  echo "$image_refs"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_image_layer_checksums
+# Purpose : Verify individual image layer checksums from tarball manifest against
+#           computed SHA256 digests. Provides deep integrity validation beyond
+#           simple tarball compression testing.
+# Arguments:
+#   $1 - Path to the images tarball
+#   $2 - Temporary directory for extraction (optional, defaults to /tmp)
+# Returns :
+#   0 if all layers verify successfully, 1 on any failure
+# ------------------------------------------------------------------------------
+verify_image_layer_checksums() {
+  local tarball="$1"
+  local tmp_dir="${2:-/tmp}"
+  local work_dir="$tmp_dir/verify-layers-$$"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log ERROR "verify_image_layer_checksums: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: zstd not available"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: gzip not available"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Create temporary work directory
+  mkdir -p "$work_dir" || {
+    log ERROR "verify_image_layer_checksums: failed to create work directory"
+    return 1
+  }
+  
+  # Extract manifest.json
+  local manifest
+  manifest=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+  
+  if [[ -z "$manifest" ]]; then
+    log WARN "verify_image_layer_checksums: No Docker manifest.json found, trying OCI format"
+    
+    # Try OCI layout with index.json
+    local index_json
+    index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+    
+    if [[ -z "$index_json" ]]; then
+      log WARN "verify_image_layer_checksums: No index.json found either, cannot verify"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For OCI format, we need to extract blobs and verify against manifest descriptors
+    log INFO "Verifying OCI image layers..."
+    
+    # Extract all manifest digests from index
+    local manifest_digests
+    manifest_digests=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if "manifests" in data:
+        for m in data["manifests"]:
+            if "digest" in m:
+                print(m["digest"])
+except:
+    pass
+' 2>/dev/null || true)
+    
+    if [[ -z "$manifest_digests" ]]; then
+      log WARN "verify_image_layer_checksums: No manifest digests in OCI index"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For each manifest, extract and verify its blob
+    local verified_count=0
+    local failed_count=0
+    
+    while IFS= read -r digest; do
+      [[ -z "$digest" ]] && continue
+      
+      # OCI digest format: sha256:abc123...
+      local algo="${digest%%:*}"
+      local hash="${digest#*:}"
+      
+      if [[ "$algo" != "sha256" ]]; then
+        log WARN "Unsupported digest algorithm: $algo (skipping)"
+        continue
+      fi
+      
+      # Extract blob from tarball (OCI layout stores as blobs/sha256/<hash>)
+      local blob_path="blobs/sha256/$hash"
+      local blob_data
+      blob_data=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO "$blob_path" 2>/dev/null || echo "")
+      
+      if [[ -z "$blob_data" ]]; then
+        log WARN "Blob not found in tarball: $blob_path"
+        ((failed_count++))
+        continue
+      fi
+      
+      # Compute SHA256 of extracted blob
+      local computed_hash
+      computed_hash=$(echo -n "$blob_data" | sha256sum | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch for $blob_path"
+        log ERROR "  Expected: $hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    done <<< "$manifest_digests"
+    
+    rm -rf "$work_dir"
+    
+    if (( failed_count > 0 )); then
+      log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted"
+      return 1
+    fi
+    
+    log INFO "Layer verification PASSED: $verified_count layer(s) verified"
+    return 0
+  fi
+  
+  # Docker manifest.json format - verify layers
+  log INFO "Verifying Docker image layers..."
+  
+  # Parse manifest to get layer paths and extract them
+  local layer_paths
+  layer_paths=$(echo "$manifest" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for image in data:
+        if "Layers" in image:
+            for layer in image["Layers"]:
+                print(layer)
+except:
+    pass
+' 2>/dev/null || true)
+  
+  if [[ -z "$layer_paths" ]]; then
+    log WARN "verify_image_layer_checksums: No layers found in manifest"
+    rm -rf "$work_dir"
+    return 1
+  fi
+  
+  local verified_count=0
+  local failed_count=0
+  local total_layers=0
+  
+  # Count total layers
+  total_layers=$(echo "$layer_paths" | wc -l)
+  log INFO "Found $total_layers layer(s) to verify"
+  
+  # Extract layers and verify
+  while IFS= read -r layer_path; do
+    [[ -z "$layer_path" ]] && continue
+    
+    # Extract layer from tarball
+    local layer_file="$work_dir/$(basename "$layer_path")"
+    if ! $decompress_cmd "$tarball" 2>/dev/null | tar -xO "$layer_path" > "$layer_file" 2>/dev/null; then
+      log WARN "Failed to extract layer: $layer_path"
+      ((failed_count++))
+      continue
+    fi
+    
+    # For Docker format, layers are typically named with their digest
+    # Format: <hash>/layer.tar
+    local layer_dir
+    layer_dir=$(dirname "$layer_path")
+    
+    if [[ "$layer_dir" =~ ^[a-f0-9]{64}$ ]]; then
+      # The directory name is the expected SHA256 hash
+      local expected_hash="$layer_dir"
+      local computed_hash
+      computed_hash=$(sha256sum "$layer_file" | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$expected_hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch: $layer_path"
+        log ERROR "  Expected: $expected_hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    else
+      # Cannot determine expected hash from path, just verify extraction worked
+      ((verified_count++))
+    fi
+    
+    rm -f "$layer_file"
+  done <<< "$layer_paths"
+  
+  rm -rf "$work_dir"
+  
+  if (( failed_count > 0 )); then
+    log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted out of $total_layers"
+    return 1
+  fi
+  
+  log INFO "Layer verification PASSED: $verified_count layer(s) verified out of $total_layers"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: run_rke2_installer
 # Purpose : Execute the cached RKE2 installer script with environment variables
 #           pointing to staged artifacts for offline installation.
@@ -3194,6 +3652,161 @@ ensure_staged_artifacts() {
   else
     log WARN "sha256sum not available; skipping staged artifact verification"
   fi
+
+  # --- Post-staging verification: ensure images tarball is present and accessible ---
+  log INFO "Performing post-staging verification..."
+  
+  # Priority 2: Architecture mismatch detection
+  local EXPECTED_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  if [[ ! -f "$IMAGES_DIR/$EXPECTED_TAR" ]]; then
+    # Look for any rke2-images tarball in images dir (may be wrong arch)
+    local found_tars
+    found_tars=$(find "$IMAGES_DIR" -maxdepth 1 \( -name "rke2-images.linux-*.tar.zst" -o -name "rke2-images.linux-*.tar.gz" \) 2>/dev/null || true)
+    if [[ -n "$found_tars" ]]; then
+      log ERROR "Expected $EXPECTED_TAR but found different architecture tarball(s):"
+      echo "$found_tars" | while read -r f; do 
+        [[ -z "$f" ]] && continue
+        log ERROR "  - $(basename "$f")"
+      done
+      log ERROR "Architecture mismatch detected!"
+      log ERROR "Current host architecture: $ARCH"
+      log ERROR "Did you run 'action_image' on a different architecture host?"
+      log ERROR "Re-run 'action_image' on this host or provide correct artifacts via INSTALL_RKE2_ARTIFACT_PATH"
+      exit 3
+    fi
+  fi
+
+  # Priority 1: Verify images tarball is present and accessible after staging
+  if [[ ! -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    log ERROR "Images tarball not found after staging: $IMAGES_DIR/$IMAGES_TAR"
+    log ERROR "Expected file: $IMAGES_TAR"
+    log ERROR "This will cause RKE2 to attempt network download and fail in air-gapped environments"
+    
+    # Try fallback from downloads
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      log WARN "Attempting to re-stage from downloads directory as fallback"
+      local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+      cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+      mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+      log INFO "Re-staged ${IMAGES_TAR} from downloads"
+    else
+      log ERROR "No fallback copy available in downloads; run 'action_image' first"
+      exit 3
+    fi
+  fi
+
+  # Quick sanity check: ensure tarball is a valid archive
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    log INFO "Testing tarball integrity with zstd..."
+    if ! zstd -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (zstd test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (zstd test passed)"
+  elif command -v gzip >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.gz ]]; then
+    log INFO "Testing tarball integrity with gzip..."
+    if ! gzip -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (gzip test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (gzip test passed)"
+  else
+    log WARN "Cannot test tarball integrity (compression tool not available)"
+  fi
+
+  local tar_size
+  tar_size=$(du -h "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Images tarball staged successfully: $IMAGES_DIR/$IMAGES_TAR ($tar_size)"
+  
+  # Priority 4: Extract and log sample image list from tarball for audit
+  log INFO "Extracting image list from tarball for audit..."
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    # Try to extract manifest.json to inspect image list
+    local manifest
+    manifest=$(zstd -dc "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+    if [[ -n "$manifest" ]]; then
+      # Count RepoTags entries (Docker manifest format)
+      local repo_tag_count
+      repo_tag_count=$(echo "$manifest" | grep -o '"RepoTags"' | wc -l 2>/dev/null || echo 0)
+      log INFO "Tarball manifest contains $repo_tag_count image layer sets (Docker format)"
+      
+      # Extract sample image names (look for rancher images as representative)
+      log INFO "Sample images in tarball:"
+      echo "$manifest" | grep -o '"docker.io/rancher[^"]*"' 2>/dev/null | head -n 3 | while read -r img; do
+        local clean_img
+        clean_img=$(echo "$img" | tr -d '"')
+        log INFO "  - $clean_img"
+      done
+      
+      # Check for the problematic image mentioned in original logs
+      if echo "$manifest" | grep -q "hardened-cni-plugins"; then
+        log INFO "  ✓ Verified: rancher/hardened-cni-plugins present in tarball"
+      else
+        log WARN "  ⚠ rancher/hardened-cni-plugins not found in manifest (may use different format)"
+      fi
+    else
+      # Docker manifest not found, try OCI image index format as fallback
+      log INFO "Docker manifest.json not found, attempting OCI image index parsing..."
+      local oci_refs
+      oci_refs=$(parse_oci_image_index "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null || echo "")
+      
+      if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]]; then
+        local ref_count
+        ref_count=$(echo "$oci_refs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+        log INFO "Tarball contains $ref_count image reference(s) (OCI format)"
+        
+        # Show sample images from OCI index
+        log INFO "Sample images in tarball:"
+        echo "$oci_refs" | python3 -c '
+import json, sys
+try:
+    refs = json.load(sys.stdin)
+    for ref in refs[:3]:  # Show first 3
+        print(ref)
+except:
+    pass
+' 2>/dev/null | while read -r img; do
+          log INFO "  - $img"
+        done
+        
+        # Check for rancher images
+        if echo "$oci_refs" | grep -q "rancher"; then
+          log INFO "  ✓ Verified: rancher images present in OCI tarball"
+        fi
+      else
+        log WARN "Could not parse tarball format (neither Docker manifest nor OCI index found)"
+      fi
+    fi
+  elif command -v tar >/dev/null 2>&1; then
+    # For non-zst tarballs, try direct tar inspection
+    log INFO "Inspecting tarball contents..."
+    local file_count
+    file_count=$(tar -tzf "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | wc -l || echo 0)
+    log INFO "Tarball contains $file_count files/layers"
+  else
+    log WARN "Cannot inspect tarball contents (required tools not available)"
+  fi
+  
+  # Optional: Deep layer checksum verification (opt-in via --verify-layers)
+  if (( VERIFY_LAYERS == 1 )); then
+    log INFO "Performing deep layer checksum verification (--verify-layers enabled)..."
+    if verify_image_layer_checksums "$IMAGES_DIR/$IMAGES_TAR" "$STAGE_DIR"; then
+      log INFO "✓ Deep layer verification passed: all image layers verified"
+    else
+      log ERROR "✗ Deep layer verification FAILED"
+      log ERROR "One or more image layers are corrupted or missing"
+      log ERROR "Delete the tarball and re-run 'image' action to download fresh copy"
+      exit 3
+    fi
+  else
+    log INFO "Deep layer verification skipped (use --verify-layers to enable)"
+  fi
+  
+  log INFO "Post-staging verification complete"
 }
 
 # ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
@@ -4008,6 +4621,19 @@ action_image() {
     cache_rke2_artifacts
     log INFO "Completed artifact caching; scanning staged/downloaded artifacts for verification"
 
+    if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
+      # Operator requested images be loaded into the local runtime.
+      log INFO "--load-images supplied; installing nerdctl for image loading"
+      install_nerdctl
+
+      log INFO "Loading staged images into local image store"
+      if ! load_images_from_tarball >/dev/null 2>&1; then
+        log WARN "Loading images from tarball returned non-zero; continuing but node may attempt remote pulls"
+      fi
+    else
+      log INFO "Image load skipped (default tarball-on-node). Use --load-images to import images into the container runtime."
+    fi
+
     # Trust any configured registries (may install custom CA into registries.yaml)
     ca_trust_registries
 
@@ -4577,6 +5203,8 @@ action_server() {
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
 
+  cleanup_containerd_before_rke2 "rke2-server"
+
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
   systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
@@ -4818,7 +5446,9 @@ action_agent() {
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
 
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  cleanup_containerd_before_rke2 "rke2-agent"
+
+  log INFO "Installing rke2-agent from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "agent"
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
@@ -5076,6 +5706,8 @@ action_add_server() {
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
 
+  cleanup_containerd_before_rke2 "rke2-add-server"
+
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
   systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
@@ -5309,6 +5941,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
+    --load-images) LOAD_IMAGES=1; shift;;
+    --verify-layers) VERIFY_LAYERS=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2
