@@ -107,6 +107,14 @@ This symlink will be removed in a future release. Please update your scripts.
 - Added `PHASES-1-2-IMPLEMENTATION.md` documenting the OCI parsing and
   layer verification implementation details and test notes.
 
+- `bin/rke2nodeinit.sh`: hardened-cni mirroring and selection improvements
+  - Prefer `skopeo` mirroring from Docker Hub when available.
+  - Auto-detect an appropriate `rancher/hardened-cni-plugins` tag by
+    attempting RKE2-aware matching and falling back to the highest
+    semver-like tag when necessary.
+  - Add `HARDENED_CNI_TAG` override and improved skopeo logging for easier
+    debugging.
+
 ### Notes
 - This release primarily adds artifact verification and OCI-format support
   to improve reliability in air-gapped deployments. The new `--verify-layers`

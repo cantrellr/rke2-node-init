@@ -181,6 +181,16 @@ IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
 SHA256_FILE="sha256sum-$ARCH.txt"
 
+# Optional: hardened-cni-plugins HTTP download configuration
+# Operators should set `HARDENED_CNI_URL` to a direct HTTP(S) downloadable
+# tarball of the hardened-cni image (for air-gapped staging). When empty,
+# the image will not be fetched automatically.
+HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
+# Basename used for saved artifact (operator can override by setting
+# HARDENED_CNI_BN in the environment if desired).
+HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
+HARDENED_CNI_FILE="$DOWNLOADS_DIR/$HARDENED_CNI_BN"
+
 # Logging
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
@@ -338,6 +348,241 @@ For more information, see README.md or visit:
   https://github.com/cantrellcloud/rke2-node-init
 
 EOF
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_http
+# Purpose : Download hardened-cni-plugins via HTTP(S) into the downloads dir
+#           and produce a local sha256 checksum file for staging.
+# Arguments:
+#   $1 - Optional URL to download (overrides HARDENED_CNI_URL)
+# Returns : 0 on success, non-zero on failure (download or write error)
+# ------------------------------------------------------------------------------
+cache_hardened_cni_http() {
+  local url="${1:-$HARDENED_CNI_URL}"
+  if [[ -z "$url" ]]; then
+    log INFO "HARDENED_CNI_URL not set; skipping hardened-cni-plugins download"
+    return 0
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local tmp="$DOWNLOADS_DIR/.tmp-${bn}.$$"
+  log INFO "Downloading hardened-cni-plugins from $url -> $DOWNLOADS_DIR/$bn"
+
+  if command -v curl >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" wget -q -O "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins via wget from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  else
+    log ERROR "Neither curl nor wget available to download hardened-cni-plugins"
+    return 2
+  fi
+
+  # Move into place atomically
+  mv -T "$tmp" "$DOWNLOADS_DIR/$bn"
+  chmod 0644 "$DOWNLOADS_DIR/$bn" || true
+
+  # Write a simple SHA256 file beside the artifact for audit/staging and
+  # also append the checksum to the repository-style manifest used by the
+  # script so the staged manifest `sha256sum-<arch>.txt` includes this
+  # artifact. This keeps hardened-cni entries aligned with other artifacts
+  # and allows `sha256sum -c` verification to work uniformly.
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    log INFO "Wrote checksum: $DOWNLOADS_DIR/${bn}.sha256"
+
+    # Ensure downloads dir manifest exists and is updated idempotently.
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    mkdir -p "$(dirname "$manifest")"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      # Remove any existing line referencing this basename, then append
+      # a single manifest line in the canonical format: "<sha>  <basename>"
+      if [[ -f "$manifest" ]]; then
+        # Use a temp file replacement to avoid races
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  local _size
+  _size=$(du -h "$DOWNLOADS_DIR/$bn" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Downloaded hardened-cni-plugins: $DOWNLOADS_DIR/$bn ($_size)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_skopeo
+# Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
+#           docker-archive tarball using `skopeo` (no daemon required). The
+#           helper will attempt to select a tag compatible with the RKE2
+#           release (best-effort) and write the resulting archive to
+#           `$DOWNLOADS_DIR/$HARDENED_CNI_BN`.
+# Arguments:
+#   $1 - Optional explicit tag to use (overrides auto-detection)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+cache_hardened_cni_skopeo() {
+  local explicit_tag="${1:-}"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local repo="docker://rancher/hardened-cni-plugins"
+  if ! command -v skopeo >/dev/null 2>&1; then
+    log WARN "skopeo not available; cannot mirror hardened-cni via skopeo"
+    return 2
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+
+  # Determine desired tag: prefer explicit, then RKE2_VERSION, then try to
+  # infer from downloaded images manifest, otherwise fall back to 'latest'.
+  local desired_tag=""
+  if [[ -n "$explicit_tag" ]]; then
+    desired_tag="$explicit_tag"
+  elif [[ -n "${RKE2_VERSION:-}" ]]; then
+    desired_tag="${RKE2_VERSION}"
+  else
+    # Try to infer from the images tar (if present in downloads)
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" && -x "$(command -v zstd || true)" ]]; then
+      # Extract manifest.json from tar.zst and search for rke2-runtime tags
+      local _manifest
+      _manifest=$(mktemp)
+      if zstd -d -c "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null | tar -Ox manifest.json > "$_manifest" 2>/dev/null; then
+        if command -v python3 >/dev/null 2>&1; then
+          desired_tag=$(python3 - <<PY 2>/dev/null
+import json,sys
+try:
+    j=json.load(open('$_manifest'))
+    for e in j:
+        for t in e.get('RepoTags',[]):
+            if 'rke2-runtime' in t:
+                print(t.split(':',1)[1])
+                raise SystemExit
+except Exception:
+    pass
+PY
+) || true
+        fi
+      fi
+      rm -f "$_manifest" || true
+    fi
+  fi
+
+  # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
+  # tags and Docker Hub API and let a small helper choose the best tag.
+  local tags_json
+  tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+  local hub_json
+  if command -v curl >/dev/null 2>&1; then
+    hub_json=$(curl -fsSL "https://hub.docker.com/v2/repositories/rancher/hardened-cni-plugins/tags?page_size=100" 2>/dev/null || true)
+  else
+    hub_json=""
+  fi
+
+  local chosen=""
+  if command -v python3 >/dev/null 2>&1; then
+    local _tfile _hfile
+    _tfile=$(mktemp) || _tfile="/tmp/.rke2nodeinit-tags$$"
+    _hfile=$(mktemp) || _hfile="/tmp/.rke2nodeinit-hub$$"
+    printf '%s' "$tags_json" > "$_tfile" || true
+    printf '%s' "$hub_json" > "$_hfile" || true
+    chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
+    rm -f "$_tfile" "$_hfile" || true
+  fi
+  if [[ -z "$chosen" ]]; then
+    chosen="latest"
+  fi
+
+  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag')"
+
+  local dest="$DOWNLOADS_DIR/$bn"
+  # Use docker-archive format (creates tar with manifest.json compatible with tooling)
+  # Write to a temporary destination first, then atomically move into place.
+  local tmp_dest
+  # create a safe temporary file path under the downloads dir
+  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+  # we'll remove the tmp file before skopeo so skopeo creates it itself (avoids modify-in-place issues)
+  rm -f "$tmp_dest" || true
+  local skopeo_log
+  skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
+  log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
+  # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  else
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  fi
+  if [[ $rc -ne 0 ]]; then
+    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc). See $skopeo_log for raw output"
+    # append the tail of the skopeo log into the main log for quick inspection
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  fi
+  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest"
+  # Move into final location atomically (mv will overwrite existing file)
+  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+    log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
+    # if move fails, include skopeo log for debugging
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  }
+  chmod 0644 "$dest" || true
+  # also copy the skopeo raw log alongside named artifact logs for post-mortem
+  if [[ -f "$skopeo_log" ]]; then
+    cp -f "$skopeo_log" "$LOG_DIR/" 2>/dev/null || true
+  fi
+  chmod 0644 "$dest" || true
+
+  # Generate per-file sha and append to downloads manifest (idempotent)
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      if [[ -f "$manifest" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -2433,7 +2678,7 @@ check_ufw() {
 #   Returns 0 on success; exits if any prerequisite step fails.
 # ------------------------------------------------------------------------------
 install_rke2_prereqs() {
-  log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
+  log INFO "Installing RKE2 prereqs..."
   export DEBIAN_FRONTEND=noninteractive
   log INFO "Updating APT package cache..."
   spinner_run "Updating APT package cache" apt-get update -y
@@ -2444,7 +2689,7 @@ install_rke2_prereqs() {
   log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq net-tools make
+    ebtables openssl tar gzip zstd jq net-tools make skopeo
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
@@ -3989,11 +4234,83 @@ cache_rke2_artifacts() {
   local SHA256_FILE="sha256sum-${ARCH}.txt"
 
   # Download artifacts (idempotent)
-  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
-  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
-  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
-  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
+  if [[ -f "$IMAGES_TAR" ]]; then
+    log INFO "Already present: $IMAGES_TAR (skipping download)"
+  else
+    log INFO "Downloading $IMAGES_TAR from $BASE_URL/$IMAGES_TAR"
+    spinner_run "Downloading $IMAGES_TAR" curl -Lf "$BASE_URL/$IMAGES_TAR" -o "$IMAGES_TAR"
+    if [[ -f "$IMAGES_TAR" ]]; then
+      local _size
+      _size=$(du -h "$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$IMAGES_TAR ($_size) from $BASE_URL/$IMAGES_TAR"
+    else
+      log WARN "Download finished but file not found: $IMAGES_TAR"
+    fi
+  fi
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    log INFO "Already present: $RKE2_TARBALL (skipping download)"
+  else
+    log INFO "Downloading $RKE2_TARBALL from $BASE_URL/$RKE2_TARBALL"
+    spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+    if [[ -f "$RKE2_TARBALL" ]]; then
+      local _size
+      _size=$(du -h "$RKE2_TARBALL" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$RKE2_TARBALL ($_size) from $BASE_URL/$RKE2_TARBALL"
+    else
+      log WARN "Download finished but file not found: $RKE2_TARBALL"
+    fi
+  fi
+  if [[ -f "$SHA256_FILE" ]]; then
+    log INFO "Already present: $SHA256_FILE (skipping download)"
+  else
+    log INFO "Downloading $SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    spinner_run "Downloading $SHA256_FILE" curl -Lf "$BASE_URL/$SHA256_FILE" -o "$SHA256_FILE"
+    if [[ -f "$SHA256_FILE" ]]; then
+      log INFO "Downloaded: $DOWNLOADS_DIR/$SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    else
+      log_WARN "Download finished but file not found: $SHA256_FILE"
+    fi
+  fi
+  if [[ -f install.sh ]]; then
+    log INFO "Already present: install.sh (skipping download)"
+  else
+    log INFO "Downloading install.sh from https://get.rke2.io"
+    spinner_run "Downloading install.sh" curl -sfL "https://get.rke2.io" -o install.sh
+    if [[ -f install.sh ]]; then
+      local _size
+      _size=$(du -h install.sh 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/install.sh ($_size) from https://get.rke2.io"
+    else
+      log WARN "Download finished but file not found: install.sh"
+    fi
+  fi
   chmod +x install.sh || true
+
+  # Optionally download hardened-cni-plugins when configured. Prefer skopeo
+  # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
+  if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
+    # If the artifact already exists in downloads, skip acquisition.
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_CNI_BN; skipping hardened-cni acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "skopeo detected; attempting to mirror hardened-cni from Docker Hub"
+        if ! cache_hardened_cni_skopeo "${HARDENED_CNI_TAG:-}"; then
+          log WARN "skopeo hardened-cni mirror failed; attempting HTTP fallback"
+          if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+            cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+          fi
+        fi
+      else
+        if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+          log INFO "Configured HARDENED_CNI_URL detected; attempting HTTP download"
+          cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+        else
+          log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
+        fi
+      fi
+    fi
+  fi
 
   # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
@@ -4042,6 +4359,14 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"
     mv -T "$tmpf" "$STAGE_DIR/$RKE2_TARBALL"
     log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
+  fi
+
+  # Stage hardened-cni-plugins tarball if present in downloads
+  if [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+    local tmpc="$STAGE_DIR/.tmp-${HARDENED_CNI_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
+    mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
+    log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
@@ -4690,6 +5015,9 @@ action_image() {
   )
   [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
   [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
+  # Include hardened-cni artifact when present
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
   # If there's a sha256 file available, load it to verify artifacts when possible.
   declare -A expected_hash=()
   # Prefer staged manifest (filtered) when present, otherwise fallback to downloads
