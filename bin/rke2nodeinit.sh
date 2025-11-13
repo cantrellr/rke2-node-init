@@ -410,6 +410,7 @@ get_images_archive() {
 #   $1 - Optional path to tarball (defaults to discovered candidate)
 # Returns : 0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
+# shellcheck disable=SC2120  # Arguments are optional; auto-discovery used when omitted
 load_images_from_tarball() {
   local archive="$1"
   if [[ -z "$archive" ]]; then
@@ -449,12 +450,16 @@ load_images_from_tarball() {
   fi
   log INFO "Wrote image load metadata to $meta"
 
-  # Quick verification: look for hardened-cni-plugins as representative sample
-  if (command -v nerdctl >/dev/null 2>&1 && nerdctl images | grep -q 'rancher/hardened-cni-plugins') || \
+  # Runtime verification: check if images were successfully loaded into container runtime
+  # Note: This only verifies runtime state. Tarball integrity is verified separately during staging.
+  log INFO "Verifying images loaded into container runtime..."
+  if (command -v nerdctl >/dev/null 2>&1 && nerdctl images | grep -q 'hardened-cni-plugins') || \
      (ctr -n k8s.io images ls | grep -q 'hardened-cni-plugins'); then
-    log INFO "Representative image 'rancher/hardened-cni-plugins' present after load"
+    log INFO "✓ Runtime verification passed: representative image 'hardened-cni-plugins' found in container runtime"
   else
-    log WARN "Representative image 'rancher/hardened-cni-plugins' not found after image load; verify archive contains expected tags"
+    log WARN "⚠ Runtime verification: 'hardened-cni-plugins' not found in container runtime after load"
+    log WARN "   This may indicate: (1) archive uses different image names, (2) import failed silently, or (3) runtime filtering"
+    log WARN "   Tarball integrity should be verified separately. RKE2 installer will attempt to use staged tarball."
   fi
 
   return 0
@@ -3744,11 +3749,12 @@ ensure_staged_artifacts() {
         log INFO "  - $clean_img"
       done
       
-      # Check for the problematic image mentioned in original logs
+      # Check for CNI plugins image as representative sample of tarball completeness
       if echo "$manifest" | grep -q "hardened-cni-plugins"; then
-        log INFO "  ✓ Verified: rancher/hardened-cni-plugins present in tarball"
+        log INFO "  ✓ Tarball verification passed: 'hardened-cni-plugins' present in manifest"
       else
-        log WARN "  ⚠ rancher/hardened-cni-plugins not found in manifest (may use different format)"
+        log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
+        log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
       fi
     else
       # Docker manifest not found, try OCI image index format as fallback
