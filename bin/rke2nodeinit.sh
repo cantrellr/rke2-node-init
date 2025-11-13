@@ -3736,7 +3736,9 @@ ensure_staged_artifacts() {
       
       # Extract sample image names (look for rancher images as representative)
       log INFO "Sample images in tarball:"
-      echo "$manifest" | grep -o '"docker.io/rancher[^"]*"' 2>/dev/null | head -n 3 | while read -r img; do
+      # Guard grep so a non-match (exit code 1) does not trigger set -o pipefail
+      # and abort the entire script. We only want to iterate when matches exist.
+      echo "$manifest" | { grep -o '"docker.io/rancher[^"]*"' 2>/dev/null || true; } | head -n 3 | while read -r img; do
         local clean_img
         clean_img=$(echo "$img" | tr -d '"')
         log INFO "  - $clean_img"

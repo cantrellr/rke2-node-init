@@ -4,8 +4,8 @@ metadata:
   name: dc1manager-ca
 spec:
   customCA:
-    rootCrt: /rke2node-init/outputs/certs/root-20251112-011341/root-ca.crt
-    rootKey: /rke2node-init/outputs/certs/root-20251112-011341/root-ca-key.pem
+    rootCrt: /rke2node-init/outputs/certs/root-20251112-184043/root-ca.crt
+    rootKey: /rke2node-init/outputs/certs/root-20251112-184043/root-ca-key.pem
     intermediateCrt: /opt/rke2/stage/certs/subordinate-ca.crt
     intermediateKey: /opt/rke2/stage/certs/subordinate-ca-key.pem
     installToOSTrust: true
