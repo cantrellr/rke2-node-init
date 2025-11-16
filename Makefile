@@ -9,7 +9,7 @@
 
 export SHELL := /bin/bash
 export TOKEN_SIZE ?= 32
-export TOKEN_OUTPUT_DIR := outputs/generated-token
+export TOKEN_OUTPUT_DIR := outputs/tokens
 export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
 
@@ -52,8 +52,19 @@ certs-root-ca:
 
 certs-sub-ca:
 	@set -euo pipefail; \
+		# If INPUT not provided interactively prompt when running in a TTY,
+		# otherwise print usage and exit (non-interactive CI will fail fast).
 		if [ -z "${INPUT-}" ]; then \
-			echo "Usage: make certs-sub-ca INPUT=path/to/input.yaml"; exit 1; \
+			if [ -t 0 ]; then \
+				read -r -p "INPUT not provided. Enter path to input YAML: " INPUT; \
+				: "${INPUT}"; \
+			else \
+				echo "Usage: make certs-sub-ca INPUT=path/to/input.yaml"; exit 1; \
+			fi; \
+		fi; \
+		# Verify input file exists
+		if [ ! -f "${INPUT}" ]; then \
+			echo "ERROR: INPUT file not found: ${INPUT}"; exit 1; \
 		fi; \
 		OUTDIR=$${OUTDIR:-outputs/certs}; \
 		TIMESTAMP=$$(date +%Y%m%d-%H%M%S); \
@@ -63,7 +74,48 @@ certs-sub-ca:
 		SUB_PASSFILE_FLAG=""; \
 		if [ "${SUB_ENCRYPT-}" = "true" ]; then ENCRYPT_FLAG="--encrypt-sub-key"; fi; \
 		if [ -n "${SUB_PASSFILE-}" ]; then SUB_PASSFILE_FLAG="--sub-passfile ${SUB_PASSFILE}"; fi; \
-		./certs/scripts/generate-subordinate-ca.sh ${ENCRYPT_FLAG} ${SUB_PASSFILE_FLAG} --input "${INPUT}" --out-dir "$$OUTDIR/subca-$$TIMESTAMP";
+		# Forward optional subordinate pathlen (default 1 so subCA can sign other CAs)
+		SUB_PATHLEN_FLAG=""; \
+		if [ -z "${SUB_PATHLEN-}" ]; then SUB_PATHLEN=1; fi; \
+		if [ -n "${SUB_PATHLEN-}" ]; then SUB_PATHLEN_FLAG="--pathlen ${SUB_PATHLEN}"; fi; \
+		# Forward optional root key/cert/pass to enable fully non-interactive runs
+		ROOT_KEY_FLAG=""; ROOT_CERT_FLAG=""; ROOT_PASS_FLAG=""; \
+		if [ -n "${ROOT_KEY-}" ]; then ROOT_KEY_FLAG="--root-key ${ROOT_KEY}"; fi; \
+		if [ -n "${ROOT_CERT-}" ]; then ROOT_CERT_FLAG="--root-cert ${ROOT_CERT}"; fi; \
+		if [ -n "${ROOT_PASS-}" ]; then ROOT_PASS_FLAG="--root-passphrase ${ROOT_PASS}"; fi; \
+		./certs/scripts/generate-subordinate-ca.sh ${ENCRYPT_FLAG} ${SUB_PASSFILE_FLAG} ${SUB_PATHLEN_FLAG} ${ROOT_KEY_FLAG} ${ROOT_CERT_FLAG} ${ROOT_PASS_FLAG} --input "${INPUT}" --out-dir "$$OUTDIR/subca-$$TIMESTAMP";
+
+## Safer wrapper: validate INPUT and run generation as the invoking user.
+## If INSTALL=true, perform privileged install steps (only escalate that step).
+certs-sub-ca-safe:
+	@set -euo pipefail; \
+		if [ -z "${INPUT-}" ]; then \
+			if [ -t 0 ]; then \
+				read -r -p "INPUT not provided. Enter path to input YAML: " INPUT; \
+				: "${INPUT}"; \
+			else \
+				echo "Usage: make certs-sub-ca-safe INPUT=path/to/input.yaml"; exit 1; \
+			fi; \
+		fi; \
+		if [ ! -f "${INPUT}" ]; then \
+			echo "ERROR: INPUT file not found: ${INPUT}"; exit 1; \
+		fi; \
+		OUTDIR=$${OUTDIR:-outputs/certs}; \
+		TIMESTAMP=$$(date +%Y%m%d-%H%M%S); \
+		mkdir -p "$$OUTDIR"; \
+		# Run generation as the current user (no sudo). The script itself should
+		# write outputs to OUTDIR/subca-<timestamp>.
+		# Default pathlen to 1 so the subordinate CA can sign other CAs unless overridden
+		if [ -z "${SUB_PATHLEN-}" ]; then SUB_PATHLEN=1; fi; \
+		SUB_PATHLEN_FLAG="--pathlen ${SUB_PATHLEN}"; \
+		./certs/scripts/generate-subordinate-ca.sh ${SUB_PATHLEN_FLAG} --input "${INPUT}" --out-dir "$$OUTDIR/subca-$$TIMESTAMP"; \
+		# Optional privileged install step: set INSTALL=true to enable.
+		if [ "${INSTALL-}" = "true" ]; then \
+			echo "INSTALL=true: performing privileged install of generated artifacts"; \
+			sudo mkdir -p /etc/rancher/subca || true; \
+			sudo cp -a "$$OUTDIR/subca-$$TIMESTAMP/." /etc/rancher/subca/; \
+			echo "Privileged install complete (copied to /etc/rancher/subca/)"; \
+		fi;
 
 certs-verify:
 	@set -euo pipefail; \
@@ -77,3 +129,19 @@ certs-assert:
 		command -v ./certs/scripts/verify-chain.sh >/dev/null 2>&1 || true; \
 		./certs/scripts/verify-chain.sh --root "${ROOT}" --sub "${SUB}"; \
 		echo "certs-assert: OK";
+
+## Fully automated CA + subCA pipeline
+## Usage examples:
+##   make certs-auto ROOT_CN="My Root CA" SUB_CN="My Sub CA" SUB_ORG="Example" ROOT_PASS='s3cret' SUB_ENCRYPT=true
+## Environment/Make variables supported (all optional with sensible defaults):
+##   ROOT_CN, ROOT_PASS, ROOT_KEY, ROOT_CERT, SUB_CN, SUB_ORG, SUB_ENCRYPT, SUB_PASSFILE, OUTDIR (base outputs dir), STAGE_DIR
+
+certs-auto:
+	@# Do not run this whole recipe under sudo. It uses sudo internally.
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		echo "Do not run 'sudo make certs-auto' - run as your user and the recipe will use sudo where needed"; \
+		exit 1; \
+	fi
+	@echo "Running scripts/certs-auto.sh to perform CA automation"
+	@chmod +x scripts/certs-auto.sh
+	@OUTDIR="${OUTDIR:-outputs/certs}" STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}" TOKEN_OUTPUT_DIR="${TOKEN_OUTPUT_DIR:-outputs/tokens}" GENERATE_TOKEN="false" ROOT_CN="${ROOT_CN}" ROOT_PASS="${ROOT_PASS}" SUB_CN="${SUB_CN}" SUB_ORG="${SUB_ORG}" SUB_ENCRYPT="${SUB_ENCRYPT}" SUB_PASSFILE="${SUB_PASSFILE}" SUB_PATHLEN="${SUB_PATHLEN}" ./scripts/certs-auto.sh

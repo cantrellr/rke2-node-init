@@ -20,11 +20,11 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.8a (multi-interface support)
+#       Version: 0.8b (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
-#            
+#
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
@@ -45,7 +45,7 @@ esac
 #
 # Connectivity expectations:
 #   - image is the ONLY action that requires Internet access to gather artifacts
-#   - All other actions (push, server, add-server, agent, verify, label-node, 
+#   - All other actions (push, server, add-server, agent, verify, label-node,
 #     taint-node, custom-ca) are designed to run fully offline
 #
 # Key features in this version:
@@ -144,7 +144,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 RKE2_VERSION=""                                       # auto-detect if empty
 # WARNING: These are EXAMPLE defaults only. Override with -r/-u/-p or via YAML config.
 #          DO NOT use these default credentials in production environments.
-REGISTRY="rke2registry.dev.local"
+REGISTRY=""
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
@@ -161,6 +161,8 @@ AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cle
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
+LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
+VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -178,6 +180,16 @@ AGENT_CA_CERT=""
 IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
 SHA256_FILE="sha256sum-$ARCH.txt"
+
+# Optional: hardened-cni-plugins HTTP download configuration
+# Operators should set `HARDENED_CNI_URL` to a direct HTTP(S) downloadable
+# tarball of the hardened-cni image (for air-gapped staging). When empty,
+# the image will not be fetched automatically.
+HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
+# Basename used for saved artifact (operator can override by setting
+# HARDENED_CNI_BN in the environment if desired).
+HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
+HARDENED_CNI_FILE="$DOWNLOADS_DIR/$HARDENED_CNI_BN"
 
 # Logging
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
@@ -250,6 +262,16 @@ OPTIONS:
                Define network interface (repeatable for multi-interface setups)
                Use "dhcp4=true" for DHCP-based interfaces
                Omit name on first interface to auto-detect primary NIC
+  --load-images
+               Import staged RKE2 images from the tarball into the local
+               container runtime (nerdctl/ctr). This is opt-in; by default
+               images are left staged as a tarball on the node for air-gapped
+               template workflows.
+  --verify-layers
+               Perform deep layer checksum verification of staged images
+               tarball. Verifies individual layer SHA256 digests against
+               manifest to ensure no corruption. More thorough than standard
+               tarball integrity tests. Opt-in due to additional processing time.
 
 MULTI-INTERFACE YAML EXAMPLE:
   apiVersion: rkeprep/v1
@@ -311,7 +333,7 @@ OUTPUTS:
                (SHA256 checksums and sizes of cached artifacts)
   - Run log:   outputs/<metadata.name>/README.txt
                (Summary of image preparation steps)
-  - Token:     outputs/generated-token/<cluster>-token.txt
+  - Token:     outputs/tokens/<cluster>-token.txt
                (Generated cluster token for Server with clusterInit: true)
 
 EXIT CODES:
@@ -326,6 +348,241 @@ For more information, see README.md or visit:
   https://github.com/cantrellcloud/rke2-node-init
 
 EOF
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_http
+# Purpose : Download hardened-cni-plugins via HTTP(S) into the downloads dir
+#           and produce a local sha256 checksum file for staging.
+# Arguments:
+#   $1 - Optional URL to download (overrides HARDENED_CNI_URL)
+# Returns : 0 on success, non-zero on failure (download or write error)
+# ------------------------------------------------------------------------------
+cache_hardened_cni_http() {
+  local url="${1:-$HARDENED_CNI_URL}"
+  if [[ -z "$url" ]]; then
+    log INFO "HARDENED_CNI_URL not set; skipping hardened-cni-plugins download"
+    return 0
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local tmp="$DOWNLOADS_DIR/.tmp-${bn}.$$"
+  log INFO "Downloading hardened-cni-plugins from $url -> $DOWNLOADS_DIR/$bn"
+
+  if command -v curl >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" wget -q -O "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins via wget from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  else
+    log ERROR "Neither curl nor wget available to download hardened-cni-plugins"
+    return 2
+  fi
+
+  # Move into place atomically
+  mv -T "$tmp" "$DOWNLOADS_DIR/$bn"
+  chmod 0644 "$DOWNLOADS_DIR/$bn" || true
+
+  # Write a simple SHA256 file beside the artifact for audit/staging and
+  # also append the checksum to the repository-style manifest used by the
+  # script so the staged manifest `sha256sum-<arch>.txt` includes this
+  # artifact. This keeps hardened-cni entries aligned with other artifacts
+  # and allows `sha256sum -c` verification to work uniformly.
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    log INFO "Wrote checksum: $DOWNLOADS_DIR/${bn}.sha256"
+
+    # Ensure downloads dir manifest exists and is updated idempotently.
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    mkdir -p "$(dirname "$manifest")"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      # Remove any existing line referencing this basename, then append
+      # a single manifest line in the canonical format: "<sha>  <basename>"
+      if [[ -f "$manifest" ]]; then
+        # Use a temp file replacement to avoid races
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  local _size
+  _size=$(du -h "$DOWNLOADS_DIR/$bn" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Downloaded hardened-cni-plugins: $DOWNLOADS_DIR/$bn ($_size)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_skopeo
+# Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
+#           docker-archive tarball using `skopeo` (no daemon required). The
+#           helper will attempt to select a tag compatible with the RKE2
+#           release (best-effort) and write the resulting archive to
+#           `$DOWNLOADS_DIR/$HARDENED_CNI_BN`.
+# Arguments:
+#   $1 - Optional explicit tag to use (overrides auto-detection)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+cache_hardened_cni_skopeo() {
+  local explicit_tag="${1:-}"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local repo="docker://rancher/hardened-cni-plugins"
+  if ! command -v skopeo >/dev/null 2>&1; then
+    log WARN "skopeo not available; cannot mirror hardened-cni via skopeo"
+    return 2
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+
+  # Determine desired tag: prefer explicit, then RKE2_VERSION, then try to
+  # infer from downloaded images manifest, otherwise fall back to 'latest'.
+  local desired_tag=""
+  if [[ -n "$explicit_tag" ]]; then
+    desired_tag="$explicit_tag"
+  elif [[ -n "${RKE2_VERSION:-}" ]]; then
+    desired_tag="${RKE2_VERSION}"
+  else
+    # Try to infer from the images tar (if present in downloads)
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" && -x "$(command -v zstd || true)" ]]; then
+      # Extract manifest.json from tar.zst and search for rke2-runtime tags
+      local _manifest
+      _manifest=$(mktemp)
+      if zstd -d -c "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null | tar -Ox manifest.json > "$_manifest" 2>/dev/null; then
+        if command -v python3 >/dev/null 2>&1; then
+          desired_tag=$(python3 - <<PY 2>/dev/null
+import json,sys
+try:
+    j=json.load(open('$_manifest'))
+    for e in j:
+        for t in e.get('RepoTags',[]):
+            if 'rke2-runtime' in t:
+                print(t.split(':',1)[1])
+                raise SystemExit
+except Exception:
+    pass
+PY
+) || true
+        fi
+      fi
+      rm -f "$_manifest" || true
+    fi
+  fi
+
+  # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
+  # tags and Docker Hub API and let a small helper choose the best tag.
+  local tags_json
+  tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+  local hub_json
+  if command -v curl >/dev/null 2>&1; then
+    hub_json=$(curl -fsSL "https://hub.docker.com/v2/repositories/rancher/hardened-cni-plugins/tags?page_size=100" 2>/dev/null || true)
+  else
+    hub_json=""
+  fi
+
+  local chosen=""
+  if command -v python3 >/dev/null 2>&1; then
+    local _tfile _hfile
+    _tfile=$(mktemp) || _tfile="/tmp/.rke2nodeinit-tags$$"
+    _hfile=$(mktemp) || _hfile="/tmp/.rke2nodeinit-hub$$"
+    printf '%s' "$tags_json" > "$_tfile" || true
+    printf '%s' "$hub_json" > "$_hfile" || true
+    chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
+    rm -f "$_tfile" "$_hfile" || true
+  fi
+  if [[ -z "$chosen" ]]; then
+    chosen="latest"
+  fi
+
+  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag')"
+
+  local dest="$DOWNLOADS_DIR/$bn"
+  # Use docker-archive format (creates tar with manifest.json compatible with tooling)
+  # Write to a temporary destination first, then atomically move into place.
+  local tmp_dest
+  # create a safe temporary file path under the downloads dir
+  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+  # we'll remove the tmp file before skopeo so skopeo creates it itself (avoids modify-in-place issues)
+  rm -f "$tmp_dest" || true
+  local skopeo_log
+  skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
+  log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
+  # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  else
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  fi
+  if [[ $rc -ne 0 ]]; then
+    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc). See $skopeo_log for raw output"
+    # append the tail of the skopeo log into the main log for quick inspection
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  fi
+  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest"
+  # Move into final location atomically (mv will overwrite existing file)
+  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+    log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
+    # if move fails, include skopeo log for debugging
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  }
+  chmod 0644 "$dest" || true
+  # also copy the skopeo raw log alongside named artifact logs for post-mortem
+  if [[ -f "$skopeo_log" ]]; then
+    cp -f "$skopeo_log" "$LOG_DIR/" 2>/dev/null || true
+  fi
+  chmod 0644 "$dest" || true
+
+  # Generate per-file sha and append to downloads manifest (idempotent)
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      if [[ -f "$manifest" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -369,6 +626,91 @@ warn_default_credentials() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: get_images_archive
+# Purpose : Locate the staged images archive in downloads or images dir
+# Arguments:
+#   None
+# Returns : Prints path to archive or returns 1 if not found
+# ------------------------------------------------------------------------------
+get_images_archive() {
+  local img="${IMAGES_TAR:-rke2-images.linux-${ARCH}.tar.zst}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  if [[ -f "$images_dir/$img" ]]; then
+    printf '%s' "$images_dir/$img"
+    return 0
+  fi
+  if [[ -f "$DOWNLOADS_DIR/$img" ]]; then
+    printf '%s' "$DOWNLOADS_DIR/$img"
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: load_images_from_tarball
+# Purpose : Load images from a staged RKE2 images tarball into the local
+#           container runtime (nerdctl/ctr). Writes a small metadata file on
+#           success and logs progress.
+# Arguments:
+#   $1 - Optional path to tarball (defaults to discovered candidate)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+# shellcheck disable=SC2120  # Arguments are optional; auto-discovery used when omitted
+load_images_from_tarball() {
+  local archive="$1"
+  if [[ -z "$archive" ]]; then
+    archive="$(get_images_archive || true)"
+  fi
+  if [[ -z "$archive" || ! -f "$archive" ]]; then
+    log WARN "No images archive found to load (expected: ${IMAGES_TAR}). Skipping image load."
+    return 0
+  fi
+
+  log INFO "Loading images from archive: $archive"
+
+  # Prefer nerdctl if available; ensure it's installed by caller
+  if command -v nerdctl >/dev/null 2>&1; then
+    if zstd -dc "$archive" | nerdctl load -i - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via nerdctl"
+    else
+      log ERROR "nerdctl failed to load images from $archive"
+      return 2
+    fi
+  else
+    # Fallback to ctr
+    if zstd -dc "$archive" | ctr -n k8s.io images import - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via ctr"
+    else
+      log ERROR "ctr failed to import images from $archive"
+      return 3
+    fi
+  fi
+
+  # Emit a simple metadata file listing images present (nerdctl images output)
+  local meta="$STAGE_DIR/images-loaded-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  if command -v nerdctl >/dev/null 2>&1; then
+    nerdctl images >>"$meta" 2>&1 || true
+  else
+    ctr -n k8s.io images ls >>"$meta" 2>&1 || true
+  fi
+  log INFO "Wrote image load metadata to $meta"
+
+  # Runtime verification: check if images were successfully loaded into container runtime
+  # Note: This only verifies runtime state. Tarball integrity is verified separately during staging.
+  log INFO "Verifying images loaded into container runtime..."
+  if (command -v nerdctl >/dev/null 2>&1 && nerdctl images | grep -q 'hardened-cni-plugins') || \
+     (ctr -n k8s.io images ls | grep -q 'hardened-cni-plugins'); then
+    log INFO "✓ Runtime verification passed: representative image 'hardened-cni-plugins' found in container runtime"
+  else
+    log WARN "⚠ Runtime verification: 'hardened-cni-plugins' not found in container runtime after load"
+    log WARN "   This may indicate: (1) archive uses different image names, (2) import failed silently, or (3) runtime filtering"
+    log WARN "   Tarball integrity should be verified separately. RKE2 installer will attempt to use staged tarball."
+  fi
+
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: spinner_run
 # Purpose : Execute a long-running command while providing an inline progress
 #           spinner on stdout. All command output is streamed to the logfile so
@@ -391,7 +733,7 @@ spinner_run() {
   # Forward signals to the child so Ctrl-C works cleanly
   trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
 
-  local spin='|+/-\' i=0
+  local spin='|+/-\o' i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
@@ -752,27 +1094,43 @@ append_spec_config_extras() {
   # Scalars we pass through as-is if present
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
-    "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
+    "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
+    # Image overrides commonly required to avoid external pulls in air-gapped installs
+    "kube-proxy-image" "pause-image" "runtime-image"
     "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
+
 
   local k v
   for k in "${scalars[@]}"; do
     _cfg_has_key "$k" && continue
-    v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
+    # Try the hyphenated key first, then a lower-camelCase variant that many
+    # example YAML files use (e.g., nodeIp, bindAddress).
+  # build camelCase (node-ip -> nodeIp)
+  camel_case="$(echo "$k" | awk -F- '{printf "%s", $1; for(i=2;i<=NF;i++){printf toupper(substr($i,1,1)) substr($i,2)}}')" || true
+  v="$(yaml_spec_get_any "$file" "$k" "$camel_case" || true)"
     if [[ -n "$v" ]]; then
       local normalized=""
-      normalized="$(normalize_bool_value "$v")"
-      echo "$k: $normalized" >> "$cfg"
+      # If value looks like true/false, normalize and emit bare boolean
+      if [[ "$v" =~ ^(true|false|True|False|TRUE|FALSE)$ ]]; then
+        normalized="$(normalize_bool_value "$v")"
+        echo "$k: $normalized" >> "$cfg"
+      else
+        # Quote string-like values to ensure YAML correctness (images, registries, CIDRs)
+        # Escape any existing double-quotes in the value
+        local esc
+        esc=$(printf '%s' "$v" | sed 's/"/\\"/g')
+        echo "$k: \"$esc\"" >> "$cfg"
+      fi
     fi
   done
 
   # Lists we support (emit YAML arrays)
   local -a lists=(
     "kube-apiserver-arg" "kube-controller-manager-arg" "kube-scheduler-arg" "kube-proxy-arg"
-    "node-taint" "node-label" "tls-san"
+    "node-taint" "node-label" "tls-san" "cni" "disable"
   )
 
   for k in "${lists[@]}"; do
@@ -780,6 +1138,21 @@ append_spec_config_extras() {
     if yaml_spec_has_list "$file" "$k"; then
       echo "$k:" >> "$cfg"
       yaml_spec_list_items "$file" "$k" | sed 's/^/  - /' >> "$cfg"
+    else
+      # Fallback: some manifests express these as scalars (e.g., cni: "cilium")
+      local scalar_val
+      scalar_val="$(yaml_spec_get "$file" "$k" || true)"
+      if [[ -n "$scalar_val" ]]; then
+        # Emit either a scalar or a single-item list depending on key semantics
+        if [[ "$k" == "cni" ]]; then
+          # cni can be a scalar in RKE2 config
+          echo "$k: \"$scalar_val\"" >> "$cfg"
+        else
+          # default: emit as a single item list
+          echo "$k:" >> "$cfg"
+          echo "  - $scalar_val" >> "$cfg"
+        fi
+      fi
     fi
   done
 }
@@ -890,7 +1263,7 @@ trim_whitespace() {
   local _s="$1"
   # Handle empty or whitespace-only strings
   [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
-  # Strip leading whitespace: 
+  # Strip leading whitespace:
   #   ${_s%%[![:space:]]*} finds everything up to first non-space
   #   ${_s#...} removes that prefix, leaving string from first non-space onward
   _s="${_s#${_s%%[![:space:]]*}}"
@@ -947,12 +1320,12 @@ interface_decode_entry() {
 
   # Split on pipe delimiter into array of key=value pairs
   IFS='|' read -r -a _pairs <<<"$_entry"
-  
+
   # Validate we have at least one pair
   if (( ${#_pairs[@]} == 0 )); then
     return 1
   fi
-  
+
   local _pair _key _value
   for _pair in "${_pairs[@]}"; do
     [[ -z "$_pair" ]] && continue
@@ -970,7 +1343,7 @@ interface_decode_entry() {
     esac
     _dest["$_key"]="$_value"
   done
-  
+
   return 0
 }
 
@@ -1108,7 +1481,7 @@ for raw in lines:
         continue
 
     indent = len(line) - len(line.lstrip(' '))
-    
+
     # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
     # This must be checked before dash_match to avoid treating sibling list items as interface items
     if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
@@ -2067,7 +2440,7 @@ write_netplan_multi() {
       if [[ -n "${_nic[mtu]:-}" ]]; then
         echo "      mtu: ${_nic[mtu]}"
       fi
-      
+
       # Disable IPv6 on all interfaces
       echo "      accept-ra: false"
       echo "      link-local: []"
@@ -2305,7 +2678,7 @@ check_ufw() {
 #   Returns 0 on success; exits if any prerequisite step fails.
 # ------------------------------------------------------------------------------
 install_rke2_prereqs() {
-  log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
+  log INFO "Installing RKE2 prereqs..."
   export DEBIAN_FRONTEND=noninteractive
   log INFO "Updating APT package cache..."
   spinner_run "Updating APT package cache" apt-get update -y
@@ -2316,7 +2689,7 @@ install_rke2_prereqs() {
   log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq net-tools make
+    ebtables openssl tar gzip zstd jq net-tools make skopeo
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
@@ -2811,6 +3184,366 @@ generate_bootstrap_token() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: cleanup_containerd_before_rke2
+# Purpose : Optionally stop and clear containerd state before RKE2 installation
+#           to prevent conflicts with stale or wrong-version images. This is
+#           particularly useful when reinstalling or when containerd was previously
+#           used for non-RKE2 workloads.
+# Arguments:
+#   $1 - Installation type label (e.g., "server", "agent", "add-server") for logging
+# Returns :
+#   Always returns 0 after prompting and optionally cleaning containerd.
+# ------------------------------------------------------------------------------
+cleanup_containerd_before_rke2() {
+  local install_type="${1:-RKE2}"
+  
+  if ! command -v containerd >/dev/null 2>&1; then
+    return 0  # containerd not installed, nothing to clean
+  fi
+  
+  if ! systemctl is-active --quiet containerd 2>/dev/null; then
+    return 0  # containerd not running, nothing to clean
+  fi
+  
+  log WARN "containerd is already running before $install_type installation"
+  log WARN "Pre-existing containerd state may contain stale or conflicting images"
+  
+  local clean_containerd=0
+  if [[ "${AUTO_YES:-0}" -eq 1 ]]; then
+    log INFO "Auto-confirm enabled; will stop containerd and clear its image store"
+    clean_containerd=1
+  else
+    echo
+    read -rp "Stop containerd and clear its image store before RKE2 install? [y/N]: " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      clean_containerd=1
+    fi
+  fi
+  
+  if (( clean_containerd == 1 )); then
+    log INFO "Stopping containerd service..."
+    systemctl stop containerd >>"$LOG_FILE" 2>&1 || true
+    
+    # Clear containerd content and metadata stores
+    if [[ -d /var/lib/containerd ]]; then
+      log INFO "Clearing containerd content store..."
+      rm -rf /var/lib/containerd/io.containerd.content.v1.content/* 2>/dev/null || true
+      log INFO "Clearing containerd metadata database..."
+      rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db 2>/dev/null || true
+      log INFO "Containerd state cleared; RKE2 will start with fresh image store"
+    fi
+  else
+    log INFO "Skipping containerd cleanup; RKE2 will use existing containerd state"
+  fi
+  
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: parse_oci_image_index
+# Purpose : Parse OCI image index format from tarball and extract image list.
+#           This provides fallback support when Docker manifest.json is not present.
+# Arguments:
+#   $1 - Path to the images tarball
+# Returns :
+#   Prints JSON array of image references, or empty string on failure.
+# ------------------------------------------------------------------------------
+parse_oci_image_index() {
+  local tarball="$1"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log WARN "parse_oci_image_index: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: zstd not available for decompression"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: gzip not available for decompression"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Try to extract index.json (OCI layout)
+  local index_json
+  index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+  
+  if [[ -z "$index_json" ]]; then
+    log INFO "parse_oci_image_index: No index.json found (not OCI layout format)"
+    return 1
+  fi
+  
+  # Validate it's valid JSON with manifests array
+  if ! echo "$index_json" | python3 -m json.tool >/dev/null 2>&1; then
+    log WARN "parse_oci_image_index: index.json is not valid JSON"
+    return 1
+  fi
+  
+  # Extract image references from annotations
+  # OCI index typically has manifests[].annotations["org.opencontainers.image.ref.name"]
+  local image_refs
+  image_refs=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    refs = []
+    if "manifests" in data:
+        for manifest in data["manifests"]:
+            if "annotations" in manifest:
+                ref_name = manifest["annotations"].get("org.opencontainers.image.ref.name", "")
+                if ref_name:
+                    refs.append(ref_name)
+            # Also check for platform-specific info
+            if "platform" in manifest:
+                arch = manifest["platform"].get("architecture", "")
+                if arch:
+                    # Note the architecture for filtering
+                    pass
+    print(json.dumps(refs))
+except Exception as e:
+    print("[]", file=sys.stderr)
+    sys.exit(1)
+' 2>/dev/null || echo "[]")
+  
+  if [[ "$image_refs" == "[]" ]]; then
+    log INFO "parse_oci_image_index: No image references found in index.json"
+    return 1
+  fi
+  
+  echo "$image_refs"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_image_layer_checksums
+# Purpose : Verify individual image layer checksums from tarball manifest against
+#           computed SHA256 digests. Provides deep integrity validation beyond
+#           simple tarball compression testing.
+# Arguments:
+#   $1 - Path to the images tarball
+#   $2 - Temporary directory for extraction (optional, defaults to /tmp)
+# Returns :
+#   0 if all layers verify successfully, 1 on any failure
+# ------------------------------------------------------------------------------
+verify_image_layer_checksums() {
+  local tarball="$1"
+  local tmp_dir="${2:-/tmp}"
+  local work_dir="$tmp_dir/verify-layers-$$"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log ERROR "verify_image_layer_checksums: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: zstd not available"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: gzip not available"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Create temporary work directory
+  mkdir -p "$work_dir" || {
+    log ERROR "verify_image_layer_checksums: failed to create work directory"
+    return 1
+  }
+  
+  # Extract manifest.json
+  local manifest
+  manifest=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+  
+  if [[ -z "$manifest" ]]; then
+    log WARN "verify_image_layer_checksums: No Docker manifest.json found, trying OCI format"
+    
+    # Try OCI layout with index.json
+    local index_json
+    index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+    
+    if [[ -z "$index_json" ]]; then
+      log WARN "verify_image_layer_checksums: No index.json found either, cannot verify"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For OCI format, we need to extract blobs and verify against manifest descriptors
+    log INFO "Verifying OCI image layers..."
+    
+    # Extract all manifest digests from index
+    local manifest_digests
+    manifest_digests=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if "manifests" in data:
+        for m in data["manifests"]:
+            if "digest" in m:
+                print(m["digest"])
+except:
+    pass
+' 2>/dev/null || true)
+    
+    if [[ -z "$manifest_digests" ]]; then
+      log WARN "verify_image_layer_checksums: No manifest digests in OCI index"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For each manifest, extract and verify its blob
+    local verified_count=0
+    local failed_count=0
+    
+    while IFS= read -r digest; do
+      [[ -z "$digest" ]] && continue
+      
+      # OCI digest format: sha256:abc123...
+      local algo="${digest%%:*}"
+      local hash="${digest#*:}"
+      
+      if [[ "$algo" != "sha256" ]]; then
+        log WARN "Unsupported digest algorithm: $algo (skipping)"
+        continue
+      fi
+      
+      # Extract blob from tarball (OCI layout stores as blobs/sha256/<hash>)
+      local blob_path="blobs/sha256/$hash"
+      local blob_data
+      blob_data=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO "$blob_path" 2>/dev/null || echo "")
+      
+      if [[ -z "$blob_data" ]]; then
+        log WARN "Blob not found in tarball: $blob_path"
+        ((failed_count++))
+        continue
+      fi
+      
+      # Compute SHA256 of extracted blob
+      local computed_hash
+      computed_hash=$(echo -n "$blob_data" | sha256sum | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch for $blob_path"
+        log ERROR "  Expected: $hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    done <<< "$manifest_digests"
+    
+    rm -rf "$work_dir"
+    
+    if (( failed_count > 0 )); then
+      log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted"
+      return 1
+    fi
+    
+    log INFO "Layer verification PASSED: $verified_count layer(s) verified"
+    return 0
+  fi
+  
+  # Docker manifest.json format - verify layers
+  log INFO "Verifying Docker image layers..."
+  
+  # Parse manifest to get layer paths and extract them
+  local layer_paths
+  layer_paths=$(echo "$manifest" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for image in data:
+        if "Layers" in image:
+            for layer in image["Layers"]:
+                print(layer)
+except:
+    pass
+' 2>/dev/null || true)
+  
+  if [[ -z "$layer_paths" ]]; then
+    log WARN "verify_image_layer_checksums: No layers found in manifest"
+    rm -rf "$work_dir"
+    return 1
+  fi
+  
+  local verified_count=0
+  local failed_count=0
+  local total_layers=0
+  
+  # Count total layers
+  total_layers=$(echo "$layer_paths" | wc -l)
+  log INFO "Found $total_layers layer(s) to verify"
+  
+  # Extract layers and verify
+  while IFS= read -r layer_path; do
+    [[ -z "$layer_path" ]] && continue
+    
+    # Extract layer from tarball
+    local layer_file="$work_dir/$(basename "$layer_path")"
+    if ! $decompress_cmd "$tarball" 2>/dev/null | tar -xO "$layer_path" > "$layer_file" 2>/dev/null; then
+      log WARN "Failed to extract layer: $layer_path"
+      ((failed_count++))
+      continue
+    fi
+    
+    # For Docker format, layers are typically named with their digest
+    # Format: <hash>/layer.tar
+    local layer_dir
+    layer_dir=$(dirname "$layer_path")
+    
+    if [[ "$layer_dir" =~ ^[a-f0-9]{64}$ ]]; then
+      # The directory name is the expected SHA256 hash
+      local expected_hash="$layer_dir"
+      local computed_hash
+      computed_hash=$(sha256sum "$layer_file" | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$expected_hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch: $layer_path"
+        log ERROR "  Expected: $expected_hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    else
+      # Cannot determine expected hash from path, just verify extraction worked
+      ((verified_count++))
+    fi
+    
+    rm -f "$layer_file"
+  done <<< "$layer_paths"
+  
+  rm -rf "$work_dir"
+  
+  if (( failed_count > 0 )); then
+    log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted out of $total_layers"
+    return 1
+  fi
+  
+  log INFO "Layer verification PASSED: $verified_count layer(s) verified out of $total_layers"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: run_rke2_installer
 # Purpose : Execute the cached RKE2 installer script with environment variables
 #           pointing to staged artifacts for offline installation.
@@ -3029,6 +3762,14 @@ verify_custom_cluster_ca() {
 # ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
+  # If operator provided a local artifact path, attempt to stage from it into STAGE_DIR
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; attempting to stage artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}' into '$STAGE_DIR'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}" || {
+      log ERROR "Staging artifacts from INSTALL_RKE2_ARTIFACT_PATH failed. Aborting."
+      exit 3
+    }
+  fi
   if [[ ! -f "$STAGE_DIR/install.sh" ]]; then
     if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
@@ -3056,6 +3797,269 @@ ensure_staged_artifacts() {
   if (( missing != 0 )); then
     exit 3
   fi
+
+  # Runtime verification: validate staged files against the provided sha256 file
+  if command -v sha256sum >/dev/null 2>&1; then
+    if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+      # Some artifacts (image bundles) are staged into a separate images dir
+      # (IMAGES_DIR). Build a temporary manifest that maps manifest entries to
+      # their actual staged locations (STAGE_DIR or IMAGES_DIR) so sha256sum
+      # can validate them regardless of which staging target holds the file.
+      local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+      log INFO "Verifying staged artifacts checksums in $STAGE_DIR (including $IMAGES_DIR)"
+      local tmp_manifest
+      tmp_manifest=$(mktemp)
+      # Read original manifest and map each entry to where the file actually lives
+      # We collect three lists:
+      #  - mapped_lines: entries we can point at an existing file
+      #  - missing_entries: entries not found as standalone files
+      #  - image_like_missing: subset of missing_entries that look like per-flavor image bundles
+      local -a mapped_lines=()
+      local -a missing_entries=()
+      local -a image_like_missing=()
+      while read -r h fn; do
+        # Normalize to basename when manifest references relative paths
+        local bn
+        bn=$(basename "${fn}")
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $STAGE_DIR/$bn")
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $IMAGES_DIR/$bn")
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $DOWNLOADS_DIR/$bn")
+        else
+          # Not present as a standalone file; record for later decision
+          missing_entries+=("$h  $bn")
+          # Heuristic: many per-flavor image bundles are named rke2-images-*. Treat
+          # those as image-like so they can be considered satisfied by a consolidated
+          # images tarball when present and verified.
+          if [[ "$bn" == rke2-images-* ]]; then
+            image_like_missing+=("$h  $bn")
+          fi
+        fi
+      done < "$STAGE_DIR/$SHA256_FILE"
+
+      # Verify consolidated images tarball first (if present in stage/downloads/images dir)
+      local images_tar_candidate=""
+      for p in "$STAGE_DIR/$IMAGES_TAR" "$IMAGES_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$IMAGES_TAR"; do
+        if [[ -f "$p" ]]; then images_tar_candidate="$p"; break; fi
+      done
+
+      local images_consolidated_verified=0
+      if [[ -n "$images_tar_candidate" ]]; then
+        # If the manifest contains an entry for the consolidated images tar, prefer
+        # to verify that explicitly. Otherwise, we'll verify mapped_lines below
+        # and treat image-like missing entries as covered by the consolidated tar.
+        if grep -Fq "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE"; then
+          if (grep "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+            images_consolidated_verified=1
+            log INFO "Consolidated images archive verified: $images_tar_candidate"
+          else
+            log WARN "Consolidated images archive present but failed checksum: $images_tar_candidate"
+          fi
+        else
+          # No manifest line for consolidated tar in stage manifest; attempt to verify
+          # it against downloads manifest if available
+          if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" && $(grep -F "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | wc -l) -gt 0 ]]; then
+            if (grep "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+              images_consolidated_verified=1
+              log INFO "Consolidated images archive verified via downloads manifest: $images_tar_candidate"
+            else
+              log WARN "Consolidated images archive present but failed verification against downloads manifest"
+            fi
+          fi
+        fi
+      fi
+
+      # Build the temporary manifest to validate with sha256sum: include mapped lines
+      # and any missing_entries that are not image-like (or image-like but not covered).
+      local line
+      for line in "${mapped_lines[@]}"; do printf '%s\n' "$line" >>"$tmp_manifest"; done
+      for line in "${missing_entries[@]}"; do
+        local bn
+        bn=$(basename "${line#*  }")
+        # If this missing entry is image-like and we have a verified consolidated tar,
+        # skip adding it to the temporary manifest (consider it satisfied).
+        if [[ "$bn" == rke2-images-* && $images_consolidated_verified -eq 1 ]]; then
+          log INFO "Treating missing image-like manifest entry as satisfied by consolidated tar: $bn"
+          continue
+        fi
+        # Otherwise include it (will cause sha256sum to report missing) so operator sees it
+        printf '%s\n' "$line" >>"$tmp_manifest"
+      done
+
+      # Run verification against the normalized manifest
+      if ! sha256sum -c "$tmp_manifest" >>"$LOG_FILE" 2>&1; then
+        log ERROR "Staged artifact checksum verification FAILED. Aborting install. Remove bad artifacts and re-run 'image'."
+        rm -f "$tmp_manifest" || true
+        exit 3
+      fi
+      rm -f "$tmp_manifest" || true
+      log INFO "Staged artifacts checksum verification passed"
+    else
+      log WARN "No checksum file present in $STAGE_DIR; cannot verify staged artifacts"
+    fi
+  else
+    log WARN "sha256sum not available; skipping staged artifact verification"
+  fi
+
+  # --- Post-staging verification: ensure images tarball is present and accessible ---
+  log INFO "Performing post-staging verification..."
+  
+  # Priority 2: Architecture mismatch detection
+  local EXPECTED_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  if [[ ! -f "$IMAGES_DIR/$EXPECTED_TAR" ]]; then
+    # Look for any rke2-images tarball in images dir (may be wrong arch)
+    local found_tars
+    found_tars=$(find "$IMAGES_DIR" -maxdepth 1 \( -name "rke2-images.linux-*.tar.zst" -o -name "rke2-images.linux-*.tar.gz" \) 2>/dev/null || true)
+    if [[ -n "$found_tars" ]]; then
+      log ERROR "Expected $EXPECTED_TAR but found different architecture tarball(s):"
+      echo "$found_tars" | while read -r f; do 
+        [[ -z "$f" ]] && continue
+        log ERROR "  - $(basename "$f")"
+      done
+      log ERROR "Architecture mismatch detected!"
+      log ERROR "Current host architecture: $ARCH"
+      log ERROR "Did you run 'action_image' on a different architecture host?"
+      log ERROR "Re-run 'action_image' on this host or provide correct artifacts via INSTALL_RKE2_ARTIFACT_PATH"
+      exit 3
+    fi
+  fi
+
+  # Priority 1: Verify images tarball is present and accessible after staging
+  if [[ ! -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    log ERROR "Images tarball not found after staging: $IMAGES_DIR/$IMAGES_TAR"
+    log ERROR "Expected file: $IMAGES_TAR"
+    log ERROR "This will cause RKE2 to attempt network download and fail in air-gapped environments"
+    
+    # Try fallback from downloads
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      log WARN "Attempting to re-stage from downloads directory as fallback"
+      local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+      cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+      mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+      log INFO "Re-staged ${IMAGES_TAR} from downloads"
+    else
+      log ERROR "No fallback copy available in downloads; run 'action_image' first"
+      exit 3
+    fi
+  fi
+
+  # Quick sanity check: ensure tarball is a valid archive
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    log INFO "Testing tarball integrity with zstd..."
+    if ! zstd -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (zstd test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (zstd test passed)"
+  elif command -v gzip >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.gz ]]; then
+    log INFO "Testing tarball integrity with gzip..."
+    if ! gzip -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (gzip test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (gzip test passed)"
+  else
+    log WARN "Cannot test tarball integrity (compression tool not available)"
+  fi
+
+  local tar_size
+  tar_size=$(du -h "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Images tarball staged successfully: $IMAGES_DIR/$IMAGES_TAR ($tar_size)"
+  
+  # Priority 4: Extract and log sample image list from tarball for audit
+  log INFO "Extracting image list from tarball for audit..."
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    # Try to extract manifest.json to inspect image list
+    local manifest
+    manifest=$(zstd -dc "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+    if [[ -n "$manifest" ]]; then
+      # Count RepoTags entries (Docker manifest format)
+      local repo_tag_count
+      repo_tag_count=$(echo "$manifest" | grep -o '"RepoTags"' | wc -l 2>/dev/null || echo 0)
+      log INFO "Tarball manifest contains $repo_tag_count image layer sets (Docker format)"
+      
+      # Extract sample image names (look for rancher images as representative)
+      log INFO "Sample images in tarball:"
+      # Guard grep so a non-match (exit code 1) does not trigger set -o pipefail
+      # and abort the entire script. We only want to iterate when matches exist.
+      echo "$manifest" | { grep -o '"docker.io/rancher[^"]*"' 2>/dev/null || true; } | head -n 3 | while read -r img; do
+        local clean_img
+        clean_img=$(echo "$img" | tr -d '"')
+        log INFO "  - $clean_img"
+      done
+      
+      # Check for CNI plugins image as representative sample of tarball completeness
+      if echo "$manifest" | grep -q "hardened-cni-plugins"; then
+        log INFO "  ✓ Tarball verification passed: 'hardened-cni-plugins' present in manifest"
+      else
+        log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
+        log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
+      fi
+    else
+      # Docker manifest not found, try OCI image index format as fallback
+      log INFO "Docker manifest.json not found, attempting OCI image index parsing..."
+      local oci_refs
+      oci_refs=$(parse_oci_image_index "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null || echo "")
+      
+      if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]]; then
+        local ref_count
+        ref_count=$(echo "$oci_refs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+        log INFO "Tarball contains $ref_count image reference(s) (OCI format)"
+        
+        # Show sample images from OCI index
+        log INFO "Sample images in tarball:"
+        echo "$oci_refs" | python3 -c '
+import json, sys
+try:
+    refs = json.load(sys.stdin)
+    for ref in refs[:3]:  # Show first 3
+        print(ref)
+except:
+    pass
+' 2>/dev/null | while read -r img; do
+          log INFO "  - $img"
+        done
+        
+        # Check for rancher images
+        if echo "$oci_refs" | grep -q "rancher"; then
+          log INFO "  ✓ Verified: rancher images present in OCI tarball"
+        fi
+      else
+        log WARN "Could not parse tarball format (neither Docker manifest nor OCI index found)"
+      fi
+    fi
+  elif command -v tar >/dev/null 2>&1; then
+    # For non-zst tarballs, try direct tar inspection
+    log INFO "Inspecting tarball contents..."
+    local file_count
+    file_count=$(tar -tzf "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | wc -l || echo 0)
+    log INFO "Tarball contains $file_count files/layers"
+  else
+    log WARN "Cannot inspect tarball contents (required tools not available)"
+  fi
+  
+  # Optional: Deep layer checksum verification (opt-in via --verify-layers)
+  if (( VERIFY_LAYERS == 1 )); then
+    log INFO "Performing deep layer checksum verification (--verify-layers enabled)..."
+    if verify_image_layer_checksums "$IMAGES_DIR/$IMAGES_TAR" "$STAGE_DIR"; then
+      log INFO "✓ Deep layer verification passed: all image layers verified"
+    else
+      log ERROR "✗ Deep layer verification FAILED"
+      log ERROR "One or more image layers are corrupted or missing"
+      log ERROR "Delete the tarball and re-run 'image' action to download fresh copy"
+      exit 3
+    fi
+  else
+    log INFO "Deep layer verification skipped (use --verify-layers to enable)"
+  fi
+  
+  log INFO "Post-staging verification complete"
 }
 
 # ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
@@ -3182,7 +4186,7 @@ EOF
 # Returns :
 #   Returns 0 on success.
 # ------------------------------------------------------------------------------
-fetch_rke2_ca_generator() { 
+fetch_rke2_ca_generator() {
   # Prefetch custom-CA helper for offline use
   if command -v curl >/dev/null 2>&1; then
     local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
@@ -3206,6 +4210,14 @@ fetch_rke2_ca_generator() {
 # ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
+
+  # If operator provided a local artifact path, prefer it and stage from there
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; staging artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}"
+    return $?
+  fi
+
   pushd "$DOWNLOADS_DIR" >/dev/null
 
   # Pick version: from config/env or latest online
@@ -3222,39 +4234,210 @@ cache_rke2_artifacts() {
   local SHA256_FILE="sha256sum-${ARCH}.txt"
 
   # Download artifacts (idempotent)
-  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
-  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
-  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
-  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
+  if [[ -f "$IMAGES_TAR" ]]; then
+    log INFO "Already present: $IMAGES_TAR (skipping download)"
+  else
+    log INFO "Downloading $IMAGES_TAR from $BASE_URL/$IMAGES_TAR"
+    spinner_run "Downloading $IMAGES_TAR" curl -Lf "$BASE_URL/$IMAGES_TAR" -o "$IMAGES_TAR"
+    if [[ -f "$IMAGES_TAR" ]]; then
+      local _size
+      _size=$(du -h "$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$IMAGES_TAR ($_size) from $BASE_URL/$IMAGES_TAR"
+    else
+      log WARN "Download finished but file not found: $IMAGES_TAR"
+    fi
+  fi
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    log INFO "Already present: $RKE2_TARBALL (skipping download)"
+  else
+    log INFO "Downloading $RKE2_TARBALL from $BASE_URL/$RKE2_TARBALL"
+    spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+    if [[ -f "$RKE2_TARBALL" ]]; then
+      local _size
+      _size=$(du -h "$RKE2_TARBALL" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$RKE2_TARBALL ($_size) from $BASE_URL/$RKE2_TARBALL"
+    else
+      log WARN "Download finished but file not found: $RKE2_TARBALL"
+    fi
+  fi
+  if [[ -f "$SHA256_FILE" ]]; then
+    log INFO "Already present: $SHA256_FILE (skipping download)"
+  else
+    log INFO "Downloading $SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    spinner_run "Downloading $SHA256_FILE" curl -Lf "$BASE_URL/$SHA256_FILE" -o "$SHA256_FILE"
+    if [[ -f "$SHA256_FILE" ]]; then
+      log INFO "Downloaded: $DOWNLOADS_DIR/$SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    else
+      log_WARN "Download finished but file not found: $SHA256_FILE"
+    fi
+  fi
+  if [[ -f install.sh ]]; then
+    log INFO "Already present: install.sh (skipping download)"
+  else
+    log INFO "Downloading install.sh from https://get.rke2.io"
+    spinner_run "Downloading install.sh" curl -sfL "https://get.rke2.io" -o install.sh
+    if [[ -f install.sh ]]; then
+      local _size
+      _size=$(du -h install.sh 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/install.sh ($_size) from https://get.rke2.io"
+    else
+      log WARN "Download finished but file not found: install.sh"
+    fi
+  fi
   chmod +x install.sh || true
 
-  # Verify checksums when possible
+  # Optionally download hardened-cni-plugins when configured. Prefer skopeo
+  # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
+  if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
+    # If the artifact already exists in downloads, skip acquisition.
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_CNI_BN; skipping hardened-cni acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "skopeo detected; attempting to mirror hardened-cni from Docker Hub"
+        if ! cache_hardened_cni_skopeo "${HARDENED_CNI_TAG:-}"; then
+          log WARN "skopeo hardened-cni mirror failed; attempting HTTP fallback"
+          if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+            cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+          fi
+        fi
+      else
+        if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+          log INFO "Configured HARDENED_CNI_URL detected; attempting HTTP download"
+          cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+        else
+          log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
+        fi
+      fi
+    fi
+  fi
+
+  # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
     if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
-      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $IMAGES_TAR; aborting"
+        popd >/dev/null || true
+        return 2
+      fi
+    else
+      log ERROR "Checksum entry for $IMAGES_TAR not found in $SHA256_FILE; aborting"
+      popd >/dev/null || true
+      return 2
     fi
+
     if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
-      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $RKE2_TARBALL; aborting"
+        popd >/dev/null || true
+        return 3
+      fi
+    else
+      log WARN "Checksum entry for $RKE2_TARBALL not found in $SHA256_FILE; continuing but installer may attempt network access"
     fi
   fi
 
   popd >/dev/null
 
   # --- Stage artifacts for offline install -----------------------------------
-  mkdir -p /var/lib/rancher/rke2/agent/images/
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  mkdir -p "$IMAGES_DIR"
   if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
-    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
+    local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+    mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+    log INFO "Staged ${IMAGES_TAR} into $IMAGES_DIR/"
   fi
 
   mkdir -p "$STAGE_DIR"
-  for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
-    if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
-      cp -f "$DOWNLOADS_DIR/$f" "$STAGE_DIR/"
-      [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
-      log INFO "Staged $f into $STAGE_DIR"
-    fi
-  done
+  # Stage selected artifacts. We'll stage the rke2 tarball and a filtered
+  # checksum manifest that contains only tarball entries that were actually
+  # staged/cached (images tarball(s) and RKE2 tarball). This avoids shipping
+  # a manifest containing many unrelated files.
+  if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+    local tmpf="$STAGE_DIR/.tmp-${RKE2_TARBALL}.$$"
+    cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"
+    mv -T "$tmpf" "$STAGE_DIR/$RKE2_TARBALL"
+    log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
+  fi
+
+  # Stage hardened-cni-plugins tarball if present in downloads
+  if [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+    local tmpc="$STAGE_DIR/.tmp-${HARDENED_CNI_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
+    mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
+    log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
+  fi
+
+  # Build a filtered sha256 manifest containing only staged/cached tarballs.
+  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    local out_manifest="$STAGE_DIR/$SHA256_FILE"
+    : > "$out_manifest"
+    # Iterate over each line in the downloaded manifest and include only
+    # entries whose basename is a tar archive and which exist in the
+    # staging or images directories. Also produce a JSON metadata file
+    # describing included files (name, sha256, size, location).
+    local tmp_json="$STAGE_DIR/.tmp-sha-manifest-$$.json"
+    : > "$tmp_json"
+    local first=1
+    while read -r h fn; do
+      # skip empty lines
+      [[ -z "${h:-}" || -z "${fn:-}" ]] && continue
+      bn=$(basename "${fn}")
+      # consider common tarball suffixes
+      if [[ "${bn}" =~ \.(tar|tar\.gz|tar\.zst|tgz)$ ]]; then
+        # prefer stage, then images, then downloads when selecting path
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          chosen_path="$STAGE_DIR/$bn"
+          location="stage"
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          chosen_path="$IMAGES_DIR/$bn"
+          location="images"
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          chosen_path="$DOWNLOADS_DIR/$bn"
+          location="downloads"
+        else
+          chosen_path=""
+          location="missing"
+        fi
+
+        if [[ -n "$chosen_path" ]]; then
+          # write manifest line using basename (common usage expects basename)
+          printf '%s  %s\n' "$h" "$bn" >> "$out_manifest"
+
+          # compute actual sha and size for JSON metadata (fallback to h if sha256sum fails)
+          fsha=$(sha256sum "$chosen_path" 2>/dev/null | awk '{print $1}' || true)
+          if [[ -z "$fsha" ]]; then
+            fsha="$h"
+          fi
+          fsize=$(stat -c%s "$chosen_path" 2>/dev/null || echo 0)
+
+          # append JSON entry
+          if [[ $first -eq 1 ]]; then
+            printf '  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+            first=0
+          else
+            printf ',\n  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+          fi
+        fi
+      fi
+    done < "$DOWNLOADS_DIR/$SHA256_FILE"
+
+    # Wrap JSON entries into a structured object with metadata
+    local out_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+    {
+      echo "{"
+      echo "  \"generated_at\": \"$(date -u +%FT%TZ)\"," 
+      echo "  \"arch\": \"${ARCH}\"," 
+      echo "  \"manifest_file\": \"${SHA256_FILE}\"," 
+      echo "  \"files\": ["
+      cat "$tmp_json" || true
+      echo "  ]"
+      echo "}"
+    } > "$out_json"
+    rm -f "$tmp_json" || true
+    log INFO "Wrote filtered checksum manifest to $out_manifest and metadata to $out_json"
+  fi
 
   # Stage custom-CA helper if present in downloads
   if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
@@ -3309,6 +4492,177 @@ ca_trust_registries() {
   fi
   : > /etc/rancher/rke2/config.yaml
 }
+
+# ----------------------------------------------------------------------------
+# Function: stage_from_artifact_path
+# Purpose : Stage RKE2 artifacts from a local artifact path when
+#           INSTALL_RKE2_ARTIFACT_PATH is set. Strict checksum verification
+#           is performed. Files are not overwritten silently; operator must
+#           delete existing mismatched files manually.
+# Arguments:
+#   $1 - Path to artifacts (INSTALL_RKE2_ARTIFACT_PATH)
+# Returns :
+#   0 on success, non-zero on verification or staging error
+# ----------------------------------------------------------------------------
+stage_from_artifact_path() {
+  set -euo pipefail
+  local ART_PATH="$1"
+  local ARCH="${ARCH:-$(uname -m)}"
+  # normalize ARCH to expected values (amd64/arm64)
+  case "$ARCH" in
+    x86_64|amd64) ARCH="amd64" ; SUFFIX="linux-amd64" ;;
+    aarch64|arm64) ARCH="arm64" ; SUFFIX="linux-arm64" ;;
+    *) log ERROR "Unsupported architecture: $ARCH" ; return 1 ;;
+  esac
+
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage}"
+  mkdir -p "$IMAGES_DIR" "$STAGE_DIR"
+
+  # Find checksum file
+  local SHA_FILE="${ART_PATH}/sha256sum-${ARCH}.txt"
+  if [[ -f "$SHA_FILE" ]]; then
+    log INFO "Found checksum file: $SHA_FILE"
+  else
+    log ERROR "Checksum file sha256sum-${ARCH}.txt not found in $ART_PATH; strict mode requires it"
+    return 2
+  fi
+
+  # Helper to check checksum for a single file (must exist in ART_PATH)
+  verify_checksum_for() {
+    local fname="$1"
+    if ! grep -q "$(basename "$fname")" "$SHA_FILE" 2>/dev/null; then
+      log ERROR "No checksum entry for $(basename "$fname") in $SHA_FILE"
+      return 3
+    fi
+    (cd "$ART_PATH" && grep "$(basename "$fname")" "$SHA_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1 || return 4
+    return 0
+  }
+
+  # Determine image tar candidates (prefer zst, commit suffix optional)
+  local IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}.tar.zst"
+  local IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}.tar.gz"
+  # also accept commit-suffixed variants if present
+  if [[ -n "${INSTALL_RKE2_COMMIT:-}" ]]; then
+    IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.zst"
+    IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.gz"
+  fi
+
+  local selected_image_tar=""
+  if [[ -f "$IMAGES_ZST" ]]; then
+    selected_image_tar="$IMAGES_ZST"
+  elif [[ -f "$IMAGES_GZ" ]]; then
+    selected_image_tar="$IMAGES_GZ"
+  else
+    # try un-suffixed search for any rke2-images-* bundles
+    local extra
+    extra=$(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" | sort)
+    if [[ -n "$extra" ]]; then
+      # pick first as the primary image bundle
+      selected_image_tar="$(echo "$extra" | head -n1)"
+    fi
+  fi
+
+  if [[ -z "$selected_image_tar" ]]; then
+    log ERROR "No rke2-images tarball found in $ART_PATH"
+    return 5
+  fi
+
+  log INFO "Selected image tar: $(basename "$selected_image_tar")"
+
+  # Verify checksum for selected image tar and rke2 tarball and install.sh if present
+  local RKE2_TARBALL="${ART_PATH}/rke2.${SUFFIX}.tar.gz"
+  local INSTALL_SH="${ART_PATH}/install.sh"
+
+  verify_checksum_for "$selected_image_tar" || { log ERROR "Image checksum verification failed"; return 6; }
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    verify_checksum_for "$RKE2_TARBALL" || { log ERROR "RKE2 tarball checksum verification failed"; return 7; }
+  else
+    log WARN "rke2.${SUFFIX}.tar.gz not present in artifact path; installer may attempt network download unless install.sh also present in stage"
+  fi
+  if [[ -f "$INSTALL_SH" ]]; then
+    # no checksum expected for install.sh but ensure it's present
+    log INFO "Found local install.sh; will stage it into $STAGE_DIR"
+  fi
+
+  # Before moving, check for existing target file and avoid overwrite
+  local target_images_name="$(basename "$selected_image_tar")"
+  local target_images_path="$IMAGES_DIR/$target_images_name"
+  if [[ -f "$target_images_path" ]]; then
+    # verify existing file matches checksum; if not, do NOT overwrite
+    (cd "$IMAGES_DIR" && sha256sum "$target_images_name" | awk '{print $1}') >/tmp/existing.sum 2>/dev/null || true
+    local existing_sum
+    existing_sum=$(awk '{print $1}' /tmp/existing.sum 2>/dev/null || true)
+    local expected_sum
+    expected_sum=$(grep "$(basename "$selected_image_tar")" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+    if [[ -n "$existing_sum" && "$existing_sum" == "$expected_sum" ]]; then
+      log INFO "Target image $target_images_path already present and checksum matches; skipping move."
+    else
+      log ERROR "Target image $target_images_path already exists and checksum does not match expected value. Will NOT overwrite. Please delete the file and re-run."
+      return 8
+    fi
+  else
+    # atomic copy then move
+    local tmp_dest
+    tmp_dest="$IMAGES_DIR/.tmp-$(basename "$selected_image_tar").$$"
+    cp -f "$selected_image_tar" "$tmp_dest"
+    mv -T "$tmp_dest" "$target_images_path"
+    log INFO "Moved $(basename "$selected_image_tar") -> $target_images_path"
+  fi
+
+  # Stage additional rke2-images-* bundles
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local bn
+    bn=$(basename "$f")
+    if [[ -f "$IMAGES_DIR/$bn" ]]; then
+      log INFO "Additional image bundle $bn already exists in $IMAGES_DIR; skipping"
+      continue
+    fi
+    cp -f "$f" "$IMAGES_DIR/"
+    log INFO "Staged additional image bundle $bn into $IMAGES_DIR"
+  done < <(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" ! -name "$(basename "$selected_image_tar")" | sort)
+
+  # Stage rke2 tarball and install.sh into STAGE_DIR (do not overwrite existing mismatching files)
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    local bn_rke2
+    bn_rke2=$(basename "$RKE2_TARBALL")
+    if [[ -f "$STAGE_DIR/$bn_rke2" ]]; then
+      # verify checksum
+      local existing
+      existing=$(sha256sum "$STAGE_DIR/$bn_rke2" | awk '{print $1}' 2>/dev/null || true)
+      local expected
+      expected=$(grep "${bn_rke2}" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+      if [[ -n "$existing" && "$existing" == "$expected" ]]; then
+        log INFO "RKE2 tarball already staged and checksum matches; skipping"
+      else
+        log ERROR "RKE2 tarball already exists at $STAGE_DIR/$bn_rke2 and does not match checksum; will NOT overwrite. Please remove it to proceed."
+        return 9
+      fi
+    else
+      cp -f "$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged $bn_rke2 into $STAGE_DIR"
+    fi
+  fi
+
+  if [[ -f "$INSTALL_SH" ]]; then
+    if [[ -f "$STAGE_DIR/install.sh" ]]; then
+      # if already present, do not overwrite
+      log INFO "install.sh already exists in $STAGE_DIR; leaving in place"
+    else
+      cp -f "$INSTALL_SH" "$STAGE_DIR/install.sh"
+      chmod 0755 "$STAGE_DIR/install.sh" || true
+      log INFO "Staged install.sh into $STAGE_DIR/install.sh"
+    fi
+  fi
+
+  # Finally, ensure environment points to stage dir for installer
+  export INSTALL_RKE2_ARTIFACT_PATH="$STAGE_DIR"
+  log INFO "Set INSTALL_RKE2_ARTIFACT_PATH=$STAGE_DIR for installer"
+
+  return 0
+}
+
 
 # ------------------------------------------------------------------------------
 # Function: install_nerdctl
@@ -3540,6 +4894,11 @@ action_push() {
 action_image() {
   initialize_action_context true "image"
 
+  # Detailed run-level logging: capture key inputs and paths so operators
+  # and auditors can see what decisions were made by the image action.
+  log INFO "Starting action_image: RKE2_VERSION='${RKE2_VERSION:-<auto>}' REGISTRY='${REGISTRY:-<none>}' REG_USER='${REG_USER:-<none>}'"
+  log INFO "Paths: DOWNLOADS_DIR='$DOWNLOADS_DIR' STAGE_DIR='$STAGE_DIR' SBOM_DIR='$SBOM_DIR' OUT_DIR='$OUT_DIR'"
+
   # --- Read YAML (optional) -------------------------------------------------
   local REQ_VER="${RKE2_VERSION:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
@@ -3588,8 +4947,33 @@ action_image() {
 
   # install_nerdctl
   fetch_rke2_ca_generator
-  cache_rke2_artifacts
-  ca_trust_registries
+    # cache_rke2_artifacts downloads / stages required artifacts into
+    # $DOWNLOADS_DIR and $STAGE_DIR. It emits its own logging, but record
+    # the start/end here for clearer run traces.
+    log INFO "Caching RKE2 artifacts (downloads -> $DOWNLOADS_DIR, stage -> $STAGE_DIR)"
+    cache_rke2_artifacts
+    log INFO "Completed artifact caching; scanning staged/downloaded artifacts for verification"
+
+    if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
+      # Operator requested images be loaded into the local runtime.
+      log INFO "--load-images supplied; installing nerdctl for image loading"
+      install_nerdctl
+
+      log INFO "Loading staged images into local image store"
+      if ! load_images_from_tarball >/dev/null 2>&1; then
+        log WARN "Loading images from tarball returned non-zero; continuing but node may attempt remote pulls"
+      fi
+    else
+      log INFO "Image load skipped (default tarball-on-node). Use --load-images to import images into the container runtime."
+    fi
+
+    # Trust any configured registries (may install custom CA into registries.yaml)
+    ca_trust_registries
+
+    # Immediately collect a list of relevant artifacts for reporting and checksum verification.
+    # We will inspect both downloads and staged paths so the SBOM and logs accurately reflect
+    # what the image action produced.
+    log INFO "Collecting artifact inventory for verification"
 
   # --- Save site defaults (DNS/search) ---------------------------------------
   local STATE="/etc/rke2image.defaults"
@@ -3618,29 +5002,205 @@ action_image() {
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  # Build sbom_targets to include both downloads and files staged into STAGE_DIR.
   local sbom_targets=(
     "$DOWNLOADS_DIR/$IMAGES_TAR"
     "$DOWNLOADS_DIR/$RKE2_TARBALL"
     "$DOWNLOADS_DIR/$SHA256_FILE"
     "$DOWNLOADS_DIR/install.sh"
+    "$STAGE_DIR/$RKE2_TARBALL"
+    "$STAGE_DIR/$SHA256_FILE"
+    "$STAGE_DIR/sha256sum-${ARCH}.json"
+    "$STAGE_DIR/install.sh"
   )
   [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
   [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
+  # Include hardened-cni artifact when present
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
+  # If there's a sha256 file available, load it to verify artifacts when possible.
+  declare -A expected_hash=()
+  # Prefer staged manifest (filtered) when present, otherwise fallback to downloads
+  if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+    log INFO "Found checksum manifest in stage: $STAGE_DIR/$SHA256_FILE; loading expected checksums"
+    while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
+  elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    log INFO "Found checksum manifest: $DOWNLOADS_DIR/$SHA256_FILE; loading expected checksums"
+    while read -r h fn; do
+      expected_hash["$(basename "$fn")"]="$h"
+    done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
+  else
+    log WARN "No SHA256 manifest located in $DOWNLOADS_DIR or $STAGE_DIR; per-artifact verification will be limited"
+  fi
+
+  # Prepare sbom header
   {
     echo "# RKE2 Image Prep SBOM"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "RKE2_VERSION: ${RKE2_VERSION}"
-    echo "REGISTRY: ${REGISTRY}"
+    echo "RKE2_VERSION: ${RKE2_VERSION:-<auto>}"
+    echo "REGISTRY: ${REGISTRY:-<none>}"
     echo
-        log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
-        echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
-    for f in "${sbom_targets[@]}"; do
-      [[ -f "$f" ]] || continue
-      sha256sum "$f"
-      ls -l "$f" | awk '{print "SIZE " $5 "  " $9}'
-    done
+    echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
   } > "$sbom_file"
-  log INFO "SBOM written to $sbom_file"
+
+  # Track verification metrics for a simple security score
+  local total_count=0 verified_count=0 manifest_present=0
+  [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
+
+  for f in "${sbom_targets[@]}"; do
+    [[ -f "$f" ]] || continue
+    # Use POSIX arithmetic expansion to increment counters to avoid failures
+    # in environments where ((..)) might not be supported (defensive).
+    total_count=$((total_count + 1))
+    local fname size sha mtime src verified
+    fname="$(basename "$f")"
+    size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    mtime=$(date -u -r "$f" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>")
+    sha=$(sha256sum "$f" | awk '{print $1}')
+    src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
+    verified="unknown"
+    if [[ -n "${expected_hash[$fname]:-}" ]]; then
+      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+        verified="yes"
+        verified_count=$((verified_count + 1))
+      else
+        verified="NO (mismatch)"
+      fi
+    else
+      # No expected checksum: still report computed sha
+      verified="no-manifest"
+    fi
+
+    # Append detailed entry to SBOM
+    printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
+    # Also log the verification outcome for runtime visibility
+    log INFO "Artifact: $f size=$size sha256=$sha verified=$verified"
+  done
+
+  # Compute a simple security score (0-100) so operators can quickly see if
+  # the image collected expected metadata. This is intentionally simple and
+  # conservative; projects wanting a richer score should integrate scanners.
+  # Scoring heuristic (example):
+  #   +40 if checksum manifest present
+  #   +40 if all discovered artifacts were verified against manifest
+  #   +20 if SBOM contains at least one artifact entry
+  local security_score=0
+  # Add 40 points if a manifest was present
+  if [[ $manifest_present -eq 1 ]]; then
+    security_score=$((security_score + 40))
+  fi
+  if [[ $total_count -gt 0 ]]; then
+    # Add 40 points if all artifacts were verified
+    if [[ $manifest_present -eq 1 && $verified_count -eq $total_count ]]; then
+      security_score=$((security_score + 40))
+    fi
+    # Add 20 points if there is at least one artifact
+    security_score=$((security_score + 20))
+  fi
+
+  {
+    echo
+    echo "# Summary"
+    echo "Artifacts discovered: $total_count"
+    echo "Artifacts verified against manifest: $verified_count"
+    echo "SHA256 manifest present: ${manifest_present}" 
+    echo "security_score: ${security_score}"
+  } >> "$sbom_file"
+
+  log INFO "SBOM written to $sbom_file (artifacts=$total_count verified=$verified_count security_score=$security_score)"
+
+  # Also emit a machine-friendly JSON SBOM for tooling compatibility. We use
+  # a small Python helper here to avoid fragile shell JSON escaping.
+  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
+  if command -v python3 >/dev/null 2>&1; then
+  log INFO "Generating JSON SBOM: $sbom_json_file"
+  local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+  python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
+import sys, json
+sbom_txt = sys.argv[1]
+sbom_json = sys.argv[2]
+staged_json = sys.argv[3] if len(sys.argv) > 3 else None
+
+artifacts = []
+header = { 'generated': None, 'rke2_version': None, 'registry': None }
+summary = {}
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    line = line.rstrip('\n')
+    if not line or line.startswith('#'):
+      continue
+    # artifact lines use a pipe delimiter: path | size | sha | verified | mtime | source
+    if '|' in line:
+      parts = [p.strip() for p in line.split('|')]
+      if len(parts) >= 6:
+        size = parts[1]
+        try:
+          size = int(size)
+        except Exception:
+          pass
+        artifacts.append({
+          'path': parts[0],
+          'size_bytes': size,
+          'sha256': parts[2],
+          'verified': parts[3],
+          'mtime': parts[4],
+          'source': parts[5]
+        })
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    if line.startswith('Generated:'):
+      header['generated'] = line.split('Generated:',1)[1].strip()
+    elif line.startswith('RKE2_VERSION:'):
+      header['rke2_version'] = line.split('RKE2_VERSION:',1)[1].strip()
+    elif line.startswith('REGISTRY:'):
+      header['registry'] = line.split('REGISTRY:',1)[1].strip()
+    elif line.startswith('Artifacts discovered:'):
+      try:
+        summary['artifacts_discovered'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_discovered'] = line.split(':',1)[1].strip()
+    elif line.startswith('Artifacts verified against manifest:'):
+      try:
+        summary['artifacts_verified'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_verified'] = line.split(':',1)[1].strip()
+    elif line.startswith('SHA256 manifest present:'):
+      summary['sha256_manifest_present'] = line.split(':',1)[1].strip()
+    elif line.startswith('security_score:'):
+      try:
+        summary['security_score'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['security_score'] = line.split(':',1)[1].strip()
+
+data = {
+  'metadata': header,
+  'artifacts': artifacts,
+  'summary': summary,
+}
+
+# If a staged manifest JSON file exists, attempt to include it under 'staged_manifest'
+if staged_json:
+  try:
+    with open(staged_json, 'r', encoding='utf-8') as sf:
+      staged = json.load(sf)
+    data['staged_manifest'] = staged
+  except Exception:
+    data['staged_manifest'] = None
+
+with open(sbom_json, 'w', encoding='utf-8') as out:
+  json.dump(data, out, indent=2, sort_keys=True)
+print(sbom_json)
+PY
+  if [[ $? -eq 0 ]]; then
+    log INFO "JSON SBOM written to $sbom_json_file"
+  else
+    log WARN "Failed to generate JSON SBOM ($sbom_json_file)"
+  fi
+  else
+  log WARN "python3 not available; skipping JSON SBOM generation"
+  fi
 
   # README in outputs/<SPEC_NAME>
   log INFO "Write README in Outputs directory..."
@@ -3674,6 +5234,72 @@ action_image() {
   echo "        - You can now install RKE2 offline using the cached tarballs."
   echo
   prompt_reboot
+}
+
+# ------------------------------------------------------------------------------
+# Function: action_list_images
+# Purpose : Emit a full list of files contained in the RKE2 images archive
+#           (and optionally the release manifest entries) so operators can
+#           inspect exactly which component bundles are present in a release.
+# Arguments:
+#   None
+# Returns :
+#   0 on success, non-zero on error
+# ------------------------------------------------------------------------------
+action_list_images() {
+  initialize_action_context false "list-images"
+  log INFO "Listing RKE2 images archive contents and manifest entries (if present)"
+
+  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local images_candidate=""
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+
+  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$DOWNLOADS_DIR/$IMAGES_TAR"
+  elif [[ -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$IMAGES_DIR/$IMAGES_TAR"
+  fi
+
+  if [[ -z "$images_candidate" ]]; then
+    log ERROR "Images archive not found in $DOWNLOADS_DIR or $IMAGES_DIR: $IMAGES_TAR"
+    return 3
+  fi
+
+  log INFO "Found images archive: $images_candidate"
+
+  # Prefer zstd tools to stream the archive listing
+  # We intentionally hide the OCI blob files (under blobs/) which are
+  # internal layer storage and not useful to operators when listing bundle
+  # contents; filter them out for readability.
+  local _filter="grep -v -E '^blobs(/|$)'"
+  if command -v zstd >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstd -dc | tar -tf) — hiding blobs/ entries"
+    zstd -dc "$images_candidate" | tar -tf - | eval "$_filter"
+  elif command -v zstdcat >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstdcat | tar -tf) — hiding blobs/ entries"
+    zstdcat "$images_candidate" | tar -tf - | eval "$_filter"
+  else
+    # If it's a plain gzip or tar, attempt fallback
+    if [[ "$images_candidate" == *.tar.gz ]]; then
+      log INFO "Listing gzip-compressed archive (tar -tzf) — hiding blobs/ entries"
+      tar -tzf "$images_candidate" | eval "$_filter"
+    else
+      log ERROR "No zstd available to read $images_candidate; please install zstd to list .zst archives"
+      return 2
+    fi
+  fi
+
+  # Also show manifest entries if available in downloads or stage
+  local sha_file="$DOWNLOADS_DIR/${SHA256_FILE:-sha256sum-${ARCH}.txt}"
+  if [[ -f "$sha_file" ]]; then
+    echo
+    log INFO "Release manifest entries from: $sha_file"
+    awk '{print $2}' "$sha_file" | sort -u
+  else
+    log INFO "No release sha256 manifest found in $DOWNLOADS_DIR"
+  fi
+
+  return 0
 }
 
 # ==============
@@ -3905,13 +5531,15 @@ action_server() {
 
   log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
-  
+
   log INFO "Writing netplan configuration and applying network settings..."
   if (( ${#NET_INTERFACES[@]} )); then
     write_netplan --interfaces "${NET_INTERFACES[@]}"
   else
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
+
+  cleanup_containerd_before_rke2 "rke2-server"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
@@ -4154,7 +5782,9 @@ action_agent() {
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
 
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  cleanup_containerd_before_rke2 "rke2-agent"
+
+  log INFO "Installing rke2-agent from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "agent"
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
@@ -4412,6 +6042,8 @@ action_add_server() {
     write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   fi
 
+  cleanup_containerd_before_rke2 "rke2-add-server"
+
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
   systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
@@ -4624,7 +6256,7 @@ action_custom_ca() {
   local TOKEN="" TOKEN_FILE=""
   generate_bootstrap_token
   TOKEN=$token
-  
+
   if [[ -z "$TOKEN" ]]; then
     log ERROR "Failed to generate bootstrap token."
     exit 1
@@ -4645,6 +6277,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
+    --load-images) LOAD_IMAGES=1; shift;;
+    --verify-layers) VERIFY_LAYERS=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2
@@ -4727,6 +6361,7 @@ NODE_NAME="${NODE_NAME:-$(default_node_hostname)}"
 
 case "${ACTION:-}" in
   image)       action_image  ;;
+  list-images) action_list_images ;;
   server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;

@@ -5,9 +5,9 @@ This directory contains example YAML configuration files for all `rke2nodeinit.s
 ## Quick Start
 
 1. Copy an example file:
-   ```bash
-   cp configs/examples/server-example.yaml my-config.yaml
-   ```
+  ```bash
+  cp examples/config/server-example.yaml my-config.yaml
+  ```
 
 2. Edit the configuration with your values:
    ```bash
@@ -145,20 +145,22 @@ spec:
 
 ```yaml
 spec:
+  # Prefer camelCase keys in examples (e.g., `nodeIp`). The script also
+  # accepts kebab-case aliases (e.g., `node-ip`) for backward compatibility.
   rke2:
     version: v1.34.1+rke2r1         # RKE2 version
-    
+
     # Network settings
     nodeIp: 192.168.1.10            # Node IP for cluster communication
     bindAddress: 192.168.1.10       # API server bind address
     advertiseAddress: 192.168.1.10  # API server advertise address
-    
+
     # Cluster networking
     clusterCidr: 10.42.0.0/16       # Pod network CIDR
     serviceCidr: 10.43.0.0/16       # Service network CIDR
     clusterDns: 10.43.0.10          # Cluster DNS IP
     clusterDomain: cluster.local    # Cluster domain
-    
+
     # TLS configuration
     tlsSans:                        # Additional TLS SANs
       - api.example.com
@@ -235,9 +237,9 @@ sudo ./bin/rke2nodeinit.sh -f config.yaml -P
 ### Workflow 1: Air-Gapped Cluster Setup
 
 1. **Prepare base image** (online system):
-   ```bash
-   sudo ./bin/rke2nodeinit.sh -f configs/examples/image-example.yaml
-   ```
+  ```bash
+  sudo ./bin/rke2nodeinit.sh -f examples/config/image-example.yaml
+  ```
 
 2. **Push to registry** (system with registry access):
    ```bash

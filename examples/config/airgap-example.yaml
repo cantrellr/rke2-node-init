@@ -6,14 +6,14 @@ metadata:
 
 spec:
   # RKE2 version to download and cache
-  rke2Version: v1.34.1+rke2r1
+  rke2-version: v1.34.1+rke2r1
   
   # DNS servers for artifact download and template defaults
   dns:
     - 8.8.8.8
     - 8.8.4.4
   
-  # Search domains
+  # Search domains (camelCase preferred)
   searchDomains:
     - example.com
     - cluster.local
@@ -27,7 +27,7 @@ metadata:
   description: Enterprise VM template with custom CA trust
 
 spec:
-  rke2Version: v1.34.1+rke2r1
+  rke2-version: v1.34.1+rke2r1
   
   # Custom CA certificate for registry trust
   caCertPath: /path/to/enterprise-ca.crt
@@ -49,4 +49,4 @@ metadata:
   name: minimal-airgap-template
 
 spec:
-  rke2Version: v1.34.1+rke2r1
+  rke2-version: v1.34.1+rke2r1

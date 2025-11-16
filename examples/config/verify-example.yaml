@@ -24,8 +24,8 @@ spec:
     username: rke2-reader
     password: CHANGE-ME
   
-  # Optional: Custom CA to verify
-  caCertPath: /path/to/ca.crt
+  # Optional: Custom CA to verify (camelCase preferred)
+  caCert: /path/to/ca.crt
   
   # Optional: Expected RKE2 version
   rke2:
@@ -62,7 +62,7 @@ spec:
     username: rke2-reader
     password: CHANGE-ME
   
-  caCertPath: /etc/ssl/certs/company-ca.crt
+  caCert: /etc/ssl/certs/company-ca.crt
 
 ---
 # Pre-deployment verification
@@ -95,8 +95,9 @@ spec:
   
   # Expected minimum requirements
   requirements:
-    diskSpaceGB: 50
-    memoryGB: 8
+    # requirement keys use camelCase in examples (e.g., diskSpaceGb)
+    diskSpaceGb: 50
+    memoryGb: 8
     cpuCores: 4
 
 ---

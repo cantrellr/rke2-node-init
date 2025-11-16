@@ -39,9 +39,9 @@ Examples (run from the repository root):
 # Generate an encrypted Root CA and store outputs under outputs/certs/root-<timestamp>/
 make certs-root-ca
 
-# Generate a Subordinate CA from an input YAML (see examples in certs/examples/).
+# Generate a Subordinate CA from an input YAML (see examples in examples/certs/).
 # INPUT may be a manifest that contains spec.subject.* fields; OUTDIR is optional.
-make certs-sub-ca INPUT=certs/examples/rke2clusterCA-example.yaml
+make certs-sub-ca INPUT=examples/certs/rke2clusterCA-example.yaml
 
 # Verify OpenSSL is available and a short reminder to protect keys
 make certs-verify
@@ -54,7 +54,7 @@ If you prefer to call the scripts directly you can (from repo root):
 ./certs/scripts/generate-root-ca.sh --out-dir outputs/certs/root-<ts> [--passphrase "mysecret"]
 
 # Subordinate CA: supports --input <yaml>, --cn, --org, --pathlen, and --root-passphrase
-./certs/scripts/generate-subordinate-ca.sh --input certs/examples/rke2clusterCA-example.yaml \
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/rke2clusterCA-example.yaml \
   --out-dir outputs/certs/subca-<ts> --pathlen 1 --root-passphrase "mysecret"
 ```
 

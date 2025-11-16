@@ -10,6 +10,9 @@ certs/*.crt
 !certs/examples/*.pem
 !certs/examples/*.crt
 !certs/examples/*.key
+!examples/certs/*.pem
+!examples/certs/*.crt
+!examples/certs/*.key
 /certs/*.pem
 /certs/*.key
 /certs/*.crt

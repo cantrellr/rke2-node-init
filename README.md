@@ -58,6 +58,7 @@
 ## Workflow Overview
 
 1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+  By default the downloaded images are left as a staged tarball on the node (`/var/lib/rancher/rke2/agent/images`); use the `--load-images` flag to import the staged tarball into the local container runtime (nerdctl/ctr) when you want images available without remote pulls.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
@@ -161,10 +162,10 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 
 ```bash
 # With a manifest
-sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f examples/config/image-example.yaml image
 
 # Control plane using manifest-provided interfaces (no additional NIC prompt)
-sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-ctrl01.yaml server
+sudo ./bin/rke2nodeinit.sh -f examples/config/server-example.yaml server
 
 # Worker join pulling networking from YAML and overriding the token file via CLI
 sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-work01.yaml agent --token-file /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
@@ -174,7 +175,7 @@ sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secr
 
 # Multiple interfaces provided via CLI
 sudo ./rke2nodeinit.sh server --hostname ctrl01 \
-  --interface name=eth0 ip=10.0.4.161 prefix=24 gateway=10.0.4.1 dns=10.0.1.34,10.231.1.34 \
+  --interface name=eth0 ip=10.0.69.161 prefix=24 gateway=10.0.69.1 dns=10.0.1.34,10.231.1.34 \
   --interface name=eth1 dhcp4=true
 
 # Print sanitized manifest for auditing
@@ -194,10 +195,20 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
 | `-h` | Display built-in help |
+| `--load-images` | Import staged RKE2 images from the tarball into the local container runtime (nerdctl/ctr). This is opt-in; the default behavior is to keep the tarball staged for template/image-based workflows. |
+
 
 ### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL and saves it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+`make token` generates a base64 token using OpenSSL and saves it under `outputs/tokens/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
+
+`make certs-auto` will generate a Root CA and subordinate CA and stage them under `outputs/certs/` and the system stage directory (`/opt/rke2/stage/certs`). By default `make certs-auto` will NOT create a bootstrap token or create a tokens folder. To enable token generation (for testing or non-production workflows), run:
+
+```bash
+make certs-auto GENERATE_TOKEN=true
+```
+
+When enabled, tokens are written under `outputs/tokens/` and a staged copy is placed at `/opt/rke2/stage/certs/bootstrap.token`.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
 
@@ -238,6 +249,33 @@ When `spec.interfaces` is supplied, the first entry is treated as the primary ad
 ## Offline Registry & CA Handling
 
 - Custom CA bundles can be referenced by relative or absolute paths. They are installed into `/usr/local/share/ca-certificates` when `installToOSTrust: true`.
+
+## Testing the offline artifact staging (INSTALL_RKE2_ARTIFACT_PATH)
+
+To test the new staging workflow locally before applying to an air-gapped environment, prepare a small artifact directory on a host that has access to the release assets:
+
+```bash
+mkdir -p /root/rke2-artifacts && cd /root/rke2-artifacts
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/rke2-images.linux-amd64.tar.zst'
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/rke2.linux-amd64.tar.gz'
+curl -OLs 'https://github.com/rancher/rke2/releases/download/v1.33.1%2Brke2r1/sha256sum-amd64.txt'
+curl -sfL https://get.rke2.io --output install.sh
+chmod +x install.sh
+```
+
+Then, on the offline target node (or on the same machine for a dry run), run the server/agent action with the env var set and the script will stage artifacts into `/opt/rke2/stage` and proceed:
+
+```bash
+INSTALL_RKE2_ARTIFACT_PATH=/root/rke2-artifacts sudo ./bin/rke2nodeinit.sh server
+# or for agent:
+INSTALL_RKE2_ARTIFACT_PATH=/root/rke2-artifacts sudo ./bin/rke2nodeinit.sh agent
+```
+
+Notes:
+- The script enforces strict checksum verification using `sha256sum-<arch>.txt`. If checksums are missing or invalid, staging will fail.
+- Existing staged files that do not match checksums will NOT be overwritten; remove them and re-run the command.
+- Staged artifacts are placed into `/opt/rke2/stage` and images into `/var/lib/rancher/rke2/agent/images`.
+
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.
@@ -260,9 +298,9 @@ When `spec.interfaces` is supplied, the first entry is treated as the primary ad
     hostname: ctrl01
     interfaces:
       - name: eth0
-        ip: 10.0.4.161
+        ip: 10.0.69.161
         prefix: 24
-        gateway: 10.0.4.1
+        gateway: 10.0.69.1
         dns: ["10.0.1.34", "10.231.1.34"]
         searchDomains: ["dev.kube", "dev.local"]
       - name: eth1
@@ -350,3 +388,20 @@ The script honors several environment variables that can be set prior to executi
 ---
 
 For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh -h`.
+
+## Artifact staging & verification (quick reference)
+
+When you bring your own artifact directory to an air-gapped host using `INSTALL_RKE2_ARTIFACT_PATH`, the script will strictly verify checksums and stage artifacts into `/opt/rke2/stage` and `/var/lib/rancher/rke2/agent/images`.
+
+Quick steps to verify staged artifacts:
+
+```bash
+# list staged images
+ls -lh /var/lib/rancher/rke2/agent/images/
+
+# verify staged checksum file (arch-specific)
+cd /opt/rke2/stage
+sha256sum -c sha256sum-$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/').txt
+```
+
+If checksum verification fails, delete the mismatched files from the staged locations and re-run `image` to re-stage clean artifacts.
