@@ -4,8 +4,8 @@ metadata:
   name: co1manager-ca
 spec:
   customCA:
-    rootCrt: /rke2-node-init/outputs/certs/root/root-ca.crt
-    rootKey: /rke2-node-init/outputs/certs/root/root-ca-key.pem
-    intermediateCrt: /rke2-node-init/outputs/certs/subordinate-ca.crt
-    intermediateKey: /rke2-node-init/outputs/certs/subordinate-ca-key.pem
+    rootCrt: /rke2-node-init/certs/root-ca.crt
+    rootKey: /rke2-node-init/certs/root-ca-key.pem
+    intermediateCrt: /rke2-node-init/certs/subordinate-ca.crt
+    intermediateKey: /rke2-node-init/certs/subordinate-ca-key.pem
     installToOSTrust: true
