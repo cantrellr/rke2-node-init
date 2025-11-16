@@ -6529,24 +6529,40 @@ action_server() {
   
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-    log INFO "========================================"
-    log INFO "DRY-RUN MODE: RKE2 Server Initialization"
-    log INFO "========================================"
-    log INFO "No changes will be made to the system"
-    log INFO ""
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Server Initialization"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
   fi
   
-  log INFO "Ensure YAML has metadata.name..."
+  log_info "========================================"
+  log_info "RKE2 First Server Initialization"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "server_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local -a NET_INTERFACES=()
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -6558,9 +6574,10 @@ action_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "config_loaded"
   fi
 
-  log INFO "Reading configuration from CLI args (if provided)..."
+  log_info "Reading configuration from CLI args (if provided)..."
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
 
@@ -6569,7 +6586,9 @@ action_server() {
     yaml_has_interfaces=1
   fi
 
-  log INFO "Merging configuration values..."
+  # Phase 2: Merge and validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
     HOSTNAME="${server_cli[hostname]}"
   fi
@@ -6602,13 +6621,13 @@ action_server() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${server_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  log_info "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -6617,7 +6636,7 @@ action_server() {
     SEARCH="$DEFAULT_SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -6626,39 +6645,63 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  metrics_increment "config_validated"
 
-  log INFO "Determining TLS SANs..."
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
+  log_info "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
       TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
       [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
       [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-	  log INFO "TLS SANs from config: $TLS_SANS"
+	  log_info "TLS SANs from config: $TLS_SANS"
     fi
     if [[ -z "$TLS_SANS" ]]; then
       TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+      log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "tls_sans_configured"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
-  ensure_staged_artifacts
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 server install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 5: System configuration
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then 
+      echo "$IP $HOSTNAME" >> /etc/hosts
+    fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "hostname_set"
 
-  log INFO "Seeding custom cluster CA..."
+  log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "custom_ca_configured"
 
+  # Phase 6: Interface configuration
+  report_progress "Configuring interfaces" 6 8
   local prompt_extra_ifaces=1
   if (( ${#NET_INTERFACES[@]} )); then
     if (( yaml_has_interfaces )); then
       prompt_extra_ifaces=0
-      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+      log_info "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
     elif [[ -n "${server_cli[interfaces]:-}" ]]; then
       prompt_extra_ifaces=0
-      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+      log_info "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
     fi
   fi
 
@@ -6672,7 +6715,7 @@ action_server() {
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
       if ! interface_decode_entry "$_encoded" _nic_dbg; then
-        log WARN "Skipping invalid interface entry in summary"
+        log_warn "Skipping invalid interface entry in summary"
         continue
       fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
@@ -6690,83 +6733,138 @@ action_server() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "interfaces_configured"
 
-  log INFO "Validating/expanding provided token (if any)..."
+  # Phase 7: Token and RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded provided token to full format (custom CA hash included)."
+        log_info "Expanded provided token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   else
     TOKEN="$(generate_bootstrap_token)"
     if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
-      log INFO "Using generated secure first-server token (custom CA fingerprint embedded)."
+      log_info "Using generated secure first-server token (custom CA fingerprint embedded)."
     else
-      log INFO "Using generated short first-server bootstrap token."
+      log_info "Using generated short first-server bootstrap token."
     fi
   fi
+  metrics_increment "token_generated"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-  	echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+  	  echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Token would be: ${TOKEN:0:20}..."
+  fi
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 server" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-server"
+
+    log_info "Installing rke2-server from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "server"; then
+      log_error "Failed to install RKE2 server"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-server service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  cleanup_containerd_before_rke2 "rke2-server"
-
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "server"
-  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # Display summary
+  log_success "========================================="
+  log_success "Server initialization completed"
+  log_success "========================================="
+  
+  metrics_summary "Server Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Search Domains: ${SEARCH:-<none>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, check cluster status: kubectl get nodes"
+  log_info "  3. Retrieve node token: cat /var/lib/rancher/rke2/server/node-token"
+  log_info "  4. Use token to join additional servers or agents"
 
   echo
-  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
-  echo "        First server token: /var/lib/rancher/rke2/server/node-token"
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+    echo "        First server token: /var/lib/rancher/rke2/server/node-token"
+  else
+    echo "[DRY-RUN] Server configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -6791,25 +6889,41 @@ action_agent() {
   
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-    log INFO "========================================"
-    log INFO "DRY-RUN MODE: RKE2 Agent Node Join"
-    log INFO "========================================"
-    log INFO "No changes will be made to the system"
-    log INFO ""
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Agent Node Join"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
   fi
   
-  log INFO "Ensure YAML has metadata.name..."
+  log_info "========================================"
+  log_info "RKE2 Agent Node Join"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "agent_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -6821,6 +6935,7 @@ action_agent() {
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "config_loaded"
   fi
 
   log INFO "Reading configuration from CLI args (if provided)..."
@@ -6864,23 +6979,25 @@ action_agent() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${agent_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
+  # Phase 2: Validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for agent: $DNS"; fi
+    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log_info "Using default DNS for agent: $DNS"; fi
   fi
   if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
-    log INFO "Using default search domains for agent: $SEARCH"
+    log_info "Using default search domains for agent: $SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -6889,13 +7006,29 @@ action_agent() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  metrics_increment "config_validated"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
-  ensure_staged_artifacts
+  # Phase 3: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 3 8
+  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 4: Configure system
+  report_progress "Configuring system" 4 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "hostname_set"
 
   local prompt_extra_ifaces_agent=1
   if (( ${#NET_INTERFACES[@]} )); then
@@ -6936,10 +7069,13 @@ action_agent() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "interfaces_configured"
 
-  log INFO "Gathering cluster join information..."
+  # Phase 6: Gather cluster join information
+  report_progress "Configuring cluster join" 6 8
+  log_info "Gathering cluster join information..."
   if [[ -z "$URL" ]]; then
     read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
   fi
@@ -6950,75 +7086,128 @@ action_agent() {
     read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
   fi
 
-  log INFO "Validating/expanding provided token (if any)..."
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded agent join token to full format (custom CA hash included)."
+        log_info "Expanded agent join token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   fi
+  metrics_increment "token_configured"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  # Phase 7: Write RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Setting server URL..." >&2
-    echo "server: \"$URL\""     # required
+      log_debug "Setting server URL..." >&2
+      echo "server: \"$URL\""     # required
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-  	echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+  	  echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Server URL: $URL"
+  fi
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 agent" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-agent"
+
+    log_info "Installing rke2-agent from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "agent"; then
+      log_error "Failed to install RKE2 agent"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 agent from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-agent service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  cleanup_containerd_before_rke2 "rke2-agent"
-
-  log INFO "Installing rke2-agent from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "agent"
-  systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
-
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # Display summary
+  log_success "========================================="
+  log_success "Agent node join completed"
+  log_success "========================================="
+  
+  metrics_summary "Agent Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Server URL: ${URL:-<not configured>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, verify node joined: kubectl get nodes"
+  log_info "  3. Check agent status: systemctl status rke2-agent"
 
   echo
-  echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  else
+    echo "[DRY-RUN] Agent configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -7042,25 +7231,41 @@ action_add_server() {
   
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-    log INFO "========================================"
-    log INFO "DRY-RUN MODE: RKE2 Add Server Node"
-    log INFO "========================================"
-    log INFO "No changes will be made to the system"
-    log INFO ""
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Add Server Node"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
   fi
   
-  log INFO "Ensure YAML has metadata.name..."
+  log_info "========================================"
+  log_info "RKE2 Additional Server Node Join"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "add_server_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -7073,6 +7278,7 @@ action_add_server() {
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "config_loaded"
   fi
 
   log INFO "Reading configuration from CLI args (if provided)..."
@@ -7120,13 +7326,15 @@ action_add_server() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${add_server_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  # Phase 2: Validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -7135,38 +7343,59 @@ action_add_server() {
     SEARCH="$DEFAULT_SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
+  metrics_increment "config_validated"
 
-  # Auto-derive tls-sans if none provided in YAML
-  log INFO "Determining TLS SANs..."
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
+  log_info "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
       TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
       [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
       [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-	  log INFO "TLS SANs from config: $TLS_SANS"
+	  log_info "TLS SANs from config: $TLS_SANS"
     fi
     if [[ -z "$TLS_SANS" ]]; then
       TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+      log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "tls_sans_configured"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
-  ensure_staged_artifacts
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 server install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 5: System configuration
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then 
+      echo "$IP $HOSTNAME" >> /etc/hosts
+    fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "hostname_set"
 
-  log INFO "Seeding custom cluster CA..."
+  log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "custom_ca_configured"
 
   local prompt_extra_ifaces_add_server=1
   if (( ${#NET_INTERFACES[@]} )); then
@@ -7207,10 +7436,13 @@ action_add_server() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "interfaces_configured"
 
-  log INFO "Gathering cluster join information..."
+  # Phase 6: Gather cluster join information
+  report_progress "Configuring cluster join" 6 8
+  log_info "Gathering cluster join information..."
   [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
   if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
     read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
@@ -7220,75 +7452,128 @@ action_add_server() {
   fi
   [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
-  log INFO "Validating/expanding provided token (if any)..."
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded server join token to full format (custom CA hash included)."
+        log_info "Expanded server join token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   fi
+  metrics_increment "token_configured"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  # Phase 7: Write RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Setting server URL..." >&2
-    echo "server: \"$URL\""     # required
+      log_debug "Setting server URL..." >&2
+      echo "server: \"$URL\""     # required
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-    echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+      echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Server URL: $URL"
+  fi
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 server" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-add-server"
+
+    log_info "Installing rke2-server from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "server"; then
+      log_error "Failed to install RKE2 server"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-server service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  cleanup_containerd_before_rke2 "rke2-add-server"
-
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "server"
-  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # Display summary
+  log_success "========================================="
+  log_success "Additional server join completed"
+  log_success "========================================="
+  
+  metrics_summary "Add Server Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Server URL: ${URL:-<not configured>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, verify server joined: kubectl get nodes"
+  log_info "  3. Check cluster status: kubectl get pods -A"
 
   echo
-  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-server installed. Reboot to join the control plane."
+  else
+    echo "[DRY-RUN] Add-server configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -7354,11 +7639,40 @@ action_verify() {
 # ------------------------------------------------------------------------------
 action_airgap() {
   initialize_action_context false "airgap"
+  
+  metrics_init "airgap_operation"
+  
+  log_info "========================================"
+  log_info "RKE2 Airgap Image Preparation"
+  log_info "========================================"
+  log_info "Preparing VM for template/cloning with poweroff"
+  log_info ""
+  
+  # Run full image preparation
   NO_REBOOT=1 action_image
-  sync
-  log WARN "Powering off now so you can template/clone the VM."
-  sleep 3
-  poweroff
+  
+  metrics_increment "image_prepared"
+  
+  # Sync filesystems
+  log_info "Syncing filesystems..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    sync
+    metrics_increment "filesystems_synced"
+  else
+    log_info "DRY-RUN: Would sync filesystems"
+  fi
+  
+  log_success "Airgap preparation complete"
+  metrics_summary "Airgap Operation Summary"
+  
+  log_warn "Powering off now so you can template/clone the VM."
+  
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    sleep 3
+    poweroff
+  else
+    log_info "DRY-RUN: Would power off system for VM templating"
+  fi
 }
 
 # ------------------------------------------------------------------------------

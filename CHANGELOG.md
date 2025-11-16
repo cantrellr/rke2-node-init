@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Phase 4: Deployment Action Refactoring (November 2024)
+
+- **Refactored Deployment Actions**:
+  - `action_server`: Complete refactoring with 13 metrics, 8-phase progress (~350 lines)
+  - `action_agent`: Complete refactoring with 10 metrics, 8-phase progress (~300 lines)
+  - `action_add_server`: Complete refactoring with 13 metrics, 8-phase progress (~350 lines)
+  - `action_airgap`: Leverages `action_image` with poweroff logic (~40 lines)
+  - Total: ~1,040 lines refactored across 4 deployment actions
+
+- **Standardized 8-Phase Deployment Pattern**:
+  - Phase 1: Load Configuration
+  - Phase 2: Validate Configuration
+  - Phase 3: Configure Network / Stage Artifacts
+  - Phase 4: Stage Artifacts / Configure System
+  - Phase 5: Configure System
+  - Phase 6: Configure Interfaces / Cluster Join
+  - Phase 7: Write RKE2 Configuration
+  - Phase 8: Install RKE2 Service
+
+- **Comprehensive Metrics Tracking**:
+  - 40+ total metrics across all deployment actions
+  - Per-action metrics: server (13), agent (10), add-server (13), airgap (3+)
+  - Metrics categories: Configuration, Artifacts, System, Cluster, Installation
+  - Formatted metrics summary display with tabular output
+  - Complete deployment audit trail
+
+- **Enhanced Error Handling**:
+  - Actionable error messages with remediation guidance
+  - Validation with `validate_file_exists()` and `validate_directory_exists()`
+  - Step-by-step troubleshooting instructions
+  - Context-aware error recovery suggestions
+
+- **Progress Reporting**:
+  - Visual 8-phase progress indicators for all deployment actions
+  - `report_progress()` integration throughout
+  - Clear phase transitions with [PROGRESS] [X/8] format
+  - Real-time deployment status visibility
+
+- **Dry-Run Support**:
+  - Full dry-run mode for all deployment actions
+  - Safe validation without system modifications
+  - Comprehensive dry-run logging with [DRY-RUN] prefix
+  - Metrics tracking in dry-run mode
+
+- **Documentation**:
+  - `docs/PHASE4-IMPLEMENTATION.md` - Comprehensive 800+ line implementation guide
+  - `docs/PHASE4-SUMMARY.md` - Executive summary with before/after comparisons
+  - `docs/PHASE4-QUICK-REFERENCE.md` - Quick reference for commands, metrics, and troubleshooting
+  - `examples/phase4-demo.sh` - Interactive demonstration of all Phase 4 features
+
+### Changed - Phase 4 Improvements
+
+- **action_server**:
+  - Now uses Phase 1 utilities (validate, log, metrics, progress)
+  - 13 tracked metrics from config loading through installation
+  - 8-phase progress reporting for clear deployment visibility
+  - Enhanced validation with detailed remediation messages
+  - Full dry-run support throughout deployment
+  - Bootstrap token generation with secure permissions
+  - TLS SAN configuration with validation
+
+- **action_agent**:
+  - Complete refactoring with Phase 1 utility integration
+  - 10 tracked metrics across all deployment phases
+  - Cluster token validation with remediation guidance
+  - Network interface configuration via netplan
+  - Enhanced error messages for cluster join issues
+  - Full dry-run mode support
+
+- **action_add_server**:
+  - Refactored for HA control plane deployments
+  - 13 tracked metrics (includes token_configured)
+  - Cluster join validation and configuration
+  - TLS SAN management for additional servers
+  - Custom CA certificate support
+  - Complete dry-run validation
+
+- **action_airgap**:
+  - Simplified implementation leveraging `action_image`
+  - NO_REBOOT=1 flag to prevent premature reboot
+  - Filesystem sync before poweroff for data consistency
+  - Clean VM templating workflow
+  - Dry-run safe poweroff logic
+
+- **Code Quality**:
+  - Syntax validated: `bash -n` passes for all refactored code
+  - Consistent 4-space indentation
+  - Comprehensive inline comments
+  - Error handling at every phase
+  - DRY (Don't Repeat Yourself) principle via Phase 1 utilities
+
 ### Added - Phase 3: CLI Enhancements (November 16, 2025)
 
 - **Enhanced Help System**:
