@@ -18,7 +18,7 @@ spec:
       prefix: 27
       gateway: 10.0.69.33
       dns: ["172.16.69.71", "172.16.69.72"]
-      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan18
     - name: eth1
       ip: 172.16.69.60
@@ -32,7 +32,7 @@ spec:
       prefix: 27
       gateway:
       dns: []
-      searchDomains: ["cantrell.cloud"]
+      searchDomains: []
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
@@ -49,10 +49,6 @@ spec:
   enable-servicelb: "false"
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  tokenFile: /rke2-node-init/outputs/co1manager-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/configs/co1manager-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
-#  customCA:
-#    rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
-#    rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
-#    installToOSTrust: true

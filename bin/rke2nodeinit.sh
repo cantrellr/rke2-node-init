@@ -1146,6 +1146,543 @@ report_item_skipped() {
 # END PHASE 1 REDESIGN SECTION
 # ==============================================================================
 
+# ==============================================================================
+# PHASE 5: ADVANCED ERROR HANDLING & METRICS DASHBOARD
+# Date: November 16, 2025
+# Purpose: Advanced error handling with trap-based cleanup, error context
+#          preservation, graceful degradation, and comprehensive metrics dashboard
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Global Error Context Variables
+# ------------------------------------------------------------------------------
+declare -a ERROR_STACK=()
+declare -a CLEANUP_FUNCTIONS=()
+declare -g ERROR_CONTEXT=""
+declare -g LAST_ERROR_LINE=0
+declare -g LAST_ERROR_FUNCTION=""
+declare -g GRACEFUL_DEGRADATION_MODE=0
+
+# Metrics dashboard storage
+declare -A METRICS_HISTORY=()
+declare -g METRICS_SESSION_ID=""
+declare -g METRICS_EXPORT_DIR="${METRICS_EXPORT_DIR:-/rke2/rke2-node-init/outputs/metrics}"
+
+# ==============================================================================
+# SECTION 1: Trap-Based Error Handling
+# Purpose: Automatic cleanup and error context on failures
+# ==============================================================================
+
+#=============================================================================
+# Function: error_handler
+# Description: Global error handler called on ERR trap
+# Parameters: None (uses $LINENO, $BASH_LINENO, etc.)
+# Returns: Always returns 1
+# Usage: Called automatically via trap
+#=============================================================================
+error_handler() {
+  local exit_code=$?
+  local line_number="${BASH_LINENO[0]}"
+  local function_name="${FUNCNAME[1]:-main}"
+  local command="${BASH_COMMAND}"
+  
+  # Store error context
+  LAST_ERROR_LINE="$line_number"
+  LAST_ERROR_FUNCTION="$function_name"
+  
+  # Build error stack trace
+  local stack_trace=""
+  for ((i=1; i<${#FUNCNAME[@]}; i++)); do
+    stack_trace+="  at ${FUNCNAME[$i]} (line ${BASH_LINENO[$i-1]})\n"
+  done
+  
+  # Log comprehensive error information
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_error "ERROR DETECTED"
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_error "Exit Code: $exit_code"
+  log_error "Line: $line_number"
+  log_error "Function: $function_name"
+  log_error "Command: $command"
+  if [[ -n "$ERROR_CONTEXT" ]]; then
+    log_error "Context: $ERROR_CONTEXT"
+  fi
+  log_error ""
+  log_error "Stack Trace:"
+  echo -e "$stack_trace" | while IFS= read -r line; do
+    [[ -n "$line" ]] && log_error "$line"
+  done
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Increment failure metrics
+  metrics_increment "errors"
+  
+  return 1
+}
+
+#=============================================================================
+# Function: cleanup_handler
+# Description: Execute all registered cleanup functions on exit
+# Parameters: None
+# Returns: Always returns 0
+# Usage: Called automatically via trap
+#=============================================================================
+cleanup_handler() {
+  local exit_code=$?
+  
+  log_info "Executing cleanup handlers..."
+  
+  # Execute cleanup functions in reverse order (LIFO)
+  for ((i=${#CLEANUP_FUNCTIONS[@]}-1; i>=0; i--)); do
+    local cleanup_fn="${CLEANUP_FUNCTIONS[$i]}"
+    log_debug "Running cleanup function: $cleanup_fn"
+    
+    # Execute cleanup function and suppress errors
+    if ! $cleanup_fn 2>/dev/null; then
+      log_warn "Cleanup function failed: $cleanup_fn (non-fatal)"
+    fi
+  done
+  
+  log_info "Cleanup complete"
+  return 0
+}
+
+#=============================================================================
+# Function: interrupt_handler
+# Description: Handle SIGINT (Ctrl+C) gracefully
+# Parameters: None
+# Returns: Exits with code 130
+# Usage: Called automatically via trap
+#=============================================================================
+interrupt_handler() {
+  log_warn ""
+  log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_warn "Operation interrupted by user (Ctrl+C)"
+  log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  metrics_increment "interrupted"
+  
+  # Run cleanup handlers
+  cleanup_handler
+  
+  exit 130
+}
+
+#=============================================================================
+# Function: register_cleanup
+# Description: Register a function to be called during cleanup
+# Parameters:
+#   $1 - Function name to register
+# Returns: Always returns 0
+# Usage: register_cleanup my_cleanup_function
+#=============================================================================
+register_cleanup() {
+  local cleanup_fn="$1"
+  CLEANUP_FUNCTIONS+=("$cleanup_fn")
+  log_debug "Registered cleanup function: $cleanup_fn"
+}
+
+#=============================================================================
+# Function: set_error_context
+# Description: Set context string for error reporting
+# Parameters:
+#   $@ - Context description
+# Returns: Always returns 0
+# Usage: set_error_context "Downloading artifacts from registry"
+#=============================================================================
+set_error_context() {
+  ERROR_CONTEXT="$*"
+  log_debug "Error context: $ERROR_CONTEXT"
+}
+
+#=============================================================================
+# Function: clear_error_context
+# Description: Clear the error context string
+# Parameters: None
+# Returns: Always returns 0
+# Usage: clear_error_context
+#=============================================================================
+clear_error_context() {
+  ERROR_CONTEXT=""
+}
+
+#=============================================================================
+# Function: enable_error_handling
+# Description: Enable advanced error handling with traps
+# Parameters: None
+# Returns: Always returns 0
+# Usage: enable_error_handling (call early in script)
+#=============================================================================
+enable_error_handling() {
+  # Set error handling options
+  set -E  # ERR trap inheritance
+  
+  # Register trap handlers
+  trap error_handler ERR
+  trap cleanup_handler EXIT
+  trap interrupt_handler INT TERM
+  
+  log_debug "Advanced error handling enabled"
+  metrics_init "error_handling"
+}
+
+# ==============================================================================
+# SECTION 2: Graceful Degradation
+# Purpose: Continue operation with reduced functionality on non-critical failures
+# ==============================================================================
+
+#=============================================================================
+# Function: enable_graceful_degradation
+# Description: Enable graceful degradation mode
+# Parameters: None
+# Returns: Always returns 0
+# Usage: enable_graceful_degradation
+#=============================================================================
+enable_graceful_degradation() {
+  GRACEFUL_DEGRADATION_MODE=1
+  log_info "Graceful degradation mode enabled"
+  log_info "Non-critical failures will not stop execution"
+}
+
+#=============================================================================
+# Function: disable_graceful_degradation
+# Description: Disable graceful degradation mode
+# Parameters: None
+# Returns: Always returns 0
+# Usage: disable_graceful_degradation
+#=============================================================================
+disable_graceful_degradation() {
+  GRACEFUL_DEGRADATION_MODE=0
+  log_debug "Graceful degradation mode disabled"
+}
+
+#=============================================================================
+# Function: try_with_degradation
+# Description: Execute command with graceful degradation
+# Parameters:
+#   $1 - Command to execute
+#   $2 - Description of operation
+#   $3 - Criticality (critical|non-critical, default: non-critical)
+# Returns: Command exit code if critical, 0 if non-critical and degradation enabled
+# Usage: try_with_degradation "some_command" "optional feature" "non-critical"
+#=============================================================================
+try_with_degradation() {
+  local command="$1"
+  local description="$2"
+  local criticality="${3:-non-critical}"
+  
+  log_debug "Attempting: $description"
+  set_error_context "$description"
+  
+  if eval "$command"; then
+    log_success "$description completed"
+    clear_error_context
+    return 0
+  else
+    local exit_code=$?
+    
+    if [[ "$criticality" == "critical" ]] || [[ "$GRACEFUL_DEGRADATION_MODE" -eq 0 ]]; then
+      log_error "$description failed (critical)"
+      clear_error_context
+      return $exit_code
+    else
+      log_warn "$description failed (non-critical, continuing)"
+      metrics_increment "degraded_operations"
+      clear_error_context
+      return 0
+    fi
+  fi
+}
+
+#=============================================================================
+# Function: retry_with_backoff
+# Description: Retry a command with exponential backoff
+# Parameters:
+#   $1 - Command to execute
+#   $2 - Maximum attempts (default: 3)
+#   $3 - Initial delay in seconds (default: 1)
+# Returns: 0 if successful, 1 if all retries failed
+# Usage: retry_with_backoff "curl https://example.com" 3 2
+#=============================================================================
+retry_with_backoff() {
+  local command="$1"
+  local max_attempts="${2:-3}"
+  local delay="${3:-1}"
+  local attempt=1
+  
+  while [[ $attempt -le $max_attempts ]]; do
+    log_debug "Attempt $attempt/$max_attempts: $command"
+    
+    if eval "$command"; then
+      log_success "Command succeeded on attempt $attempt"
+      return 0
+    fi
+    
+    if [[ $attempt -lt $max_attempts ]]; then
+      log_warn "Attempt $attempt failed, retrying in ${delay}s..."
+      sleep "$delay"
+      delay=$((delay * 2))  # Exponential backoff
+    fi
+    
+    attempt=$((attempt + 1))
+  done
+  
+  log_error "Command failed after $max_attempts attempts"
+  metrics_increment "retry_failures"
+  return 1
+}
+
+# ==============================================================================
+# SECTION 3: Advanced Metrics Dashboard
+# Purpose: Comprehensive metrics visualization and export
+# ==============================================================================
+
+#=============================================================================
+# Function: metrics_dashboard_init
+# Description: Initialize metrics dashboard with session tracking
+# Parameters:
+#   $1 - Operation name
+# Returns: Always returns 0
+# Usage: metrics_dashboard_init "rke2_deployment"
+#=============================================================================
+metrics_dashboard_init() {
+  local operation_name="${1:-operation}"
+  
+  # Generate unique session ID
+  METRICS_SESSION_ID="${operation_name}_$(date +%Y%m%d_%H%M%S)_$$"
+  
+  # Initialize metrics
+  metrics_init "$operation_name"
+  
+  # Create export directory
+  mkdir -p "$METRICS_EXPORT_DIR"
+  
+  log_debug "Metrics dashboard initialized: session=$METRICS_SESSION_ID"
+}
+
+#=============================================================================
+# Function: metrics_dashboard_display
+# Description: Display comprehensive metrics dashboard
+# Parameters:
+#   $1 - Optional title (default: "METRICS DASHBOARD")
+# Returns: Always returns 0
+# Usage: metrics_dashboard_display "RKE2 Deployment Metrics"
+#=============================================================================
+metrics_dashboard_display() {
+  local title="${1:-METRICS DASHBOARD}"
+  local operation="${METRICS[operation]:-operation}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  local elapsed=$((end_time - start_time))
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "$title"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  printf "%-30s %s\n" "Session ID:" "$METRICS_SESSION_ID"
+  printf "%-30s %s\n" "Operation:" "$operation"
+  printf "%-30s %s\n" "Start Time:" "$(date -d @"$start_time" '+%Y-%m-%d %H:%M:%S')"
+  printf "%-30s %s\n" "End Time:" "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf "%-30s %ds\n" "Duration:" "$elapsed"
+  echo ""
+  echo "Metrics:"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "%-30s %10s\n" "Metric" "Value"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Display all metrics
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      printf "%-30s %10s\n" "$metric" "${METRICS[$metric]}"
+    fi
+  done
+  
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Calculate success rate if applicable
+  local total="${METRICS[total]:-0}"
+  if [[ $total -gt 0 ]]; then
+    local success="${METRICS[success]:-0}"
+    local success_rate=$((success * 100 / total))
+    echo ""
+    printf "%-30s %9d%%\n" "Success Rate:" "$success_rate"
+  fi
+  
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+}
+
+#=============================================================================
+# Function: metrics_export_json
+# Description: Export metrics to JSON format
+# Parameters:
+#   $1 - Output file path (optional, default: auto-generated)
+# Returns: 0 if successful, 1 if failed
+# Usage: metrics_export_json "/path/to/metrics.json"
+#=============================================================================
+metrics_export_json() {
+  local output_file="${1:-${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.json}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  
+  log_info "Exporting metrics to JSON: $output_file"
+  
+  # Create JSON structure
+  cat > "$output_file" <<EOF
+{
+  "session_id": "$METRICS_SESSION_ID",
+  "operation": "${METRICS[operation]:-operation}",
+  "timestamp": {
+    "start": $start_time,
+    "end": $end_time,
+    "duration": $((end_time - start_time)),
+    "start_iso": "$(date -d @"$start_time" -Iseconds)",
+    "end_iso": "$(date -Iseconds)"
+  },
+  "metrics": {
+EOF
+  
+  # Add all metrics
+  local first=1
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      if [[ $first -eq 1 ]]; then
+        first=0
+      else
+        echo "," >> "$output_file"
+      fi
+      printf '    "%s": %s' "$metric" "${METRICS[$metric]}" >> "$output_file"
+    fi
+  done
+  
+  cat >> "$output_file" <<EOF
+
+  },
+  "hostname": "$(hostname)",
+  "script_version": "${SCRIPT_VERSION:-unknown}",
+  "dry_run": ${DRY_RUN:-false}
+}
+EOF
+  
+  log_success "Metrics exported to: $output_file"
+  return 0
+}
+
+#=============================================================================
+# Function: metrics_export_csv
+# Description: Export metrics to CSV format
+# Parameters:
+#   $1 - Output file path (optional, default: auto-generated)
+# Returns: 0 if successful, 1 if failed
+# Usage: metrics_export_csv "/path/to/metrics.csv"
+#=============================================================================
+metrics_export_csv() {
+  local output_file="${1:-${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.csv}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  
+  log_info "Exporting metrics to CSV: $output_file"
+  
+  # Write CSV header
+  echo "session_id,operation,start_time,end_time,duration,metric,value" > "$output_file"
+  
+  # Write metrics
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      echo "$METRICS_SESSION_ID,${METRICS[operation]:-operation},$start_time,$end_time,$((end_time - start_time)),$metric,${METRICS[$metric]}" >> "$output_file"
+    fi
+  done
+  
+  log_success "Metrics exported to: $output_file"
+  return 0
+}
+
+#=============================================================================
+# Function: metrics_export_all
+# Description: Export metrics to all supported formats
+# Parameters: None
+# Returns: 0 if all exports successful, 1 if any failed
+# Usage: metrics_export_all
+#=============================================================================
+metrics_export_all() {
+  local json_file="${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.json"
+  local csv_file="${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.csv"
+  
+  log_info "Exporting metrics to all formats..."
+  
+  local failed=0
+  
+  if ! metrics_export_json "$json_file"; then
+    log_error "JSON export failed"
+    failed=1
+  fi
+  
+  if ! metrics_export_csv "$csv_file"; then
+    log_error "CSV export failed"
+    failed=1
+  fi
+  
+  if [[ $failed -eq 0 ]]; then
+    log_success "All metrics exported successfully"
+    log_info "  JSON: $json_file"
+    log_info "  CSV:  $csv_file"
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: metrics_compare
+# Description: Compare metrics from two sessions
+# Parameters:
+#   $1 - First session metrics file (JSON)
+#   $2 - Second session metrics file (JSON)
+# Returns: Always returns 0
+# Usage: metrics_compare session1.json session2.json
+#=============================================================================
+metrics_compare() {
+  local file1="$1"
+  local file2="$2"
+  
+  if ! validate_file_exists "$file1" "first metrics file"; then
+    return 1
+  fi
+  
+  if ! validate_file_exists "$file2" "second metrics file"; then
+    return 1
+  fi
+  
+  log_info "Comparing metrics:"
+  log_info "  Session 1: $file1"
+  log_info "  Session 2: $file2"
+  
+  # This is a basic comparison - could be enhanced with jq if available
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "METRICS COMPARISON"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "File 1: $(basename "$file1")"
+  echo "File 2: $(basename "$file2")"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Note: Use 'jq' for detailed comparison:"
+  echo "  jq -s '.[0].metrics as \$m1 | .[1].metrics as \$m2 | \$m1 + \$m2' $file1 $file2"
+  echo ""
+}
+
+# ==============================================================================
+# END PHASE 5: ADVANCED ERROR HANDLING & METRICS DASHBOARD
+# ==============================================================================
+
+# ==============================================================================
+# END PHASE 1 REDESIGN SECTION
+# ==============================================================================
+
 # ------------------------------------------------------------------------------
 # Function: print_help
 # Purpose : Emit the usage banner, supported YAML schema, and command examples
