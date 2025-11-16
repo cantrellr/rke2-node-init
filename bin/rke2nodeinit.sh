@@ -5387,35 +5387,93 @@ EOF
 # Returns :
 #   Exits on failure of any stage.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_push
+# Description: Push container images to private registry with metrics tracking
+# Parameters:
+#   None (reads from CONFIG_FILE or CLI flags)
+# Returns: 
+#   0 - Success (all images pushed or dry-run)
+#   1 - Dependency or login failure
+#   3 - Images archive not found
+# Usage: action_push -f <config.yaml> or action_push -r registry -u user -p pass
+# Dependencies: metrics_init, metrics_increment, metrics_summary, report_progress,
+#               validate_file_exists, log_info, log_success, log_error
+# Changes from Original:
+#   - Added metrics tracking for image operations
+#   - Added progress reporting for batch operations
+#   - Enhanced validation with remediation steps
+#   - Improved error messages and logging structure
+#=============================================================================
 action_push() {
   initialize_action_context false "push"
 
+  log_info "Starting image push operation"
+  
+  # Load configuration from YAML if provided
   if [[ -n "$CONFIG_FILE" ]]; then
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
-    log WARN "Using YAML values; CLI flags may be overridden (push)."
+    log_warn "Using YAML configuration values (CLI flags may be overridden)"
   fi
 
-  # Warn if using example default credentials
+  # Validate credentials
   warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+  
+  if ! validate_non_empty "${REGISTRY:-}" "REGISTRY"; then
+    log_error "Registry URL not specified"
+    log_error "Remediation: Provide registry via -r flag or in YAML config"
+    log_error "Example: $0 push -r registry.example.com -u user -p pass"
+    exit 1
+  fi
 
-  ensure_installed zstd
+  # Check dependencies
+  if ! check_dependencies zstd; then
+    log_warn "Missing required dependency: zstd"
+    install_dependencies_interactive zstd || exit 1
+  fi
 
+  # Validate images archive exists
   local work="$DOWNLOADS_DIR"
-  if [[ ! -f "$work/$IMAGES_TAR" ]]; then
-    log ERROR "Images archive not found in $work. Run 'image' first."
+  if ! validate_file_exists "$work/$IMAGES_TAR"; then
+    log_error "Images archive not found: $work/$IMAGES_TAR"
+    log_error "Remediation steps:"
+    log_error "  1. Run image action first: $0 image -f config.yaml"
+    log_error "  2. Verify downloads directory: $work"
+    log_error "  3. Check for disk space issues"
     exit 3
   fi
 
-  zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load >>"$LOG_FILE" 2>&1
+  # Initialize metrics for tracking
+  metrics_init "push_operation"
+  
+  log_info "Loading images from archive: $work/$IMAGES_TAR"
+  report_progress "Loading images into nerdctl" 1 4
+  
+  if ! zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load >>"$LOG_FILE" 2>&1; then
+    log_error "Failed to load images from archive"
+    log_error "Check log file for details: $LOG_FILE"
+    exit 1
+  fi
+  metrics_increment "images_loaded"
 
+  # Get list of loaded images
   local -a imgs
   mapfile -t imgs < <(nerdctl -n k8s.io images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | sort -u)
+  
+  local img_count=${#imgs[@]}
+  log_info "Found $img_count images to process"
+  metrics_increment "total" "$img_count"
 
+  # Parse registry host and namespace
   local REG_HOST="$REGISTRY" REG_NS=""
   [[ "$REGISTRY" == *"/"* ]] && { REG_HOST="${REGISTRY%%/*}"; REG_NS="${REGISTRY#*/}"; }
+  log_info "Target registry: $REG_HOST" 
+  [[ -n "$REG_NS" ]] && log_info "Target namespace: $REG_NS"
 
+  # Generate manifest files
+  report_progress "Generating push manifest" 2 4
   local manifest_json="$OUT_DIR/images-manifest.json"
   local manifest_txt="$OUT_DIR/images-manifest.txt"
   : > "$manifest_txt"
@@ -5436,72 +5494,181 @@ action_push() {
   done
   echo ""  >> "$manifest_json"
   echo "]" >> "$manifest_json"
-  log INFO "Pre-push manifest written:"
-  log INFO "  - $manifest_txt"
-  log INFO "  - $manifest_json"
+  
+  log_info "Pre-push manifest written:"
+  log_info "  - Text: $manifest_txt"
+  log_info "  - JSON: $manifest_json"
 
-  if [[ "$DRY_PUSH" -eq 1 ]]; then
-    log WARN "--dry-push set; skipping actual registry pushes."
+  # Handle dry-run mode
+  if [[ "${DRY_PUSH:-0}" -eq 1 ]]; then
+    log_warn "Dry-run mode enabled (--dry-push flag)"
+    log_warn "Skipping actual registry authentication and image pushes"
+    log_info "Review manifest files above to verify push targets"
+    metrics_summary "Push Operation (Dry-Run)"
     return 0
   fi
 
-  spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"
+  # Authenticate to registry
+  report_progress "Authenticating to registry" 3 4
+  log_info "Logging into registry: $REG_HOST"
+  
+  if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
+    log_error "Registry login failed"
+    log_error "Remediation steps:"
+    log_error "  - Verify registry URL is correct: $REG_HOST"
+    log_error "  - Check username and password credentials"
+    log_error "  - Ensure registry is accessible from this network"
+    log_error "  - Test manually: nerdctl login $REG_HOST -u <user>"
+    metrics_increment "failed"
+    metrics_summary "Push Operation (Failed)"
+    exit 1
+  fi
+  metrics_increment "authenticated"
+
+  # Push images with progress tracking
+  report_progress "Pushing images to registry" 4 4
+  log_info "Starting image push operations ($img_count images)"
+  
+  local push_num=0
   for IMG in "${imgs[@]}"; do
     [[ -z "$IMG" ]] && continue
+    push_num=$((push_num + 1))
+    
     local TARGET
     if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
-    log INFO "Tag & push: $IMG -> $TARGET"
-    nerdctl -n k8s.io tag  "$IMG" "$TARGET"  >>"$LOG_FILE" 2>&1
-    spinner_run "Pushing $TARGET" nerdctl -n k8s.io push "$TARGET"
+    
+    log_info "[$push_num/$img_count] Processing: $IMG -> $TARGET"
+    
+    # Tag image
+    if ! nerdctl -n k8s.io tag "$IMG" "$TARGET" >>"$LOG_FILE" 2>&1; then
+      log_error "Failed to tag image: $IMG"
+      metrics_increment "failed"
+      report_item_failure "$IMG" "Tag operation failed"
+      continue
+    fi
+    
+    # Push image
+    if spinner_run "Pushing $TARGET" nerdctl -n k8s.io push "$TARGET"; then
+      metrics_increment "success"
+      report_item_success "$IMG" "Pushed to $TARGET"
+    else
+      log_error "Failed to push image: $TARGET"
+      metrics_increment "failed"
+      report_item_failure "$IMG" "Push operation failed"
+    fi
   done
+
+  # Cleanup - logout from registry
   nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
 
-  log INFO "push: completed successfully."
+  # Display summary
+  metrics_summary "Image Push Summary"
+  
+  # Determine exit status based on metrics
+  if metrics_should_fail; then
+    log_error "Push operation completed with failures"
+    log_error "Review error messages above and retry failed images"
+    return 1
+  else
+    log_success "Image push operation completed successfully"
+    log_info "All $img_count images pushed to $REG_HOST"
+    return 0
+  fi
 }
 
-# ==============
-# Action: IMAGE
-# ------------------------------------------------------------------------------
+#=============================================================================
 # Function: action_image
-# Purpose : Prepare a golden image for offline deployment by installing
-#           prerequisites, downloading artifacts, caching registries configuration,
-#           and writing documentation of the run.
-# Arguments:
-#   None
-# Returns :
-#   Exits on failure; triggers reboot prompt on completion.
-# ------------------------------------------------------------------------------
+# Description: Prepare golden image for air-gapped deployment with full artifact
+#              caching, SBOM generation, and comprehensive validation
+# Parameters:
+#   None (reads from CONFIG_FILE or uses defaults)
+# Returns: 
+#   0 - Success (image prepared, reboot prompt shown)
+#   1 - Dependency or validation failure
+#   3 - Artifact download/caching failure
+# Usage: action_image -f <config.yaml>
+# Dependencies: metrics_init, metrics_increment, metrics_summary, validate_file_exists,
+#               validate_directory_writable, check_dependencies, install_dependencies_interactive,
+#               log_info, log_success, log_error, report_progress
+# Changes from Original:
+#   - Added metrics tracking for artifacts and operations
+#   - Enhanced validation with Phase 1 utilities
+#   - Improved progress reporting for long-running operations
+#   - Better structured logging for auditability
+#   - Dependency checks with interactive installation
+#=============================================================================
 action_image() {
   initialize_action_context true "image"
 
-  # Detailed run-level logging: capture key inputs and paths so operators
-  # and auditors can see what decisions were made by the image action.
-  log INFO "Starting action_image: RKE2_VERSION='${RKE2_VERSION:-<auto>}' REGISTRY='${REGISTRY:-<none>}' REG_USER='${REG_USER:-<none>}'"
-  log INFO "Paths: DOWNLOADS_DIR='$DOWNLOADS_DIR' STAGE_DIR='$STAGE_DIR' SBOM_DIR='$SBOM_DIR' OUT_DIR='$OUT_DIR'"
+  log_info "========================================"
+  log_info "Starting RKE2 Golden Image Preparation"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "image_operation"
+  
+  # Log configuration for audit trail
+  log_info "Configuration:"
+  log_info "  RKE2_VERSION: ${RKE2_VERSION:-<auto-detect>}"
+  log_info "  REGISTRY: ${REGISTRY:-<none>}"
+  log_info "  REG_USER: ${REG_USER:-<none>}"
+  log_info "Directories:"
+  log_info "  DOWNLOADS_DIR: $DOWNLOADS_DIR"
+  log_info "  STAGE_DIR: $STAGE_DIR"
+  log_info "  SBOM_DIR: $SBOM_DIR"
+  log_info "  OUT_DIR: $OUT_DIR"
 
-  # --- Read YAML (optional) -------------------------------------------------
+  # Validate directories are writable
+  report_progress "Validating environment" 1 8
+  if ! validate_directory_writable "$DOWNLOADS_DIR"; then
+    log_error "Downloads directory not writable: $DOWNLOADS_DIR"
+    log_error "Remediation: Check directory permissions and disk space"
+    exit 1
+  fi
+  if ! validate_directory_writable "$STAGE_DIR"; then
+    log_error "Stage directory not writable: $STAGE_DIR"
+    log_error "Remediation: Check directory permissions and disk space"
+    exit 1
+  fi
+  metrics_increment "validation_passed"
+
+  # --- Read YAML configuration (optional) -----------------------------------
+  report_progress "Loading configuration" 2 8
   local REQ_VER="${RKE2_VERSION:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
+  
   if [[ -n "$CONFIG_FILE" ]]; then
+    log_info "Loading configuration from: $CONFIG_FILE"
+    if ! validate_file_exists "$CONFIG_FILE"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      exit 1
+    fi
+    
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
     REG_HOST="${REGISTRY%%/*}"
+    
     local d1 s1
     d1="$(yaml_spec_get "$CONFIG_FILE" defaultDns || true)"
     s1="$(yaml_spec_get "$CONFIG_FILE" defaultSearchDomains || true)"
     [[ -n "$d1" ]] && defaultDnsCsv="$(normalize_list_csv "$d1")"
     [[ -n "$s1" ]] && defaultSearchCsv="$(normalize_list_csv "$s1")"
+    
     # Optional custom CA for registry/cluster
     CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
     CA_KEY="$(yaml_spec_get "$CONFIG_FILE" customCA.rootKey || true)"
     CA_INTCRT="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateCrt || true)"
     CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
     CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
+    
+    metrics_increment "config_loaded"
+  else
+    log_info "No configuration file provided - using defaults and CLI flags"
   fi
 
   # Warn if using example default credentials
@@ -5513,58 +5680,103 @@ action_image() {
   [[ -n "$CA_INTCRT" && "${CA_INTCRT:0:1}" != "/" ]] && CA_INTCRT="$SCRIPT_DIR/$CA_INTCRT"
   [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
-  # --- OS prereqs ------------------------------------------------------------
+  # --- Install OS prerequisites ----------------------------------------------
+  report_progress "Installing OS prerequisites" 3 8
+  log_info "Installing RKE2 prerequisites for $(detect_os)"
   install_rke2_prereqs
+  metrics_increment "prereqs_installed"
 
+  # Detect virtualization and install appropriate tools
   local virt_class virt_type hypervisor
   IFS='|' read -r virt_class virt_type hypervisor <<<"$(detect_virtualization)"
   if [[ "$virt_class" == "virtual" ]]; then
-    log INFO "Virtual environment detected (type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown})."
+    log_info "Virtual environment detected: type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown}"
     install_vm_tools "$hypervisor"
+    metrics_increment "vm_tools_installed"
   else
-    log INFO "Physical hardware detected; skipping VM tools installation."
+    log_info "Physical hardware detected - skipping VM tools installation"
   fi
 
-  # install_nerdctl
+  # Fetch RKE2 CA generator utility
   fetch_rke2_ca_generator
-    # cache_rke2_artifacts downloads / stages required artifacts into
-    # $DOWNLOADS_DIR and $STAGE_DIR. It emits its own logging, but record
-    # the start/end here for clearer run traces.
-    log INFO "Caching RKE2 artifacts (downloads -> $DOWNLOADS_DIR, stage -> $STAGE_DIR)"
-    cache_rke2_artifacts
-    log INFO "Completed artifact caching; scanning staged/downloaded artifacts for verification"
+  metrics_increment "ca_generator_fetched"
+  
+  # --- Cache RKE2 artifacts --------------------------------------------------
+  # Downloads and stages required artifacts into DOWNLOADS_DIR and STAGE_DIR
+  report_progress "Caching RKE2 artifacts" 4 8
+  log_info "Downloading and staging RKE2 artifacts"
+  log_info "  Target: downloads -> $DOWNLOADS_DIR, stage -> $STAGE_DIR"
+  
+  if ! cache_rke2_artifacts; then
+    log_error "Failed to cache RKE2 artifacts"
+    log_error "Remediation steps:"
+    log_error "  - Check network connectivity to RKE2 release servers"
+    log_error "  - Verify disk space in $DOWNLOADS_DIR"
+    log_error "  - Review log file: $LOG_FILE"
+    metrics_increment "failed"
+    exit 3
+  fi
+  
+  log_info "Artifact caching completed successfully"
+  log_info "Scanning staged and downloaded artifacts for verification"
+  metrics_increment "artifacts_cached"
 
-    if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
-      # Operator requested images be loaded into the local runtime.
-      log INFO "--load-images supplied; installing nerdctl for image loading"
-      install_nerdctl
-
-      log INFO "Loading staged images into local image store"
-      if ! load_images_from_tarball >/dev/null 2>&1; then
-        log WARN "Loading images from tarball returned non-zero; continuing but node may attempt remote pulls"
-      fi
-    else
-      log INFO "Image load skipped (default tarball-on-node). Use --load-images to import images into the container runtime."
+  # --- Optional: Load images into local runtime ------------------------------
+  report_progress "Processing container images" 5 8
+  if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
+    log_info "Image loading requested (--load-images flag)"
+    log_info "Installing nerdctl for container image management"
+    
+    if ! check_dependencies nerdctl; then
+      install_nerdctl || {
+        log_error "Failed to install nerdctl"
+        metrics_increment "failed"
+        exit 1
+      }
+      metrics_increment "nerdctl_installed"
     fi
 
-    # Trust any configured registries (may install custom CA into registries.yaml)
-    ca_trust_registries
+    log_info "Loading images from tarball into local container runtime"
+    if ! load_images_from_tarball >/dev/null 2>&1; then
+      log_warn "Image loading returned non-zero exit code"
+      log_warn "Node may attempt remote image pulls during deployment"
+      metrics_increment "image_load_warned"
+    else
+      log_success "Images loaded successfully into local runtime"
+      metrics_increment "images_loaded"
+    fi
+  else
+    log_info "Image loading skipped (default: tarball-on-node strategy)"
+    log_info "Use --load-images flag to import images into container runtime"
+  fi
 
-    # Immediately collect a list of relevant artifacts for reporting and checksum verification.
-    # We will inspect both downloads and staged paths so the SBOM and logs accurately reflect
-    # what the image action produced.
-    log INFO "Collecting artifact inventory for verification"
+  # --- Trust configured registries -------------------------------------------
+  # Installs custom CA into registries.yaml if configured
+  report_progress "Configuring registry trust" 6 8
+  log_info "Configuring registry trust and custom CA (if applicable)"
+  ca_trust_registries
+  metrics_increment "registry_trust_configured"
+
+  # Collect artifact inventory for SBOM and verification
+  log_info "Collecting artifact inventory for SBOM generation"
 
   # --- Save site defaults (DNS/search) ---------------------------------------
+  report_progress "Saving site defaults" 7 8
   local STATE="/etc/rke2image.defaults"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
     echo "DEFAULT_SEARCH=\"$defaultSearchCsv\""
   } > "$STATE"
   chmod 600 "$STATE"
-  log INFO "Saved site defaults: DNS=[$defaultDnsCsv], SEARCH=[$defaultSearchCsv]"
+  log_info "Site defaults saved to: $STATE"
+  log_info "  DNS servers: $defaultDnsCsv"
+  log_info "  Search domains: $defaultSearchCsv"
+  metrics_increment "defaults_saved"
 
-  # --- SBOM and README -------------------------------------------------------
+  # --- SBOM and README generation --------------------------------------------
+  report_progress "Generating SBOM and documentation" 8 8
+  log_info "Generating Software Bill of Materials (SBOM)"
+  
   # Ensure nerdctl archive names are known for reporting
   local full_tgz="${NERDCTL_FULL_TGZ:-}"
   local std_tgz="${NERDCTL_STD_TGZ:-}"
@@ -5578,11 +5790,12 @@ action_image() {
   NERDCTL_STD_TGZ="$std_tgz"
 
   # SBOM lists filenames, sizes, sha256; write to $SBOM_DIR/<name>-sbom.txt
-  log INFO "Creating SBOM..."
+  log_info "Creating Software Bill of Materials (SBOM)"
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
-  # Build sbom_targets to include both downloads and files staged into STAGE_DIR.
+  
+  # Build sbom_targets to include both downloads and files staged into STAGE_DIR
   local sbom_targets=(
     "$DOWNLOADS_DIR/$IMAGES_TAR"
     "$DOWNLOADS_DIR/$RKE2_TARBALL"
@@ -5598,22 +5811,22 @@ action_image() {
   # Include hardened-cni artifact when present
   [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
   [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
-  # If there's a sha256 file available, load it to verify artifacts when possible.
+  
+  # Load expected checksums from manifest file
   declare -A expected_hash=()
-  # Prefer staged manifest (filtered) when present, otherwise fallback to downloads
   if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
-    log INFO "Found checksum manifest in stage: $STAGE_DIR/$SHA256_FILE; loading expected checksums"
+    log_info "Loading expected checksums from: $STAGE_DIR/$SHA256_FILE"
     while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
   elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
-    log INFO "Found checksum manifest: $DOWNLOADS_DIR/$SHA256_FILE; loading expected checksums"
+    log_info "Loading expected checksums from: $DOWNLOADS_DIR/$SHA256_FILE"
     while read -r h fn; do
       expected_hash["$(basename "$fn")"]="$h"
     done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
   else
-    log WARN "No SHA256 manifest located in $DOWNLOADS_DIR or $STAGE_DIR; per-artifact verification will be limited"
+    log_warn "No SHA256 manifest found - artifact verification will be limited"
   fi
 
-  # Prepare sbom header
+  # Prepare SBOM header with metadata
   {
     echo "# RKE2 Image Prep SBOM"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -5623,15 +5836,16 @@ action_image() {
     echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
   } > "$sbom_file"
 
-  # Track verification metrics for a simple security score
+  # Track verification metrics for security scoring
   local total_count=0 verified_count=0 manifest_present=0
   [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
 
+  # Process each artifact and verify checksums
+  log_info "Verifying and cataloging artifacts (${#sbom_targets[@]} targets)"
   for f in "${sbom_targets[@]}"; do
     [[ -f "$f" ]] || continue
-    # Use POSIX arithmetic expansion to increment counters to avoid failures
-    # in environments where ((..)) might not be supported (defensive).
     total_count=$((total_count + 1))
+    
     local fname size sha mtime src verified
     fname="$(basename "$f")"
     size=$(stat -c%s "$f" 2>/dev/null || echo 0)
@@ -5639,45 +5853,48 @@ action_image() {
     sha=$(sha256sum "$f" | awk '{print $1}')
     src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
     verified="unknown"
+    
+    # Verify against expected checksum if available
     if [[ -n "${expected_hash[$fname]:-}" ]]; then
       if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
         verified="yes"
         verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
       else
         verified="NO (mismatch)"
+        log_error "Checksum mismatch for $fname"
+        metrics_increment "artifact_mismatch"
       fi
     else
-      # No expected checksum: still report computed sha
       verified="no-manifest"
     fi
 
     # Append detailed entry to SBOM
     printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
-    # Also log the verification outcome for runtime visibility
-    log INFO "Artifact: $f size=$size sha256=$sha verified=$verified"
+    
+    # Report verification status
+    if [[ "$verified" == "yes" ]]; then
+      report_item_success "$fname" "Verified ($size bytes)"
+    elif [[ "$verified" == "NO (mismatch)" ]]; then
+      report_item_failure "$fname" "Checksum mismatch"
+    else
+      report_item_skipped "$fname" "No manifest entry"
+    fi
   done
 
-  # Compute a simple security score (0-100) so operators can quickly see if
-  # the image collected expected metadata. This is intentionally simple and
-  # conservative; projects wanting a richer score should integrate scanners.
-  # Scoring heuristic (example):
-  #   +40 if checksum manifest present
-  #   +40 if all discovered artifacts were verified against manifest
-  #   +20 if SBOM contains at least one artifact entry
+  # Compute security score based on verification results
   local security_score=0
-  # Add 40 points if a manifest was present
   if [[ $manifest_present -eq 1 ]]; then
     security_score=$((security_score + 40))
   fi
   if [[ $total_count -gt 0 ]]; then
-    # Add 40 points if all artifacts were verified
     if [[ $manifest_present -eq 1 && $verified_count -eq $total_count ]]; then
       security_score=$((security_score + 40))
     fi
-    # Add 20 points if there is at least one artifact
     security_score=$((security_score + 20))
   fi
 
+  # Append summary to SBOM
   {
     echo
     echo "# Summary"
@@ -5687,15 +5904,18 @@ action_image() {
     echo "security_score: ${security_score}"
   } >> "$sbom_file"
 
-  log INFO "SBOM written to $sbom_file (artifacts=$total_count verified=$verified_count security_score=$security_score)"
+  log_success "SBOM created successfully"
+  log_info "SBOM location: $sbom_file"
+  log_info "  Artifacts: $total_count discovered, $verified_count verified"
+  log_info "  Security score: ${security_score}/100"
+  metrics_increment "sbom_created"
 
-  # Also emit a machine-friendly JSON SBOM for tooling compatibility. We use
-  # a small Python helper here to avoid fragile shell JSON escaping.
+  # Generate machine-friendly JSON SBOM for tooling compatibility
   local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
   if command -v python3 >/dev/null 2>&1; then
-  log INFO "Generating JSON SBOM: $sbom_json_file"
-  local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
-  python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
+    log_info "Generating JSON SBOM: $sbom_json_file"
+    local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+    python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
 import sys, json
 sbom_txt = sys.argv[1]
 sbom_json = sys.argv[2]
@@ -5773,17 +5993,20 @@ with open(sbom_json, 'w', encoding='utf-8') as out:
   json.dump(data, out, indent=2, sort_keys=True)
 print(sbom_json)
 PY
-  if [[ $? -eq 0 ]]; then
-    log INFO "JSON SBOM written to $sbom_json_file"
+    if [[ $? -eq 0 ]]; then
+      log_success "JSON SBOM generated: $sbom_json_file"
+      metrics_increment "json_sbom_created"
+    else
+      log_warn "Failed to generate JSON SBOM: $sbom_json_file"
+      log_warn "Text SBOM is still available at: $sbom_file"
+    fi
   else
-    log WARN "Failed to generate JSON SBOM ($sbom_json_file)"
-  fi
-  else
-  log WARN "python3 not available; skipping JSON SBOM generation"
+    log_warn "python3 not available - skipping JSON SBOM generation"
+    log_info "Text SBOM available at: $sbom_file"
   fi
 
-  # README in outputs/<SPEC_NAME>
-  log INFO "Write README in Outputs directory..."
+  # Generate README documentation in outputs directory
+  log_info "Generating README documentation"
   if [[ -n "${RUN_OUT_DIR:-}" ]]; then
     {
       echo "# Air-Gapped Image Prep Summary"
@@ -5801,17 +6024,31 @@ PY
       echo "  - DNS: ${defaultDnsCsv}"
       echo "  - Search Domains: ${defaultSearchCsv:-<none>}"
       echo
-      echo "Next:"
-      echo "  - Shut down this VM and clone it for use in the air-gapped environment."
-      echo "  - Then run this script in 'server' or 'agent' mode on the clone(s)."
+      echo "Next Steps:"
+      echo "  - Shut down this VM and clone it for use in the air-gapped environment"
+      echo "  - Run this script in 'server' or 'agent' mode on the clone(s)"
     } > "$RUN_OUT_DIR/README.txt"
-    log INFO "Wrote $RUN_OUT_DIR/README.txt"
+    log_info "README written to: $RUN_OUT_DIR/README.txt"
+    metrics_increment "readme_created"
   fi
 
- # Image prep complete
-  log INFO "Image prep complete..."
-  echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
-  echo "        - You can now install RKE2 offline using the cached tarballs."
+  # Display final summary and metrics
+  log_success "========================================="
+  log_success "Image preparation completed successfully"
+  log_success "========================================="
+  
+  metrics_summary "Image Preparation Summary"
+  
+  log_info ""
+  log_info "Artifacts cached in: $DOWNLOADS_DIR"
+  log_info "SBOM available at: $sbom_file"
+  log_info "Security score: ${security_score}/100"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Review SBOM and verify all artifacts"
+  log_info "  2. Clone this VM for air-gapped deployment"
+  log_info "  3. Run 'server' or 'agent' action on cloned nodes"
+  
   echo
   prompt_reboot
 }
@@ -6648,13 +6885,38 @@ action_add_server() {
 # Returns :
 #   Returns 0 when all checks pass; non-zero otherwise.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_verify
+# Description: Verify that the node meets RKE2 prerequisites (read-only check)
+# Parameters:
+#   None (validates system state)
+# Returns: 
+#   0 - All prerequisites met
+#   2 - Verification failures detected
+# Usage: action_verify
+# Dependencies: verify_prereqs, log_info, log_success, log_error
+# Changes from Original:
+#   - Added Phase 1 logging utilities for consistency
+#   - Improved error messages with actionable guidance
+#=============================================================================
 action_verify() {
   load_site_defaults
-if verify_prereqs; then
-    log INFO "VERIFY PASSED: Node meets RKE2 prerequisites."
+  
+  log_info "Starting RKE2 prerequisites verification"
+  log_info "This is a read-only check - no changes will be made to the system"
+  
+  if verify_prereqs; then
+    log_success "VERIFY PASSED: Node meets all RKE2 prerequisites"
+    log_info "Next steps:"
+    log_info "  - Run 'image' action to prepare golden image"
+    log_info "  - Run 'server' or 'agent' action to deploy RKE2"
     exit 0
   else
-    log ERROR "VERIFY FAILED: See messages above and fix issues."
+    log_error "VERIFY FAILED: One or more prerequisites not met"
+    log_error "Remediation steps:"
+    log_error "  - Review error messages above for specific issues"
+    log_error "  - Install missing dependencies or fix configuration"
+    log_error "  - Re-run verification: $0 verify"
     exit 2
   fi
 }
@@ -6808,46 +7070,88 @@ action_taint_node() {
 # Returns :
 #   Exits on failure.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_custom_ca
+# Description: Generate bootstrap token from custom CA configuration
+# Parameters:
+#   None (reads from CONFIG_FILE global)
+# Returns: 
+#   0 - Success (token generated)
+#   1 - Token generation failure
+#   5 - Validation failure (missing config or invalid kind)
+# Usage: action_custom_ca -f <config.yaml>
+# Dependencies: validate_non_empty, validate_file_exists, log_info, log_success, log_error
+# Changes from Original:
+#   - Added validation utilities for prerequisites
+#   - Enhanced error messages with remediation steps
+#   - Added structured logging with Phase 1 utilities
+#=============================================================================
 action_custom_ca() {
   initialize_action_context false "custom-ca"
 
-  if [[ -z "${CONFIG_FILE:-}" ]]; then
-    log ERROR "Custom-CA action requires a YAML file (-f <file>)"
+  log_info "Starting custom CA bootstrap token generation"
+  
+  # Validate prerequisites using Phase 1 utilities
+  if ! validate_non_empty "${CONFIG_FILE:-}" "CONFIG_FILE"; then
+    log_error "Custom-CA action requires a YAML configuration file"
+    log_error "Remediation: Provide config file with -f flag"
+    log_error "Example: $0 custom-ca -f examples/custom-ca-example.yaml"
+    exit 5
+  fi
+  
+  if ! validate_file_exists "$CONFIG_FILE"; then
+    log_error "Configuration file not found: $CONFIG_FILE"
+    log_error "Remediation: Verify file path and permissions"
     exit 5
   fi
 
   local kind_folded="${YAML_KIND:-}"
   kind_folded="${kind_folded,,}"
   if [[ "${kind_folded//-/}" != "customca" ]]; then
-    log ERROR "Custom-CA action expects kind: CustomCA|Custom-CA|customca|custom-CA|custom-ca (found: ${YAML_KIND:-<none>})"
+    log_error "Invalid YAML kind for custom-ca action"
+    log_error "Expected: kind: CustomCA (or custom-ca, Custom-CA variants)"
+    log_error "Found: ${YAML_KIND:-<none>}"
+    log_error "Remediation: Update YAML file with correct kind field"
     exit 5
   fi
 
-  log INFO "Loading custom CA from YAML..."
+  log_info "Loading custom CA configuration from: $CONFIG_FILE"
   load_custom_ca_from_config "$CONFIG_FILE" "" 1
 
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
-    log ERROR "spec.customCA must define at least rootCrt or intermediateCrt"
+    log_error "Custom CA configuration incomplete"
+    log_error "spec.customCA must define at least one of:"
+    log_error "  - rootCrt: Root CA certificate"
+    log_error "  - intermediateCrt: Intermediate CA certificate"
+    log_error "Remediation: Add certificate paths to YAML spec.customCA section"
     exit 5
   fi
 
-  log INFO "Generating bootstrap token from custom CA..."
+  log_info "Generating bootstrap token from custom CA"
+  report_progress "Generating token" 1 1
 
   local TOKEN="" TOKEN_FILE=""
   generate_bootstrap_token
   TOKEN=$token
 
   if [[ -z "$TOKEN" ]]; then
-    log ERROR "Failed to generate bootstrap token."
+    log_error "Bootstrap token generation failed"
+    log_error "Remediation steps:"
+    log_error "  - Verify CA certificate files are valid PEM format"
+    log_error "  - Check file permissions on certificate files"
+    log_error "  - Review logs for detailed error messages"
     exit 1
-  else
-    TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
-    echo "$TOKEN" > "$TOKEN_FILE"
-    chmod 600 "$TOKEN_FILE"
-    log INFO "Token saved to $TOKEN_FILE"
   fi
-
-  log INFO "Generated bootstrap token successfully."
+  
+  TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
+  echo "$TOKEN" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+  
+  log_success "Bootstrap token generated successfully"
+  log_info "Token saved to: $TOKEN_FILE (permissions: 600)"
+  log_info "Next steps:"
+  log_info "  - Use this token for server/agent bootstrap"
+  log_info "  - Keep token file secure - it provides cluster access"
 }
 
 # ================================================================================================
