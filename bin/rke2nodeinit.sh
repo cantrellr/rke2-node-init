@@ -198,6 +198,586 @@ LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 NERDCTL_FULL_TGZ=""
 NERDCTL_STD_TGZ=""
 
+# ==============================================================================
+# PHASE 1 REDESIGN: Core Utilities and Infrastructure
+# ==============================================================================
+# Purpose: Foundational utilities adopting rke2imageprep.sh design patterns
+# Author: GitHub Copilot (Phase 1 Implementation)
+# Date: 2025-11-16
+# ==============================================================================
+
+# ==============================================================================
+# SECTION 1: Enhanced Logging Utilities
+# Purpose: Structured logging with multiple severity levels
+# ==============================================================================
+
+#=============================================================================
+# Function: log_info
+# Description: Log informational messages to stdout and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_info "Operation started" "with parameter: $param"
+#=============================================================================
+log_info() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[INFO] $msg"
+  printf "%s %s rke2nodeinit[%d]: INFO: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_warn
+# Description: Log warning messages to stdout and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_warn "Using default credentials" "Override recommended"
+#=============================================================================
+log_warn() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[WARN] $msg"
+  printf "%s %s rke2nodeinit[%d]: WARN: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_error
+# Description: Log error messages to stderr and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_error "Operation failed" "Exit code: $rc"
+#=============================================================================
+log_error() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[ERROR] $msg" >&2
+  printf "%s %s rke2nodeinit[%d]: ERROR: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_success
+# Description: Log success messages with visual indicator
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_success "Download completed" "File: $filename"
+#=============================================================================
+log_success() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[✓] $msg"
+  printf "%s %s rke2nodeinit[%d]: SUCCESS: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+# ==============================================================================
+# SECTION 2: Dependency Management
+# Purpose: Auto-detect, validate, and install system dependencies
+# Best Practice: Interactive installation with user consent and multi-OS support
+# ==============================================================================
+
+#=============================================================================
+# Function: detect_os
+# Description: Detect the operating system distribution for package management
+# Parameters: None
+# Returns: 
+#   Prints OS identifier to stdout (ubuntu|debian|rhel|centos|fedora|rocky|almalinux|unknown)
+#   Exit code 0 on success, 1 if OS cannot be detected
+# Usage: OS=$(detect_os)
+# Best Practices:
+#   - Uses /etc/os-release for standardized detection
+#   - Normalizes to lowercase for consistent comparison
+#=============================================================================
+detect_os() {
+  if [[ -f /etc/os-release ]]; then
+    # Source the file to get ID variable
+    . /etc/os-release
+    echo "${ID}"
+    return 0
+  else
+    echo "unknown"
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: check_dependencies
+# Description: Check for missing system dependencies without installing
+# Parameters:
+#   $@ - List of command names to check (e.g., curl wget jq)
+# Returns:
+#   0 if all dependencies are present
+#   1 if any dependencies are missing
+#   Populates global array MISSING_DEPS with missing commands
+# Usage: 
+#   if check_dependencies curl wget jq; then
+#     echo "All dependencies present"
+#   fi
+# Best Practices:
+#   - Non-invasive check (does not modify system)
+#   - Uses command -v for POSIX compliance
+#   - Silent operation (no output on success)
+#=============================================================================
+check_dependencies() {
+  local required_deps=("$@")
+  MISSING_DEPS=()
+  
+  local dep
+  for dep in "${required_deps[@]}"; do
+    if ! command -v "$dep" &> /dev/null; then
+      MISSING_DEPS+=("$dep")
+    fi
+  done
+  
+  if [ ${#MISSING_DEPS[@]} -eq 0 ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: install_dependencies_interactive
+# Description: Interactively install missing dependencies with user consent
+# Parameters:
+#   $@ - List of package names to check and potentially install
+# Returns:
+#   0 if all dependencies are satisfied (already installed or newly installed)
+#   1 if user declines installation or installation fails
+# Usage: install_dependencies_interactive curl wget jq
+# Dependencies: detect_os, check_dependencies
+# Best Practices:
+#   - Always prompts for user consent before system modifications
+#   - Supports multiple package managers (apt, dnf, yum)
+#   - Verifies successful installation after completion
+#   - Provides clear feedback at each step
+#=============================================================================
+install_dependencies_interactive() {
+  local required_deps=("$@")
+  
+  # Check which dependencies are missing
+  if check_dependencies "${required_deps[@]}"; then
+    return 0  # All dependencies already present
+  fi
+  
+  # Display missing dependencies
+  echo ""
+  echo "Missing dependencies detected: ${MISSING_DEPS[*]}"
+  echo ""
+  
+  # Prompt for installation (skip if AUTO_YES is set)
+  if [[ "${AUTO_YES:-0}" -eq 1 ]]; then
+    echo "Auto-confirm enabled (-y flag); installing dependencies automatically..."
+  else
+    read -p "Would you like to install missing dependencies now? (y/n): " -n 1 -r
+    echo ""
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo "Installation cancelled. Please install dependencies manually:"
+      local dep
+      for dep in "${MISSING_DEPS[@]}"; do
+        echo "  - $dep"
+      done
+      return 1
+    fi
+  fi
+  
+  # Detect OS for package manager selection
+  local os_id
+  os_id=$(detect_os)
+  
+  if [[ "$os_id" == "unknown" ]]; then
+    log_error "Cannot detect OS. Please install dependencies manually:"
+    local dep
+    for dep in "${MISSING_DEPS[@]}"; do
+      echo "  - $dep"
+    done
+    return 1
+  fi
+  
+  echo "Installing dependencies..."
+  
+  # Install based on OS
+  case "$os_id" in
+    ubuntu|debian)
+      echo "Detected Debian/Ubuntu - using apt..."
+      export DEBIAN_FRONTEND=noninteractive
+      if ! sudo apt-get update -qq; then
+        log_error "apt-get update failed"
+        return 1
+      fi
+      if ! sudo apt-get install -y "${MISSING_DEPS[@]}"; then
+        log_error "apt-get install failed"
+        return 1
+      fi
+      ;;
+    rhel|centos|fedora|rocky|almalinux)
+      echo "Detected RHEL/CentOS/Fedora family - using dnf/yum..."
+      # Try dnf first (newer systems), fall back to yum
+      if command -v dnf &> /dev/null; then
+        if ! sudo dnf install -y "${MISSING_DEPS[@]}"; then
+          log_error "dnf install failed"
+          return 1
+        fi
+      elif command -v yum &> /dev/null; then
+        if ! sudo yum install -y "${MISSING_DEPS[@]}"; then
+          log_error "yum install failed"
+          return 1
+        fi
+      else
+        log_error "No package manager found (dnf or yum)"
+        return 1
+      fi
+      ;;
+    *)
+      log_error "Unsupported OS: $os_id"
+      echo "Please install dependencies manually:"
+      local dep
+      for dep in "${MISSING_DEPS[@]}"; do
+        echo "  - $dep"
+      done
+      return 1
+      ;;
+  esac
+  
+  # Verify installation
+  echo "Verifying installation..."
+  local install_failed=false
+  local dep
+  for dep in "${MISSING_DEPS[@]}"; do
+    if ! command -v "$dep" &> /dev/null; then
+      log_error "$dep installation verification failed"
+      install_failed=true
+    else
+      echo "  ✓ $dep installed successfully"
+    fi
+  done
+  
+  if [ "$install_failed" = true ]; then
+    return 1
+  fi
+  
+  echo ""
+  echo "All dependencies installed successfully!"
+  echo ""
+  return 0
+}
+
+# ==============================================================================
+# SECTION 3: Operation Metrics Tracking
+# Purpose: Track success/failure counts for batch operations
+# Best Practice: Provides transparency and actionable summaries
+# ==============================================================================
+
+# Global associative array for metrics (declare once)
+declare -gA METRICS 2>/dev/null || true
+
+#=============================================================================
+# Function: metrics_init
+# Description: Initialize metrics counters for a new operation
+# Parameters:
+#   $1 - Operation name (optional, default: "operation")
+# Returns: Always returns 0
+# Usage: metrics_init "image_download"
+# Best Practices:
+#   - Call at the start of each batch operation
+#   - Resets all counters to ensure clean state
+#=============================================================================
+metrics_init() {
+  local operation_name="${1:-operation}"
+  METRICS[operation]="$operation_name"
+  METRICS[total]=0
+  METRICS[success]=0
+  METRICS[failed]=0
+  METRICS[skipped]=0
+  METRICS[start_time]=$(date +%s)
+}
+
+#=============================================================================
+# Function: metrics_increment
+# Description: Increment a specific metric counter
+# Parameters:
+#   $1 - Metric name (total|success|failed|skipped)
+#   $2 - Increment amount (optional, default: 1)
+# Returns: Always returns 0
+# Usage: 
+#   metrics_increment total
+#   metrics_increment success
+#   metrics_increment failed
+#   metrics_increment skipped
+# Best Practices:
+#   - Call after each operation completes
+#   - Use consistent metric names across codebase
+#=============================================================================
+metrics_increment() {
+  local metric_name="$1"
+  local increment="${2:-1}"
+  
+  # Initialize if not set
+  if [[ -z "${METRICS[$metric_name]:-}" ]]; then
+    METRICS[$metric_name]=0
+  fi
+  
+  METRICS[$metric_name]=$((METRICS[$metric_name] + increment))
+}
+
+#=============================================================================
+# Function: metrics_get
+# Description: Retrieve the current value of a metric
+# Parameters:
+#   $1 - Metric name
+# Returns: Prints the metric value to stdout
+# Usage: current_count=$(metrics_get success)
+#=============================================================================
+metrics_get() {
+  local metric_name="$1"
+  echo "${METRICS[$metric_name]:-0}"
+}
+
+#=============================================================================
+# Function: metrics_summary
+# Description: Display a formatted summary of operation metrics
+# Parameters:
+#   $1 - Optional title (default: "Operation Summary")
+# Returns: Always returns 0
+# Usage: metrics_summary "Download Summary"
+# Best Practices:
+#   - Call at the end of batch operations
+#   - Provides consistent formatting across all operations
+#   - Calculates and displays elapsed time
+#=============================================================================
+metrics_summary() {
+  local title="${1:-Operation Summary}"
+  local operation="${METRICS[operation]:-operation}"
+  local total="${METRICS[total]:-0}"
+  local success="${METRICS[success]:-0}"
+  local failed="${METRICS[failed]:-0}"
+  local skipped="${METRICS[skipped]:-0}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  local elapsed=$((end_time - start_time))
+  
+  echo ""
+  echo "=========================================="
+  echo "$title"
+  echo "=========================================="
+  echo "Operation:  $operation"
+  echo "Total:      $total"
+  echo "Successful: $success"
+  echo "Failed:     $failed"
+  if [[ $skipped -gt 0 ]]; then
+    echo "Skipped:    $skipped"
+  fi
+  echo "Duration:   ${elapsed}s"
+  echo "=========================================="
+  echo ""
+}
+
+#=============================================================================
+# Function: metrics_should_fail
+# Description: Determine if operation should return failure based on metrics
+# Parameters: None
+# Returns: 
+#   0 if operation should be considered successful (no failures)
+#   1 if operation should be considered failed (has failures)
+# Usage: 
+#   metrics_summary
+#   return $(metrics_should_fail)
+# Best Practices:
+#   - Use as final return value for batch operations
+#   - Considers operation failed if any items failed
+#=============================================================================
+metrics_should_fail() {
+  local failed="${METRICS[failed]:-0}"
+  if [[ $failed -eq 0 ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# ==============================================================================
+# SECTION 4: Enhanced Validation Utilities
+# Purpose: Input validation with improved error messages
+# ==============================================================================
+
+#=============================================================================
+# Function: validate_non_empty
+# Description: Validate that a required parameter is not empty
+# Parameters:
+#   $1 - Value to validate
+#   $2 - Parameter name (for error message)
+# Returns: 0 if valid, 1 if empty
+# Usage: validate_non_empty "$REGISTRY" "registry" || return 1
+#=============================================================================
+validate_non_empty() {
+  local value="$1"
+  local param_name="$2"
+  
+  if [[ -z "$value" ]]; then
+    log_error "Required parameter is empty: $param_name"
+    log_error "Please provide --${param_name} or set in YAML config"
+    return 1
+  fi
+  return 0
+}
+
+#=============================================================================
+# Function: validate_file_exists
+# Description: Validate that a required file exists and is readable
+# Parameters:
+#   $1 - File path to validate
+#   $2 - File description (for error message)
+# Returns: 0 if valid, 1 if missing or unreadable
+# Usage: validate_file_exists "$CONFIG_FILE" "configuration file" || return 1
+#=============================================================================
+validate_file_exists() {
+  local file_path="$1"
+  local description="$2"
+  
+  if [[ ! -f "$file_path" ]]; then
+    log_error "Required $description not found: $file_path"
+    return 1
+  fi
+  
+  if [[ ! -r "$file_path" ]]; then
+    log_error "Required $description is not readable: $file_path"
+    log_error "Check file permissions: ls -la $file_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+#=============================================================================
+# Function: validate_directory_writable
+# Description: Validate that a directory exists and is writable
+# Parameters:
+#   $1 - Directory path to validate
+#   $2 - Directory description (for error message)
+# Returns: 0 if valid, 1 if missing or not writable
+# Usage: validate_directory_writable "$STAGE_DIR" "staging directory" || return 1
+#=============================================================================
+validate_directory_writable() {
+  local dir_path="$1"
+  local description="$2"
+  
+  if [[ ! -d "$dir_path" ]]; then
+    log_error "Required $description does not exist: $dir_path"
+    log_error "Create it with: mkdir -p $dir_path"
+    return 1
+  fi
+  
+  if [[ ! -w "$dir_path" ]]; then
+    log_error "Required $description is not writable: $dir_path"
+    log_error "Check permissions: ls -lad $dir_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+# ==============================================================================
+# SECTION 5: Progress Reporting Utilities
+# Purpose: Provide clear feedback during long-running operations
+# ==============================================================================
+
+#=============================================================================
+# Function: report_progress
+# Description: Report progress for batch operations with count and percentage
+# Parameters:
+#   $1 - Current item number
+#   $2 - Total item count
+#   $3 - Item description
+# Returns: Always returns 0
+# Usage: report_progress 5 20 "Downloading image: nginx:latest"
+# Best Practices:
+#   - Provides visual feedback during long operations
+#   - Includes percentage completion
+#   - Consistent format across all operations
+#=============================================================================
+report_progress() {
+  local current="$1"
+  local total="$2"
+  local description="$3"
+  local percentage=$((current * 100 / total))
+  
+  echo "[$current/$total - ${percentage}%] $description"
+}
+
+#=============================================================================
+# Function: report_item_success
+# Description: Report successful completion of an individual item
+# Parameters:
+#   $1 - Item description
+#   $2 - Optional detail message
+# Returns: Always returns 0
+# Usage: 
+#   report_item_success "nginx:latest" "245MB"
+#   report_item_success "Configuration applied"
+#=============================================================================
+report_item_success() {
+  local description="$1"
+  local detail="${2:-}"
+  
+  if [[ -n "$detail" ]]; then
+    echo "  ✓ $description ($detail)"
+  else
+    echo "  ✓ $description"
+  fi
+}
+
+#=============================================================================
+# Function: report_item_failure
+# Description: Report failure of an individual item
+# Parameters:
+#   $1 - Item description
+#   $2 - Optional error message
+# Returns: Always returns 0
+# Usage: 
+#   report_item_failure "nginx:latest" "Download timeout"
+#   report_item_failure "Configuration validation failed"
+#=============================================================================
+report_item_failure() {
+  local description="$1"
+  local detail="${2:-}"
+  
+  if [[ -n "$detail" ]]; then
+    echo "  ✗ $description (Error: $detail)"
+  else
+    echo "  ✗ $description"
+  fi
+}
+
+#=============================================================================
+# Function: report_item_skipped
+# Description: Report that an item was skipped
+# Parameters:
+#   $1 - Item description
+#   $2 - Reason for skipping
+# Returns: Always returns 0
+# Usage: report_item_skipped "nginx:latest" "Already present"
+#=============================================================================
+report_item_skipped() {
+  local description="$1"
+  local reason="${2:-Already present}"
+  
+  echo "  ⊘ $description (Skipped: $reason)"
+}
+
+# ==============================================================================
+# END PHASE 1 REDESIGN SECTION
+# ==============================================================================
+
 # ------------------------------------------------------------------------------
 # Function: print_help
 # Purpose : Emit the usage banner, supported YAML schema, and command examples
