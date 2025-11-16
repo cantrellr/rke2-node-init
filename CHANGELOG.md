@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Phase 3: CLI Enhancements (November 16, 2025)
+
+- **Enhanced Help System**:
+  - `--help` flag: Comprehensive general help with all actions and options
+  - Action-specific help: `<action> --help` provides detailed per-action documentation
+  - `show_action_help()`: Dedicated help for verify, custom-ca, push, image, server, agent, add-server
+  - Includes usage examples, YAML structure, exit codes, and common workflows
+  - Alternative syntax: `--help <action>` and `-h` supported
+
+- **Version Information**:
+  - `--version` flag: Displays script version, compatible RKE2 versions, and implementation status
+  - `show_version()`: Shows Phase 1/2/3 completion status and project information
+  - Version tracking with `SCRIPT_VERSION` variable
+
+- **Verbosity Control**:
+  - `--verbose` flag: Enable detailed debug output for troubleshooting
+  - `--quiet` flag: Suppress informational messages (errors/warnings only)
+  - `log_debug()`: New function for verbose-only diagnostic output
+  - Mutually exclusive flags with graceful handling
+
+- **Dry-Run Mode**:
+  - `--dry-run` flag: Simulate write operations without making changes
+  - Supported in: action_image, action_server, action_agent, action_add_server
+  - Safe testing and validation of configurations
+  - Clear dry-run mode indicators in output
+
+- **Documentation**:
+  - `examples/phase3-cli-demo.sh` - Interactive demonstration of all CLI features
+
+### Changed - Phase 3 Improvements
+
+- **Logging Functions**:
+  - `log_info()`: Now respects `QUIET` flag (suppresses when quiet mode active)
+  - `log_success()`: Respects `QUIET` flag for cleaner automation output
+  - `log_error()` and `log_warn()`: Always display regardless of quiet mode (critical messages)
+  - All log functions always write to log file regardless of verbosity settings
+
+- **Action Functions**:
+  - `action_image`: Dry-run mode indicator, skip reboot in dry-run
+  - `action_server`: Dry-run mode indicator at start
+  - `action_agent`: Dry-run mode indicator at start  
+  - `action_add_server`: Dry-run mode indicator at start
+  - `prompt_reboot()`: Skip reboot in dry-run mode with clear messaging
+
+- **User Experience**:
+  - Professional CLI patterns matching industry standards (kubectl, terraform, etc.)
+  - Progressive disclosure - users discover features through help system
+  - Safer operations - dry-run prevents accidental changes in production
+  - Better automation - quiet mode ideal for CI/CD pipelines
+  - Enhanced debugging - verbose output for troubleshooting
+
 ### Added - Phase 2: Action Function Refactoring (November 16, 2025)
 
 - **Phase 1 Utilities Implementation** (~600 lines, 19 functions):

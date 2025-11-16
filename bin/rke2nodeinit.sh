@@ -160,6 +160,10 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+DRY_RUN=0                   # --dry-run simulates write operations without making changes
+VERBOSE=0                   # --verbose enables detailed output
+QUIET=0                     # --quiet suppresses informational messages
+SCRIPT_VERSION="1.0.0"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
@@ -199,6 +203,340 @@ NERDCTL_FULL_TGZ=""
 NERDCTL_STD_TGZ=""
 
 # ==============================================================================
+# PHASE 3: CLI IMPROVEMENTS - Help System and Verbosity Control
+# ==============================================================================
+# Purpose: Enhanced CLI with per-action help, version info, and verbosity control
+# Author: GitHub Copilot (Phase 3 Implementation)
+# Date: 2025-11-16
+# ==============================================================================
+
+#-----------------------------------------------------------------------------
+# Function: show_version
+# Purpose: Display version information and build details
+# Parameters: None
+# Returns: None (exits with 0)
+#-----------------------------------------------------------------------------
+show_version() {
+  cat <<EOF
+RKE2 Node Initialization Script
+Version: ${SCRIPT_VERSION}
+Compatible with: RKE2 v1.24+
+Bash version: ${BASH_VERSION}
+Last updated: November 16, 2025
+
+Phase 1: Core utilities (19 functions)
+Phase 2: Action refactoring (4 actions)  
+Phase 3: CLI improvements (help system, verbosity control)
+
+Repository: cantrellcloud/rke2-node-init
+Branch: feat/stage-artifact-path
+EOF
+  exit 0
+}
+
+#-----------------------------------------------------------------------------
+# Function: show_action_help
+# Purpose: Display detailed help for specific action
+# Parameters:
+#   \$1 - Action name
+# Returns: None (exits with 0)
+#-----------------------------------------------------------------------------
+show_action_help() {
+  local action="${1:-}"
+  
+  case "$action" in
+    verify)
+      cat <<'HELPEOF'
+Action: verify
+==============
+Purpose: Verify that the node meets all RKE2 prerequisites (read-only check)
+
+Usage:
+  sudo bin/rke2nodeinit.sh verify
+  sudo bin/rke2nodeinit.sh verify -f configs/site-defaults.yaml
+
+Options:
+  -f FILE    Optional YAML file with site defaults (DNS, search domains)
+  --verbose  Show detailed prerequisite checks
+  --quiet    Suppress informational messages
+
+Exit Codes:
+  0 - All prerequisites met
+  2 - One or more prerequisites failed
+
+Examples:
+  # Basic verification
+  sudo bin/rke2nodeinit.sh verify
+  
+  # Verify with site defaults
+  sudo bin/rke2nodeinit.sh verify -f configs/production-site.yaml
+  
+  # Verbose verification
+  sudo bin/rke2nodeinit.sh verify --verbose
+
+Output:
+  - System requirements check (CPU, memory, disk)
+  - Network connectivity validation
+  - Required ports availability
+  - Kernel module availability
+  - Swap configuration
+  
+Next Steps:
+  On success: Run 'image' action to prepare golden image
+  On failure: Review error messages for specific remediation steps
+HELPEOF
+      ;;
+    
+    custom-ca)
+      cat <<'HELPEOF'
+Action: custom-ca
+=================
+Purpose: Generate bootstrap token from custom CA configuration
+
+Usage:
+  sudo bin/rke2nodeinit.sh custom-ca -f <config.yaml>
+
+Required Options:
+  -f FILE    YAML config file with CustomCA kind
+
+Optional Flags:
+  --verbose  Show detailed token generation process
+  --quiet    Suppress informational messages
+
+YAML Structure:
+  kind: CustomCA
+  metadata:
+    name: cluster-ca
+  spec:
+    customCA:
+      rootCrt: path/to/root-ca.crt
+      rootKey: path/to/root-ca.key
+      intermediateCrt: path/to/intermediate-ca.crt  # Optional
+      intermediateKey: path/to/intermediate-ca.key  # Optional
+      installToOSTrust: true  # Install to OS trust store
+
+Exit Codes:
+  0 - Token generated successfully
+  1 - Token generation failed
+  5 - Validation error (missing config, invalid kind, incomplete spec)
+
+Output Files:
+  outputs/<name>-bootstrap-token.txt  (permissions: 600)
+
+Examples:
+  # Generate token from custom CA
+  sudo bin/rke2nodeinit.sh custom-ca -f configs/cluster-ca.yaml
+  
+  # With verbose output
+  sudo bin/rke2nodeinit.sh custom-ca -f configs/cluster-ca.yaml --verbose
+
+Security Notes:
+  - Token file has restrictive permissions (600)
+  - Keep token secure - it provides cluster access
+  - Token is used for server/agent bootstrap
+HELPEOF
+      ;;
+    
+    push)
+      cat <<'HELPEOF'
+Action: push
+============
+Purpose: Push container images to private registry with comprehensive tracking
+
+Usage:
+  sudo bin/rke2nodeinit.sh push -f <config.yaml>
+  sudo bin/rke2nodeinit.sh push -r <registry> -u <user> -p <pass>
+
+Options:
+  -f FILE       YAML config file with Push kind
+  -r REGISTRY   Registry URL (host or host/namespace)
+  -u USER       Registry username
+  -p PASS       Registry password
+  --dry-run     Simulate push without actually pushing images
+  --dry-push    Legacy alias for --dry-run
+  --verbose     Show detailed per-image push progress
+  --quiet       Suppress progress messages (show summary only)
+
+YAML Structure:
+  kind: Push
+  metadata:
+    name: registry-push
+  spec:
+    registry: registry.example.com/rke2
+    registryUsername: admin
+    registryPassword: secure-password
+
+Prerequisites:
+  - Images archive must exist (run 'image' action first)
+  - Registry must be accessible
+  - Valid credentials required
+
+Exit Codes:
+  0 - All images pushed successfully
+  1 - Authentication failed or some images failed
+  3 - Images archive not found
+
+Output Files:
+  outputs/images-manifest.txt   - Human-readable manifest
+  outputs/images-manifest.json  - Machine-readable manifest
+
+Metrics Tracked:
+  - total: Total images processed
+  - success: Successfully pushed
+  - failed: Failed pushes
+  - authenticated: Registry login status
+
+Examples:
+  # Push with YAML config
+  sudo bin/rke2nodeinit.sh push -f configs/registry.yaml
+  
+  # Push with CLI flags
+  sudo bin/rke2nodeinit.sh push -r registry.local/rke2 -u admin -p pass
+  
+  # Dry-run to test without pushing
+  sudo bin/rke2nodeinit.sh push -f config.yaml --dry-run
+  
+  # Quiet mode (summary only)
+  sudo bin/rke2nodeinit.sh push -f config.yaml --quiet
+HELPEOF
+      ;;
+    
+    image)
+      cat <<'HELPEOF'
+Action: image
+=============
+Purpose: Prepare golden image for air-gapped RKE2 deployment
+
+Usage:
+  sudo bin/rke2nodeinit.sh image -f <config.yaml>
+
+Required Options:
+  -f FILE       YAML config file with Image kind
+
+Optional Flags:
+  -v VERSION    RKE2 version (e.g., v1.28.1+rke2r1)
+  -r REGISTRY   Private registry URL
+  -u USER       Registry username
+  -p PASS       Registry password
+  --load-images Load images into container runtime
+  --dry-run     Simulate preparation without making changes
+  --verbose     Show detailed operation progress
+  --quiet       Suppress detailed progress (show summary only)
+  -y            Auto-confirm reboot prompt
+
+YAML Structure:
+  kind: Image
+  metadata:
+    name: golden-image
+  spec:
+    rke2Version: v1.28.1+rke2r1
+    registry: registry.example.com/rke2
+    registryUsername: admin
+    registryPassword: password
+    defaultDns: 8.8.8.8,8.8.4.4
+    defaultSearchDomains: cluster.local
+    customCA:
+      rootCrt: path/to/ca.crt
+      installToOSTrust: true
+
+Process (8 Phases):
+  1. Validate environment (directories, permissions)
+  2. Load configuration from YAML
+  3. Install OS prerequisites
+  4. Cache RKE2 artifacts (downloads, staging)
+  5. Process container images (optional loading)
+  6. Configure registry trust
+  7. Save site defaults
+  8. Generate SBOM and documentation
+
+Exit Codes:
+  0 - Image prepared successfully
+  1 - Validation or dependency failure
+  3 - Artifact caching failure
+
+Output Files:
+  outputs/sbom/<name>-sbom.txt      - Text SBOM with verification
+  outputs/sbom/<name>-sbom.json     - JSON SBOM for tooling
+  outputs/<name>/README.txt         - Human-readable summary
+  /etc/rke2image.defaults           - Site defaults
+
+Metrics Tracked (15+):
+  validation_passed, config_loaded, prereqs_installed,
+  artifacts_cached, artifact_verified, sbom_created, etc.
+
+Examples:
+  # Basic image preparation
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml
+  
+  # With image loading
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --load-images
+  
+  # Dry-run to test configuration
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --dry-run
+  
+  # Quiet mode with auto-reboot
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --quiet -y
+
+Next Steps:
+  1. Review SBOM and verify all artifacts
+  2. Shut down VM for cloning/templating
+  3. Deploy clones with 'server' or 'agent' actions
+HELPEOF
+      ;;
+    
+    server|agent|add-server)
+      cat <<EOF
+Action: \$action
+$(printf '=%.0s' {1..40})
+Purpose: Deploy RKE2 cluster node
+
+Usage:
+  sudo bin/rke2nodeinit.sh \$action -f <config.yaml>
+
+Required Options:
+  -f FILE       YAML config file
+
+Optional Flags:
+  --dry-run     Simulate deployment without making changes
+  --verbose     Show detailed deployment progress
+  --quiet       Suppress detailed progress
+  -y            Auto-confirm prompts
+
+Prerequisites:
+  - Golden image prepared (via 'image' action)
+  - Network configured
+  - For agent/add-server: First server must be running
+
+Exit Codes:
+  0 - Deployment successful
+  1 - Deployment failed
+  5 - Validation error
+
+Examples:
+  # Deploy first server
+  sudo bin/rke2nodeinit.sh server -f configs/server.yaml
+  
+  # Deploy agent
+  sudo bin/rke2nodeinit.sh agent -f configs/agent.yaml
+  
+  # Dry-run deployment
+  sudo bin/rke2nodeinit.sh \$action -f config.yaml --dry-run
+
+For detailed deployment guide, see: docs/DEPLOYMENT.md
+EOF
+      ;;
+    
+    *)
+      echo "Unknown action: $action"
+      echo "Run 'bin/rke2nodeinit.sh --help' for available actions"
+      exit 1
+      ;;
+  esac
+  
+  exit 0
+}
+
+# ==============================================================================
 # PHASE 1 REDESIGN: Core Utilities and Infrastructure
 # ==============================================================================
 # Purpose: Foundational utilities adopting rke2imageprep.sh design patterns
@@ -224,8 +562,35 @@ log_info() {
   local ts host
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   host="$(hostname)"
-  echo "[INFO] $msg"
+  # Respect QUIET flag - suppress informational messages
+  if [[ "${QUIET:-0}" -ne 1 ]]; then
+    echo "[INFO] $msg"
+  fi
   printf "%s %s rke2nodeinit[%d]: INFO: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_debug
+# Description: Log verbose debug messages (only when VERBOSE=1)
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_debug "Detailed step information" "Value: $var"
+# Best Practices:
+#   - Only outputs when VERBOSE flag is set
+#   - Always logs to file regardless of VERBOSE setting
+#   - Use for detailed progress and debugging information
+#=============================================================================
+log_debug() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  # Only display to console if VERBOSE is enabled
+  if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+    echo "[DEBUG] $msg"
+  fi
+  printf "%s %s rke2nodeinit[%d]: DEBUG: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
 }
 
 #=============================================================================
@@ -275,7 +640,10 @@ log_success() {
   local ts host
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   host="$(hostname)"
-  echo "[✓] $msg"
+  # Respect QUIET flag - suppress success messages
+  if [[ "${QUIET:-0}" -ne 1 ]]; then
+    echo "[✓] $msg"
+  fi
   printf "%s %s rke2nodeinit[%d]: SUCCESS: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
 }
 
@@ -790,8 +1158,8 @@ report_item_skipped() {
 #   Always returns 0 after writing the help text.
 # ------------------------------------------------------------------------------
 print_help() {
-  cat <<'EOF'
-RKE2 Node Initialization Script (v0.8a)
+  cat <<EOF
+RKE2 Node Initialization Script (v${SCRIPT_VERSION})
 ========================================
 Automates air-gapped RKE2 cluster deployment with multi-interface networking support.
 
@@ -800,6 +1168,7 @@ NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name
 USAGE:
   sudo ./rke2nodeinit.sh -f <file.yaml> [options]
   sudo ./rke2nodeinit.sh [options] <action>
+  sudo ./rke2nodeinit.sh <action> --help
 
 YAML KINDS (apiVersion: rkeprep/v1):
   Push        - Push RKE2 images to private registry
@@ -833,8 +1202,12 @@ OPTIONS:
                (also available as --node-name NAME)
   -y           Auto-confirm prompts (reboots, cleanup operations)
   -P           Print sanitized YAML to screen (masks secrets)
-  -h           Show this help message
-  --dry-push   Simulate image push without actually pushing to registry
+  -h, --help   Show this help message (or use <action> --help for action-specific help)
+  --version    Display version information
+  --verbose    Enable verbose output (detailed progress and debugging)
+  --quiet      Suppress informational messages (errors and warnings only)
+  --dry-run    Simulate write operations without making changes (server, agent, image)
+  --dry-push   Simulate image push without actually pushing to registry (legacy alias)
   --apply-netplan-now
                Apply netplan immediately instead of deferring until reboot
                (default: netplan changes deferred to next reboot for safety)
@@ -5327,6 +5700,13 @@ install_nerdctl() {
 # ------------------------------------------------------------------------------
 prompt_reboot() {
   echo
+  # Skip reboot in dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "DRY-RUN: Reboot skipped (would normally reboot now)"
+    log_info "In production, the system would reboot to apply changes"
+    return 0
+  fi
+  
   if (( AUTO_YES )); then
     log WARN "Auto-confirm enabled (-y). Rebooting now..."
     sleep 2
@@ -5599,6 +5979,15 @@ action_push() {
 #=============================================================================
 action_image() {
   initialize_action_context true "image"
+
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Golden Image Prep"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
+  fi
 
   log_info "========================================"
   log_info "Starting RKE2 Golden Image Preparation"
@@ -6137,6 +6526,16 @@ action_list_images() {
 # ------------------------------------------------------------------------------
 action_server() {
   initialize_action_context false "server"
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log INFO "========================================"
+    log INFO "DRY-RUN MODE: RKE2 Server Initialization"
+    log INFO "========================================"
+    log INFO "No changes will be made to the system"
+    log INFO ""
+  fi
+  
   log INFO "Ensure YAML has metadata.name..."
 
   log INFO "Loading site defaults..."
@@ -6389,6 +6788,16 @@ action_server() {
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log INFO "========================================"
+    log INFO "DRY-RUN MODE: RKE2 Agent Node Join"
+    log INFO "========================================"
+    log INFO "No changes will be made to the system"
+    log INFO ""
+  fi
+  
   log INFO "Ensure YAML has metadata.name..."
 
   log INFO "Loading site defaults..."
@@ -6630,6 +7039,16 @@ action_agent() {
 # ------------------------------------------------------------------------------
 action_add_server() {
   initialize_action_context false "add-server"
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log INFO "========================================"
+    log INFO "DRY-RUN MODE: RKE2 Add Server Node"
+    log INFO "========================================"
+    log INFO "No changes will be made to the system"
+    log INFO ""
+  fi
+  
   log INFO "Ensure YAML has metadata.name..."
 
   log INFO "Loading site defaults..."
@@ -7157,8 +7576,22 @@ action_custom_ca() {
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
+# Parse long options first
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help)
+      # Check if action specified after --help
+      if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+        show_action_help "$2"
+      else
+        print_help
+        exit 0
+      fi
+      ;;
+    --version) show_version;;
+    --verbose) VERBOSE=1; shift;;
+    --quiet) QUIET=1; shift;;
+    --dry-run) DRY_RUN=1; shift;;
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
     --load-images) LOAD_IMAGES=1; shift;;
@@ -7175,7 +7608,7 @@ while [[ $# -gt 0 ]]; do
       NODE_NAME="${1#*=}"
       shift
       ;;
-    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
+    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify|custom-ca|label-node|taint-node|airgap|list-images) break;;
     *) break;;
   esac
 done
@@ -7224,6 +7657,10 @@ fi
 ACTION="${CLI_SUB:-}"
 if [[ -n "$ACTION" ]]; then
   shift
+  # Check for action --help
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    show_action_help "$ACTION"
+  fi
 fi
 ACTION_ARGS=("$@")
 
