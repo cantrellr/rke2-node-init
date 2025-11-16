@@ -1,4 +1,4 @@
 mirrors:
   "*":
     endpoint:
-      - https://kuberegistry.cantrelloffice.net/v2
+      - https://kuberegistry.k8.cantrellcloud.net/v2
