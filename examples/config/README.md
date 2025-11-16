@@ -2,6 +2,13 @@
 
 This directory contains example YAML configuration files for all `rke2nodeinit.sh` actions. These examples demonstrate the complete API specification and common use cases.
 
+**✨ Enhanced with Phase 1-4 Features:**
+- 📊 All actions now support comprehensive metrics tracking
+- 📈 8-phase progress reporting for deployment actions
+- 🎭 Full `--dry-run` support for safe validation
+- 🔍 `--verbose` and `--quiet` modes for flexible logging
+- 📚 Action-specific help via `--help <action>`
+
 ## Quick Start
 
 1. Copy an example file:

@@ -21,11 +21,26 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md) to keep our com
 
 ### Prerequisites
 
-- Bash 5.x or higher
+- Bash 4.0+ (script requires associative arrays)
 - Ubuntu 22.04+ or RHEL 8+ (for testing)
 - Git for version control
 - ShellCheck for linting Bash scripts
 - Basic understanding of RKE2 and Kubernetes
+- Familiarity with Phase 1-4 refactoring patterns (see docs/PHASE*-IMPLEMENTATION.md)
+
+### Understanding the Codebase
+
+The script has been modernized through 4 major phases:
+
+- **Phase 1**: Core utilities (19 functions) for validation, logging, metrics, progress
+- **Phase 2**: Refactored actions (verify, custom-ca, push, image)
+- **Phase 3**: CLI enhancements (help, version, verbosity, dry-run)
+- **Phase 4**: Deployment actions (server, agent, add-server, airgap)
+
+**Key Documentation:**
+- `docs/PHASE1-IMPLEMENTATION.md` - Core utility reference
+- `docs/PHASE4-QUICK-REFERENCE.md` - Quick command reference
+- `examples/phase*-demo.sh` - Interactive demonstrations
 
 ### Fork and Clone
 

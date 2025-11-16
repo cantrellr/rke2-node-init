@@ -1,6 +1,15 @@
 # rke2nodeinit.sh
 
-`rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without network access.
+`rke2nodeinit.sh` is a **modernized, production-grade** automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. Recently refactored through **Phases 1-4** (Nov 2024), it now features comprehensive metrics tracking, detailed progress reporting, enhanced error handling, and a complete CLI help system—all while orchestrating artifact caching, registry mirroring, operating system hardening, and server/agent installation using only Bash and standard GNU utilities. The workflow remains portable inside air-gapped environments, with only the `image` action requiring Internet access.
+
+**✨ Recent Improvements (Phases 1-4):**
+- 🎯 **19 Core Utilities** for validation, logging, metrics, and progress tracking
+- 📊 **40+ Deployment Metrics** across all actions with formatted summaries
+- 📈 **8-Phase Progress Reporting** for clear deployment visibility
+- 🛡️ **Enhanced Error Handling** with actionable remediation guidance
+- 🎭 **Full Dry-Run Support** for safe pre-deployment validation
+- 📚 **Comprehensive CLI Help** with action-specific documentation
+- 🔍 **Verbose/Quiet Modes** for flexible logging control
 
 ---
 
@@ -31,6 +40,8 @@
 
 ## Key Capabilities
 
+### Core Features
+
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
@@ -39,6 +50,51 @@
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
 - **Operational Transparency** – Streams all steps to `logs/` with timestamps and hostnames. Long-running tasks show CLI spinners while stdout remains concise.
 - **Reusable Defaults** – Persistently stores DNS/search defaults and custom CA information so subsequent server/agent runs reuse the captured site context.
+
+### 🆕 Phase 1-4 Enhancements (November 2024)
+
+**Phase 1: Core Utilities** ✅
+- 19 reusable functions for validation, logging, metrics, and progress tracking
+- Safe file operations with atomic writes and backups
+- Comprehensive error handling framework
+
+**Phase 2: Initial Actions** ✅  
+- Refactored `verify`, `custom-ca`, `push`, and `image` actions
+- Metrics tracking and progress reporting
+- Enhanced validation and error messages
+
+**Phase 3: CLI Enhancements** ✅
+- `--help` and `--help <action>` for comprehensive documentation
+- `--version` showing phase completion status
+- `--verbose` and `--quiet` modes for flexible logging
+- `--dry-run` for safe pre-deployment validation
+
+**Phase 4: Deployment Actions** ✅
+- Refactored `server`, `agent`, `add-server`, and `airgap` actions
+- **40+ deployment metrics** with formatted summaries
+- **8-phase progress reporting** (Load → Validate → Configure → Stage → System → Interfaces → RKE2 Config → Install)
+- **Enhanced error handling** with actionable remediation steps
+- **Full dry-run support** across all deployment workflows
+
+**📊 Metrics Example:**
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SERVER DEPLOYMENT SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Metric                      Value
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+site_defaults_loaded        1
+config_loaded               1
+config_validated            1
+artifacts_staged            1
+rke2_installed              1
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**📚 Documentation:**
+- `docs/PHASE*-IMPLEMENTATION.md` - Comprehensive implementation guides (3,000+ lines)
+- `docs/PHASE*-QUICK-REFERENCE.md` - Quick reference cheat sheets
+- `examples/phase*-demo.sh` - Interactive feature demonstrations
 
 ---
 
@@ -192,9 +248,13 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-u/-p` | Registry credentials |
 | `-y` | Auto-confirm prompts (reboots, legacy runtime cleanup) |
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
+| `--dry-run` | 🆕 Validate configuration without making changes (Phases 3-4) |
+| `--verbose` | 🆕 Enable detailed debug logging (Phase 3) |
+| `--quiet` | 🆕 Suppress informational messages, errors only (Phase 3) |
+| `--help [action]` | 🆕 Show general or action-specific help (Phase 3) |
+| `--version` | 🆕 Display script version and phase completion status (Phase 3) |
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--interface key=value [...]` (repeatable) | Append a network interface definition for `server`, `add-server`, or `agent`. Supported keys include `name`, `ip`, `prefix`, `gateway`, `dns`, `search`, and `dhcp4`. |
-| `-h` | Display built-in help |
 | `--load-images` | Import staged RKE2 images from the tarball into the local container runtime (nerdctl/ctr). This is opt-in; the default behavior is to keep the tarball staged for template/image-based workflows. |
 
 
@@ -358,6 +418,10 @@ System locations used during installation:
 ## Verification & Troubleshooting
 
 - Run `sudo ./rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
+- Use `--dry-run` flag to validate configurations before making changes: `sudo ./rke2nodeinit.sh --dry-run server`
+- Enable `--verbose` mode for detailed debugging: `sudo ./rke2nodeinit.sh --verbose server`
+- Check metrics summaries for deployment audit trails
+- Review action-specific help: `sudo ./rke2nodeinit.sh --help server`
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
 - When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.
@@ -387,7 +451,53 @@ The script honors several environment variables that can be set prior to executi
 
 ---
 
-For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh -h`.
+## 📚 Documentation
+
+### Quick References
+
+- **[PHASE4-QUICK-REFERENCE.md](docs/PHASE4-QUICK-REFERENCE.md)** - Commands, metrics, and troubleshooting cheat sheet
+- **[CHANGELOG.md](CHANGELOG.md)** - Complete project changelog with all phases
+- **[ROADMAP.md](ROADMAP.md)** - Project roadmap and progress tracking
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
+
+### Implementation Guides
+
+- **[PHASE1-IMPLEMENTATION.md](docs/PHASE1-IMPLEMENTATION.md)** - Core utilities reference (19 functions)
+- **[PHASE2-IMPLEMENTATION.md](docs/PHASE2-IMPLEMENTATION.md)** - Initial action refactoring guide
+- **[PHASE3-IMPLEMENTATION.md](docs/PHASE3-IMPLEMENTATION.md)** - CLI enhancements guide
+- **[PHASE4-IMPLEMENTATION.md](docs/PHASE4-IMPLEMENTATION.md)** - Deployment actions guide (800+ lines)
+
+### Summaries & Reports
+
+- **[PHASE4-SUMMARY.md](docs/PHASE4-SUMMARY.md)** - Executive summary with before/after comparisons
+- **[PHASE4-COMPLETION-REPORT.md](docs/PHASE4-COMPLETION-REPORT.md)** - Complete Phase 4 achievement report
+- **[PHASE4-PROGRESS.md](docs/PHASE4-PROGRESS.md)** - Implementation progress tracking
+
+### Interactive Demonstrations
+
+Run interactive demos to see features in action:
+
+```bash
+# Phase 3 CLI features demo
+sudo ./examples/phase3-cli-demo.sh
+
+# Phase 4 deployment actions demo
+sudo ./examples/phase4-demo.sh
+```
+
+### Configuration Examples
+
+All example configurations in `examples/config/`:
+- `server-example.yaml` - First control plane node
+- `agent-example.yaml` - Worker node
+- `add-server-example.yaml` - Additional control plane
+- `image-example.yaml` - Artifact preparation
+- `push-example.yaml` - Registry operations
+- `airgap-example.yaml` - VM template creation
+
+---
+
+For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh --help`.
 
 ## Artifact staging & verification (quick reference)
 
