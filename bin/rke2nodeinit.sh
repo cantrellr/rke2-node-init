@@ -1006,7 +1006,7 @@ validate_non_empty() {
 #   $1 - File path to validate
 #   $2 - File description (for error message)
 # Returns: 0 if valid, 1 if missing or unreadable
-# Usage: validate_file_exists "$CONFIG_FILE" "configuration file" || return 1
+# Usage: validate_file_exists "$CONFIG_FILE" "configuration file" "configuration file" || return 1
 #=============================================================================
 validate_file_exists() {
   local file_path="$1"
@@ -1063,20 +1063,20 @@ validate_directory_writable() {
 # Function: report_progress
 # Description: Report progress for batch operations with count and percentage
 # Parameters:
-#   $1 - Current item number
-#   $2 - Total item count
-#   $3 - Item description
+#   $1 - Item description
+#   $2 - Current item number
+#   $3 - Total item count
 # Returns: Always returns 0
-# Usage: report_progress 5 20 "Downloading image: nginx:latest"
+# Usage: report_progress "Downloading image: nginx:latest" 5 20
 # Best Practices:
 #   - Provides visual feedback during long operations
 #   - Includes percentage completion
 #   - Consistent format across all operations
 #=============================================================================
 report_progress() {
-  local current="$1"
-  local total="$2"
-  local description="$3"
+  local description="$1"
+  local current="$2"
+  local total="$3"
   local percentage=$((current * 100 / total))
   
   echo "[$current/$total - ${percentage}%] $description"
@@ -6353,7 +6353,7 @@ action_push() {
 
   # Validate images archive exists
   local work="$DOWNLOADS_DIR"
-  if ! validate_file_exists "$work/$IMAGES_TAR"; then
+  if ! validate_file_exists "$work/$IMAGES_TAR" "images archive"; then
     log_error "Images archive not found: $work/$IMAGES_TAR"
     log_error "Remediation steps:"
     log_error "  1. Run image action first: $0 image -f config.yaml"
@@ -6546,12 +6546,12 @@ action_image() {
 
   # Validate directories are writable
   report_progress "Validating environment" 1 8
-  if ! validate_directory_writable "$DOWNLOADS_DIR"; then
+  if ! validate_directory_writable "$DOWNLOADS_DIR" "downloads directory"; then
     log_error "Downloads directory not writable: $DOWNLOADS_DIR"
     log_error "Remediation: Check directory permissions and disk space"
     exit 1
   fi
-  if ! validate_directory_writable "$STAGE_DIR"; then
+  if ! validate_directory_writable "$STAGE_DIR" "stage directory"; then
     log_error "Stage directory not writable: $STAGE_DIR"
     log_error "Remediation: Check directory permissions and disk space"
     exit 1
@@ -6568,7 +6568,7 @@ action_image() {
   
   if [[ -n "$CONFIG_FILE" ]]; then
     log_info "Loading configuration from: $CONFIG_FILE"
-    if ! validate_file_exists "$CONFIG_FILE"; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file" "configuration file"; then
       log_error "Configuration file not found: $CONFIG_FILE"
       exit 1
     fi
@@ -7094,7 +7094,7 @@ action_server() {
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
-    if ! validate_file_exists "$CONFIG_FILE"; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
       log_error "Configuration file not found: $CONFIG_FILE"
       metrics_increment "failed"
       exit 1
@@ -7455,7 +7455,7 @@ action_agent() {
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
-    if ! validate_file_exists "$CONFIG_FILE"; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
       log_error "Configuration file not found: $CONFIG_FILE"
       metrics_increment "failed"
       exit 1
@@ -7797,7 +7797,7 @@ action_add_server() {
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
-    if ! validate_file_exists "$CONFIG_FILE"; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
       log_error "Configuration file not found: $CONFIG_FILE"
       metrics_increment "failed"
       exit 1
@@ -8369,7 +8369,7 @@ action_custom_ca() {
     exit 5
   fi
   
-  if ! validate_file_exists "$CONFIG_FILE"; then
+  if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
     log_error "Configuration file not found: $CONFIG_FILE"
     log_error "Remediation: Verify file path and permissions"
     exit 5

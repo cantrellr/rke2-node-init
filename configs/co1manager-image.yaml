@@ -1,0 +1,16 @@
+apiVersion: rkeprep/v1
+kind: Image
+metadata:
+  name: kubeimage
+spec:
+  rke2Version: v1.34.1+rke2r1
+  registry: kuberegistry.k8.cantrellcloud.net:8443/library
+  system-default-registry: kuberegistry.k8.cantrellcloud.net:8443/library
+  defaultDns: [172.16.69.71, 172.16.69.72]
+  defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net, cantrelloffice.cloud]
+  customCA:
+    rootCrt: /rke2-node-init/certs/root-ca.crt.dev
+    rootKey: /rke2-node-init/certs/root-ca-key.pem.dev
+    intermediateCrt: /rke2-node-init/certs/subordinate-ca.crt.dev
+    intermediateKey: /rke2-node-init/certs/subordinate-ca-key.pem.dev
+    installToOSTrust: true
