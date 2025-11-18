@@ -167,6 +167,12 @@ SCRIPT_VERSION="1.0.0"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
+ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
+BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
+BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
+VM_PLATFORM="auto"          # auto-detect or specify: vmware, hyperv, virtualbox, generic
+BOOT_SCRIPT_PATH="/usr/local/bin/rke2-boot.sh"
+BOOT_SERVICE_PATH="/etc/systemd/system/rke2-boot.service"
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -1762,6 +1768,20 @@ OPTIONS:
                tarball. Verifies individual layer SHA256 digests against
                manifest to ensure no corruption. More thorough than standard
                tarball integrity tests. Opt-in due to additional processing time.
+  --enable-boot-service
+               Install first-boot automation service for VM template workflows
+               Service auto-runs appropriate action on first boot after template clone
+               Must be used with 'image' or 'airgap' action
+  --boot-yaml-path PATH
+               YAML config path for boot service to execute (default: /root/config.yaml)
+               Use with --enable-boot-service
+  --boot-mode MODE
+               Boot service mode: 'oneshot' or 'persistent' (default: oneshot)
+               oneshot: Run once on first boot, then disable service
+               persistent: Run on every boot (useful for testing)
+  --vm-platform PLATFORM
+               VM platform for boot detection: vmware, hyperv, virtualbox, or generic
+               (default: auto-detect based on available tools)
 
 MULTI-INTERFACE YAML EXAMPLE:
   apiVersion: rkeprep/v1
@@ -1799,23 +1819,40 @@ CUSTOM CA YAML EXAMPLE:
     intermediateKey: certs/issuing-ca.key     # optional
     installToOSTrust: true                    # default: true
 
+BOOT SERVICE YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: Image
+  metadata:
+    name: base-image
+  spec:
+    rke2Version: v1.34.1+rke2r1
+    bootService:
+      enabled: true
+      yamlPath: /root/server-config.yaml  # Config to run on first boot
+      mode: oneshot                        # Run once, then disable
+      platform: vmware                     # vmware, hyperv, virtualbox, or generic
+
 WORKFLOW EXAMPLES:
   1. Prepare base image for cloning:
      sudo ./rke2nodeinit.sh -f examples/image.yaml
 
-  2. Initialize first control-plane with multi-interface networking:
+  2. Prepare base image with boot service for automated server deployment:
+     sudo ./rke2nodeinit.sh -f examples/image.yaml --enable-boot-service \\
+       --boot-yaml-path /root/server.yaml --boot-mode oneshot
+
+  3. Initialize first control-plane with multi-interface networking:
      sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
 
-  3. Join worker node:
+  4. Join worker node:
      sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
 
-  4. Push images to private registry:
+  5. Push images to private registry:
      sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret
 
-  5. Label a node:
+  6. Label a node:
      sudo ./rke2nodeinit.sh label-node -n worker01 -f labels.yaml
 
-  6. Install custom CA:
+  7. Install custom CA:
      sudo ./rke2nodeinit.sh -f certs/custom-ca.yaml custom-ca
 
 OUTPUTS:
@@ -3702,6 +3739,303 @@ install_vm_tools() {
   else
     log INFO "No additional VM guest tools packages required."
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: detect_vm_platform
+# Purpose : Auto-detect virtualization platform for hostname query method used
+#           in boot script automation.
+# Arguments:
+#   None
+# Returns :
+#   Prints platform identifier: vmware, hyperv, virtualbox, or generic
+# ------------------------------------------------------------------------------
+detect_vm_platform() {
+  local platform="${VM_PLATFORM:-auto}"
+  
+  # If explicitly set, validate and return
+  if [[ "$platform" != "auto" ]]; then
+    case "$platform" in
+      vmware|hyperv|virtualbox|generic)
+        echo "$platform"
+        return 0
+        ;;
+      *)
+        log WARN "Invalid VM_PLATFORM '$platform'; falling back to auto-detection"
+        platform="auto"
+        ;;
+    esac
+  fi
+  
+  # Auto-detect based on available tools and system information
+  if command -v vmtoolsd >/dev/null 2>&1; then
+    echo "vmware"
+  elif command -v hv_kvp_daemon >/dev/null 2>&1 || [[ -d /var/lib/hyperv ]]; then
+    echo "hyperv"
+  elif command -v VBoxControl >/dev/null 2>&1; then
+    echo "virtualbox"
+  elif [[ -f /sys/class/dmi/id/product_name ]]; then
+    # Check DMI product name as fallback
+    local product
+    product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+    case "${product,,}" in
+      *vmware*) echo "vmware" ;;
+      *virtual*machine*) echo "hyperv" ;;
+      *virtualbox*) echo "virtualbox" ;;
+      *) echo "generic" ;;
+    esac
+  else
+    echo "generic"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_boot_script
+# Purpose : Generate and install the first-boot automation script that queries
+#           VM hostname and executes rke2nodeinit with the corresponding YAML.
+# Arguments:
+#   None (uses global BOOT_SCRIPT_PATH, BOOT_YAML_PATH, VM_PLATFORM)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+install_boot_script() {
+  local platform
+  platform="$(detect_vm_platform)"
+  log INFO "Detected VM platform: $platform"
+  
+  local yaml_path_template="${BOOT_YAML_PATH:-/opt/rke2/configs/\${VM_HOSTNAME}.yaml}"
+  local script_dir
+  script_dir="$(dirname "$BOOT_SCRIPT_PATH")"
+  
+  # Ensure target directory exists
+  mkdir -p "$script_dir" || {
+    log ERROR "Failed to create directory for boot script: $script_dir"
+    return 1
+  }
+  
+  # Generate platform-specific hostname query command
+  local hostname_query_cmd=""
+  case "$platform" in
+    vmware)
+      hostname_query_cmd='VM_HOSTNAME=$(vmtoolsd --cmd "info-get guestinfo.hostname" 2>/dev/null || hostname)'
+      ;;
+    hyperv)
+      # Hyper-V: Try KVP pool file first, fallback to hostname
+      hostname_query_cmd='VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | grep -a HostName | cut -d: -f2 | tr -d "\\0" | xargs 2>/dev/null || hostname)'
+      ;;
+    virtualbox)
+      hostname_query_cmd='VM_HOSTNAME=$(VBoxControl guestproperty get /VirtualBox/HostInfo/VBoxVer 2>/dev/null | cut -d: -f2 | xargs 2>/dev/null || hostname)'
+      ;;
+    generic|*)
+      # Generic: use system hostname
+      hostname_query_cmd='VM_HOSTNAME=$(hostnamectl --static 2>/dev/null || hostname)'
+      ;;
+  esac
+  
+  # Generate boot script
+  cat > "$BOOT_SCRIPT_PATH" <<EOF
+#!/usr/bin/env bash
+#
+# rke2-boot.sh - First-boot automation for RKE2 node initialization
+# Generated by rke2nodeinit.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Platform: $platform
+#
+# This script is designed to run after networking is online via systemd service.
+# It queries the VM hostname from the hypervisor and executes rke2nodeinit.sh
+# with the corresponding YAML configuration file.
+
+set -euo pipefail
+
+# Logging helper
+log() {
+  local level="\$1"; shift
+  echo "[\$level] \$*" | systemd-cat -t rke2-boot -p "\${level,,}"
+  echo "[\$level] \$*"
+}
+
+log INFO "RKE2 first-boot automation starting..."
+
+# Query VM hostname (platform-specific)
+$hostname_query_cmd
+
+if [[ -z "\$VM_HOSTNAME" ]]; then
+  log ERROR "Unable to retrieve VM hostname from platform ($platform)"
+  exit 1
+fi
+
+log INFO "Retrieved hostname: \$VM_HOSTNAME"
+export VM_HOSTNAME
+
+# Construct YAML file path (supports \${HOSTNAME} and \${VM_HOSTNAME} variables)
+YAML_FILE="$yaml_path_template"
+# Expand \${HOSTNAME} variable if present
+YAML_FILE=\${YAML_FILE//\\\${HOSTNAME}/\$VM_HOSTNAME}
+# Also support \${VM_HOSTNAME} for clarity
+YAML_FILE=\${YAML_FILE//\\\${VM_HOSTNAME}/\$VM_HOSTNAME}
+
+log INFO "Looking for configuration file: \$YAML_FILE"
+
+if [[ ! -f "\$YAML_FILE" ]]; then
+  log ERROR "YAML configuration file not found: \$YAML_FILE"
+  log ERROR "Ensure the file exists before enabling boot service automation"
+  exit 1
+fi
+
+# Locate rke2nodeinit.sh script
+SCRIPT_PATH="$REPO_ROOT/bin/rke2nodeinit.sh"
+
+if [[ ! -x "\$SCRIPT_PATH" ]]; then
+  # Try alternate locations
+  for candidate in /usr/local/bin/rke2nodeinit.sh /opt/rke2/bin/rke2nodeinit.sh; do
+    if [[ -x "\$candidate" ]]; then
+      SCRIPT_PATH="\$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ ! -x "\$SCRIPT_PATH" ]]; then
+  log ERROR "rke2nodeinit.sh script not found or not executable"
+  log ERROR "Searched: $REPO_ROOT/bin/rke2nodeinit.sh, /usr/local/bin/rke2nodeinit.sh, /opt/rke2/bin/rke2nodeinit.sh"
+  exit 1
+fi
+
+log INFO "Using rke2nodeinit.sh: \$SCRIPT_PATH"
+
+# Set environment variable to signal execution via boot service
+export RKE2_BOOT_SERVICE=true
+
+# Execute rke2nodeinit with the YAML file and auto-confirm flag
+log INFO "Executing: \$SCRIPT_PATH -f \$YAML_FILE -y"
+
+if "\$SCRIPT_PATH" -f "\$YAML_FILE" -y; then
+  log INFO "RKE2 node initialization completed successfully"
+  exit 0
+else
+  rc=\$?
+  log ERROR "RKE2 node initialization failed (exit code: \$rc)"
+  exit \$rc
+fi
+EOF
+
+  # Set proper permissions
+  chmod 755 "$BOOT_SCRIPT_PATH" || {
+    log ERROR "Failed to set permissions on boot script: $BOOT_SCRIPT_PATH"
+    return 1
+  }
+  
+  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_boot_service
+# Purpose : Create and install systemd service unit for first-boot automation.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SCRIPT_PATH, BOOT_SERVICE_MODE)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+install_boot_service() {
+  local service_dir
+  service_dir="$(dirname "$BOOT_SERVICE_PATH")"
+  
+  # Ensure systemd service directory exists
+  mkdir -p "$service_dir" || {
+    log ERROR "Failed to create systemd service directory: $service_dir"
+    return 1
+  }
+  
+  # Generate systemd service unit
+  cat > "$BOOT_SERVICE_PATH" <<EOF
+[Unit]
+Description=RKE2 First-Boot Automation
+Documentation=https://github.com/cantrellcloud/rke2-node-init
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=$BOOT_SCRIPT_PATH
+
+[Service]
+Type=oneshot
+ExecStart=$BOOT_SCRIPT_PATH
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rke2-boot
+RemainAfterExit=yes
+# Ensure script runs with root privileges
+User=root
+# Set working directory to script location
+WorkingDirectory=$(dirname "$BOOT_SCRIPT_PATH")
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 644 "$BOOT_SERVICE_PATH" || {
+    log ERROR "Failed to set permissions on service file: $BOOT_SERVICE_PATH"
+    return 1
+  }
+  
+  # Reload systemd to recognize new service
+  if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
+    log WARN "systemctl daemon-reload failed; service may not be immediately available"
+  fi
+  
+  log INFO "Boot service installed: $BOOT_SERVICE_PATH"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: enable_boot_service
+# Purpose : Enable the first-boot automation service so it runs on next reboot.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+enable_boot_service() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+  
+  if ! systemctl enable "$service_name" >>"$LOG_FILE" 2>&1; then
+    log ERROR "Failed to enable boot service: $service_name"
+    return 1
+  fi
+  
+  log INFO "Boot service enabled: $service_name (will run on next boot)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: disable_boot_service
+# Purpose : Disable and optionally mask the boot service after successful
+#           execution in oneshot mode.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SERVICE_MODE)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+disable_boot_service() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+  
+  if ! systemctl disable "$service_name" >>"$LOG_FILE" 2>&1; then
+    log WARN "Failed to disable boot service: $service_name"
+    return 1
+  fi
+  
+  log INFO "Boot service disabled: $service_name"
+  
+  # Optionally mask the service to prevent accidental re-enable
+  if [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    if systemctl mask "$service_name" >>"$LOG_FILE" 2>&1; then
+      log INFO "Boot service masked (oneshot mode): $service_name"
+    else
+      log WARN "Failed to mask boot service: $service_name"
+    fi
+  fi
+  
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -6724,6 +7058,62 @@ action_image() {
   metrics_increment "success"
   metrics_increment "defaults_saved"
 
+  # --- Boot Service Installation (optional enablement) -----------------------
+  log_info "Installing first-boot automation script and service..."
+  
+  # Read boot service configuration from YAML if provided
+  local boot_enabled="false"
+  local boot_yaml_path_yaml=""
+  local boot_mode_yaml=""
+  local boot_platform_yaml=""
+  
+  if [[ -n "$CONFIG_FILE" ]]; then
+    boot_enabled="$(yaml_spec_get "$CONFIG_FILE" bootService.enabled || echo false)"
+    boot_yaml_path_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.yamlPath || true)"
+    boot_mode_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
+    boot_platform_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
+    
+    # Override globals if specified in YAML
+    [[ -n "$boot_yaml_path_yaml" ]] && BOOT_YAML_PATH="$boot_yaml_path_yaml"
+    [[ -n "$boot_mode_yaml" ]] && BOOT_SERVICE_MODE="$boot_mode_yaml"
+    [[ -n "$boot_platform_yaml" ]] && VM_PLATFORM="$boot_platform_yaml"
+  fi
+  
+  # Normalize boolean value
+  boot_enabled="$(normalize_bool_value "$boot_enabled")"
+  
+  # Install boot script and service (always install, conditionally enable)
+  if install_boot_script; then
+    if install_boot_service; then
+      log_info "Boot script and service installed successfully"
+      log_info "  Script: $BOOT_SCRIPT_PATH"
+      log_info "  Service: $BOOT_SERVICE_PATH"
+      log_info "  Mode: $BOOT_SERVICE_MODE"
+      log_info "  Platform: $(detect_vm_platform)"
+      if [[ -n "$BOOT_YAML_PATH" ]]; then
+        log_info "  YAML path template: $BOOT_YAML_PATH"
+      fi
+      
+      # Check if boot service should be enabled
+      if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+        if enable_boot_service; then
+          log_info "✓ Boot service ENABLED for next reboot"
+          log_warn "IMPORTANT: Ensure YAML files exist at expected paths before rebooting"
+        else
+          log_warn "Failed to enable boot service; install completed but service not active"
+        fi
+      else
+        log_info "Boot service installed but NOT enabled"
+        log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
+        log_info "Manual enable: systemctl enable $(basename "$BOOT_SERVICE_PATH")"
+      fi
+    else
+      log_warn "Failed to install boot service; continuing without first-boot automation"
+    fi
+  else
+    log_warn "Failed to install boot script; continuing without first-boot automation"
+  fi
+
   # --- SBOM and README generation --------------------------------------------
   report_progress "Generating SBOM and documentation" 8 8
   log_info "Generating Software Bill of Materials (SBOM)"
@@ -7095,6 +7485,15 @@ action_list_images() {
 action_server() {
   initialize_action_context false "server"
   
+  # Detect if running via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]] && [[ "${RKE2_BOOT_SERVICE}" == "true" ]]; then
+    via_boot_service=1
+    log_info "═══════════════════════════════════════"
+    log_info "Execution initiated via rke2-boot service"
+    log_info "═══════════════════════════════════════"
+  fi
+  
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
     log_info "========================================"
@@ -7437,6 +7836,16 @@ action_server() {
   log_success "Server initialization completed"
   log_success "========================================="
   
+  # Cleanup boot service if running in oneshot mode via boot service
+  if [[ $via_boot_service -eq 1 ]] && [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    log_info "Disabling boot service (oneshot mode)..."
+    if disable_boot_service; then
+      log_info "✓ Boot service disabled after successful oneshot execution"
+    else
+      log_warn "Failed to disable boot service; may run again on next boot"
+    fi
+  fi
+  
   metrics_summary "Server Deployment Summary"
   
   log_info ""
@@ -7481,6 +7890,15 @@ action_server() {
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
+  
+  # Detect if running via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]] && [[ "${RKE2_BOOT_SERVICE}" == "true" ]]; then
+    via_boot_service=1
+    log_info "═══════════════════════════════════════"
+    log_info "Execution initiated via rke2-boot service"
+    log_info "═══════════════════════════════════════"
+  fi
   
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
@@ -7796,6 +8214,16 @@ action_agent() {
   log_success "Agent node join completed"
   log_success "========================================="
   
+  # Cleanup boot service if running in oneshot mode via boot service
+  if [[ $via_boot_service -eq 1 ]] && [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    log_info "Disabling boot service (oneshot mode)..."
+    if disable_boot_service; then
+      log_info "✓ Boot service disabled after successful oneshot execution"
+    else
+      log_warn "Failed to disable boot service; may run again on next boot"
+    fi
+  fi
+  
   metrics_summary "Agent Deployment Summary"
   
   log_info ""
@@ -7838,6 +8266,13 @@ action_agent() {
 action_add_server() {
   initialize_action_context false "add-server"
   
+  # Check if this was invoked via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]]; then
+    via_boot_service=1
+    log_info "Detected invocation via rke2-boot service"
+  fi
+  
   # Check for dry-run mode
   if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
     log_info "========================================"
@@ -7849,7 +8284,7 @@ action_add_server() {
   
   log_info "========================================"
   log_info "RKE2 Additional Server Node Join"
-  log_info "========================================"
+  log_info "======================================="
   
   # Initialize metrics for comprehensive tracking
   metrics_init "add_server_deployment"
@@ -8194,6 +8629,12 @@ action_add_server() {
   log_info "  1. Reboot the system to apply changes"
   log_info "  2. After reboot, verify server joined: kubectl get nodes"
   log_info "  3. Check cluster status: kubectl get pods -A"
+
+  # If invoked via boot service in oneshot mode, disable the service
+  if [[ $via_boot_service -eq 1 ]] && [[ "${BOOT_SERVICE_MODE:-oneshot}" == "oneshot" ]]; then
+    log_info "Disabling rke2-boot service (oneshot mode)..."
+    disable_boot_service
+  fi
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -8547,6 +8988,43 @@ while [[ $# -gt 0 ]]; do
       ;;
     --node-name=*)
       NODE_NAME="${1#*=}"
+      shift
+      ;;
+    --enable-boot-service) ENABLE_BOOT_SERVICE=1; shift;;
+    --boot-yaml-path)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --boot-yaml-path requires an argument" >&2
+        exit 1
+      fi
+      BOOT_YAML_PATH="$2"
+      shift 2
+      ;;
+    --boot-yaml-path=*)
+      BOOT_YAML_PATH="${1#*=}"
+      shift
+      ;;
+    --boot-mode)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --boot-mode requires an argument (oneshot or persistent)" >&2
+        exit 1
+      fi
+      BOOT_SERVICE_MODE="$2"
+      shift 2
+      ;;
+    --boot-mode=*)
+      BOOT_SERVICE_MODE="${1#*=}"
+      shift
+      ;;
+    --vm-platform)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --vm-platform requires an argument (vmware, hyperv, virtualbox, or generic)" >&2
+        exit 1
+      fi
+      VM_PLATFORM="$2"
+      shift 2
+      ;;
+    --vm-platform=*)
+      VM_PLATFORM="${1#*=}"
       shift
       ;;
     -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify|custom-ca|label-node|taint-node|airgap|list-images) break;;
