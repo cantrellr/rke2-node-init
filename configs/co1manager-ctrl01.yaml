@@ -3,6 +3,7 @@ kind: Server
 metadata:
   name: co1manager-ctrl01
 spec:
+  disable-default-system-registry: true
   hostname: co1manager-ctrl01
   # Bind to cluster communication interface
   nodeIp: 10.0.69.60

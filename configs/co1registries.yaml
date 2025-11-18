@@ -1,4 +1,4 @@
 mirrors:
   "*":
     endpoint:
-      - "https://kuberegistry.k8.cantrellcloud.net:8443/library"
+      - "https://kuberegistry.k8.cantrellcloud.net:8443"
