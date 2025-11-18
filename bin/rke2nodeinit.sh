@@ -6556,6 +6556,8 @@ action_image() {
     log_error "Remediation: Check directory permissions and disk space"
     exit 1
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "validation_passed"
 
   # --- Read YAML configuration (optional) -----------------------------------
@@ -6592,9 +6594,13 @@ action_image() {
     CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
     CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
     
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "config_loaded"
   else
     log_info "No configuration file provided - using defaults and CLI flags"
+    metrics_increment "total"
+    metrics_increment "success"
   fi
 
   # Warn if using example default credentials
@@ -6610,6 +6616,8 @@ action_image() {
   report_progress "Installing OS prerequisites" 3 8
   log_info "Installing RKE2 prerequisites for $(detect_os)"
   install_rke2_prereqs
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "prereqs_installed"
 
   # Detect virtualization and install appropriate tools
@@ -6618,6 +6626,8 @@ action_image() {
   if [[ "$virt_class" == "virtual" ]]; then
     log_info "Virtual environment detected: type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown}"
     install_vm_tools "$hypervisor"
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "vm_tools_installed"
   else
     log_info "Physical hardware detected - skipping VM tools installation"
@@ -6625,6 +6635,8 @@ action_image() {
 
   # Fetch RKE2 CA generator utility
   fetch_rke2_ca_generator
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "ca_generator_fetched"
   
   # --- Cache RKE2 artifacts --------------------------------------------------
@@ -6645,6 +6657,8 @@ action_image() {
   
   log_info "Artifact caching completed successfully"
   log_info "Scanning staged and downloaded artifacts for verification"
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "artifacts_cached"
 
   # --- Optional: Load images into local runtime ------------------------------
@@ -6656,9 +6670,12 @@ action_image() {
     if ! check_dependencies nerdctl; then
       install_nerdctl || {
         log_error "Failed to install nerdctl"
+        metrics_increment "total"
         metrics_increment "failed"
         exit 1
       }
+      metrics_increment "total"
+      metrics_increment "success"
       metrics_increment "nerdctl_installed"
     fi
 
@@ -6666,9 +6683,13 @@ action_image() {
     if ! load_images_from_tarball >/dev/null 2>&1; then
       log_warn "Image loading returned non-zero exit code"
       log_warn "Node may attempt remote image pulls during deployment"
+      metrics_increment "total"
+      metrics_increment "skipped"
       metrics_increment "image_load_warned"
     else
       log_success "Images loaded successfully into local runtime"
+      metrics_increment "total"
+      metrics_increment "success"
       metrics_increment "images_loaded"
     fi
   else
@@ -6681,6 +6702,8 @@ action_image() {
   report_progress "Configuring registry trust" 6 8
   log_info "Configuring registry trust and custom CA (if applicable)"
   ca_trust_registries
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "registry_trust_configured"
 
   # Collect artifact inventory for SBOM and verification
@@ -6697,6 +6720,8 @@ action_image() {
   log_info "Site defaults saved to: $STATE"
   log_info "  DNS servers: $defaultDnsCsv"
   log_info "  Search domains: $defaultSearchCsv"
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "defaults_saved"
 
   # --- SBOM and README generation --------------------------------------------
@@ -6834,6 +6859,8 @@ action_image() {
   log_info "SBOM location: $sbom_file"
   log_info "  Artifacts: $total_count discovered, $verified_count verified"
   log_info "  Security score: ${security_score}/100"
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "sbom_created"
 
   # Generate machine-friendly JSON SBOM for tooling compatibility
@@ -6921,6 +6948,8 @@ print(sbom_json)
 PY
     if [[ $? -eq 0 ]]; then
       log_success "JSON SBOM generated: $sbom_json_file"
+      metrics_increment "total"
+      metrics_increment "success"
       metrics_increment "json_sbom_created"
     else
       log_warn "Failed to generate JSON SBOM: $sbom_json_file"
@@ -6955,6 +6984,8 @@ PY
       echo "  - Run this script in 'server' or 'agent' mode on the clone(s)"
     } > "$RUN_OUT_DIR/README.txt"
     log_info "README written to: $RUN_OUT_DIR/README.txt"
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "readme_created"
   fi
 
@@ -7086,6 +7117,8 @@ action_server() {
   report_progress "Loading configuration" 1 8
   log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
@@ -7096,6 +7129,7 @@ action_server() {
   if [[ -n "$CONFIG_FILE" ]]; then
     if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
       log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "total"
       metrics_increment "failed"
       exit 1
     fi
@@ -7111,6 +7145,8 @@ action_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "config_loaded"
   fi
 
@@ -7182,6 +7218,8 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "config_validated"
 
   # Phase 3: Network configuration
@@ -7199,6 +7237,8 @@ action_server() {
       log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "tls_sans_configured"
 
   # Phase 4: Stage artifacts
@@ -7210,6 +7250,8 @@ action_server() {
     metrics_increment "failed"
     exit 3
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "artifacts_staged"
 
   # Phase 5: System configuration
@@ -7223,10 +7265,14 @@ action_server() {
   else
     log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "hostname_set"
 
   log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "custom_ca_configured"
 
   # Phase 6: Interface configuration
@@ -7272,6 +7318,8 @@ action_server() {
     done
     log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "interfaces_configured"
 
   # Phase 7: Token and RKE2 configuration
@@ -7294,6 +7342,8 @@ action_server() {
       log_info "Using generated short first-server bootstrap token."
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "token_generated"
 
   log_info "Writing file: /etc/rancher/rke2/config.yaml..."
@@ -7336,6 +7386,8 @@ action_server() {
     log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
     log_info "DRY-RUN: Token would be: ${TOKEN:0:20}..."
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "config_written"
 
   log_info "Writing netplan configuration and applying network settings..."
@@ -7348,6 +7400,8 @@ action_server() {
   else
     log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "netplan_written"
 
   # Phase 8: Install RKE2
@@ -7363,10 +7417,14 @@ action_server() {
       exit 3
     fi
     systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "rke2_installed"
 
     log_info "Deploying flannel TX checksum offload fix..."
     install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "flannel_fix_installed"
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
@@ -7554,6 +7612,8 @@ action_agent() {
     metrics_increment "failed"
     exit 3
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "artifacts_staged"
 
   # Phase 4: Configure system
@@ -7565,6 +7625,8 @@ action_agent() {
   else
     log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "hostname_set"
 
   local prompt_extra_ifaces_agent=1
@@ -7608,6 +7670,8 @@ action_agent() {
     done
     log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "interfaces_configured"
 
   # Phase 6: Gather cluster join information
@@ -7681,6 +7745,8 @@ action_agent() {
     log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
     log_info "DRY-RUN: Server URL: $URL"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "config_written"
 
   log_info "Writing netplan configuration and applying network settings..."
@@ -7693,6 +7759,8 @@ action_agent() {
   else
     log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "netplan_written"
 
   # Phase 8: Install RKE2
@@ -7708,10 +7776,14 @@ action_agent() {
       exit 3
     fi
     systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "rke2_installed"
 
     log_info "Deploying flannel TX checksum offload fix..."
     install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "flannel_fix_installed"
   else
     log_info "DRY-RUN: Would install RKE2 agent from $STAGE_DIR"
@@ -7904,6 +7976,8 @@ action_add_server() {
       log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "tls_sans_configured"
 
   # Phase 4: Stage artifacts
@@ -7915,6 +7989,8 @@ action_add_server() {
     metrics_increment "failed"
     exit 3
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "artifacts_staged"
 
   # Phase 5: System configuration
@@ -7928,10 +8004,14 @@ action_add_server() {
   else
     log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "hostname_set"
 
   log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "custom_ca_configured"
 
   local prompt_extra_ifaces_add_server=1
@@ -7975,6 +8055,8 @@ action_add_server() {
     done
     log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "interfaces_configured"
 
   # Phase 6: Gather cluster join information
@@ -8047,6 +8129,8 @@ action_add_server() {
     log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
     log_info "DRY-RUN: Server URL: $URL"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "config_written"
 
   log_info "Writing netplan configuration and applying network settings..."
@@ -8059,6 +8143,8 @@ action_add_server() {
   else
     log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
   metrics_increment "netplan_written"
 
   # Phase 8: Install RKE2
@@ -8074,10 +8160,14 @@ action_add_server() {
       exit 3
     fi
     systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "rke2_installed"
 
     log_info "Deploying flannel TX checksum offload fix..."
     install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
     metrics_increment "flannel_fix_installed"
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
