@@ -3,14 +3,14 @@
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
 **Script Version:** rke2nodeinit.sh v0.8b  
-**Configuration File:** co1manager-image.yaml  
+**Configuration File:** cotpa-image.yaml  
 **RKE2 Version:** v1.34.1+rke2r1
 
 ---
 
 ## Executive Summary
 
-This report provides a comprehensive technical analysis of what the `rke2nodeinit.sh` script does to a target machine when processing an Image configuration (co1manager-image.yaml). The script transforms a base Ubuntu/Debian system into a "golden image" suitable for air-gapped RKE2 Kubernetes deployments by installing prerequisites, caching artifacts (~4GB), configuring custom CA trust, and generating a Software Bill of Materials (SBOM).
+This report provides a comprehensive technical analysis of what the `rke2nodeinit.sh` script does to a target machine when processing an Image configuration (cotpa-image.yaml). The script transforms a base Ubuntu/Debian system into a "golden image" suitable for air-gapped RKE2 Kubernetes deployments by installing prerequisites, caching artifacts (~4GB), configuring custom CA trust, and generating a Software Bill of Materials (SBOM).
 
 **Key Operations:**
 - Installs 15+ system packages required for RKE2
@@ -23,7 +23,7 @@ This report provides a comprehensive technical analysis of what the `rke2nodeini
 
 ## Configuration Analysis
 
-### YAML Configuration: co1manager-image.yaml
+### YAML Configuration: cotpa-image.yaml
 
 ```yaml
 apiVersion: rkeprep/v1
@@ -920,7 +920,7 @@ Actual:   789ghi012jkl...
 rm -f /opt/rke2/downloads/rke2-images.linux-amd64.tar.zst
 
 # Rerun script
-sudo ./rke2nodeinit.sh -f co1manager-image.yaml
+sudo ./rke2nodeinit.sh -f cotpa-image.yaml
 ```
 
 **Prevention:**
@@ -1074,7 +1074,7 @@ serverURL: https://control-plane:9345
 
 ### Input Files (Required Before Execution)
 ```
-/rke2-node-init/configs/co1manager-image.yaml - Configuration file
+/rke2-node-init/configs/cotpa-image.yaml - Configuration file
 /rke2-node-init/certs/rke2ca-cert.crt - Root CA certificate
 /rke2-node-init/certs/rke2registry-ca.crt - Subordinate CA certificate
 ```

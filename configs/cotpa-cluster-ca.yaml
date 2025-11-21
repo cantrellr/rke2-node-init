@@ -1,7 +1,7 @@
 apiVersion: rkeprep/v1
 kind: CustomCA
 metadata:
-  name: co1manager-ca
+  name: cotpa-ca
 spec:
   customCA:
     rootCrt: /rke2-node-init/certs/root-ca.crt

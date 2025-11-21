@@ -1792,11 +1792,11 @@ MULTI-INTERFACE YAML EXAMPLE:
     token: K10abc...xyz::server:1234abcd
     clusterInit: true
     nodeName: ctrl01.example.com
-    node-ip: 10.0.69.60
-    bind-address: 10.0.69.60
+    node-ip: 172.16.15.101
+    bind-address: 172.16.15.101
     interfaces:
       - name: eth0
-        ip: 10.0.69.60
+        ip: 172.16.15.101
         prefix: 24
         gateway: 10.0.69.1
         dns: [10.0.69.1, 8.8.8.8]

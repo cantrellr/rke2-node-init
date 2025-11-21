@@ -5,31 +5,31 @@ metadata:
 spec:
   hostname: dc1manager-ctrl01
   # Bind to cluster communication interface
-  nodeIp: 10.0.69.60
-  bindAddress: 10.0.69.60
-  advertiseAddress: 10.0.69.60
+  nodeIp: 172.16.15.101
+  bindAddress: 172.16.15.101
+  advertiseAddress: 172.16.15.101
   cni:
    - multus
    - canal
   interfaces:
     # vlan118
     - name: eth0
-      ip: 10.0.69.60
-      prefix: 27
-      gateway: 10.0.69.33
-      dns: ["172.16.69.71", "172.16.69.72"]
+      ip: 172.16.15.101
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan18
     - name: eth1
       ip: 172.16.69.60
-      prefix: 27
+      prefix: 24
       gateway:
-      dns: ["172.16.69.71", "172.16.69.72"]
+      dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan9
     - name: eth2
       ip: 172.16.255.240
-      prefix: 27
+      prefix: 24
       gateway:
       dns: ["10.0.69.41"]
       searchDomains: ["cantrell.cloud"]
@@ -42,7 +42,7 @@ spec:
     - dc1manager-ctrl01.cantrellcloud.net
     - dc1manager-cluster
     - dc1manager-cluster.cantrellcloud.net
-    - 10.0.69.60
+    - 172.16.15.101
   service-cidr: 10.93.0.0/16
   cluster-cidr: 10.243.0.0/16
   cluster-domain: cluster.local

@@ -1,12 +1,12 @@
 apiVersion: rkeprep/v1
 kind: Image
 metadata:
-  name: kubeimage
+  name: cotpa-image
 spec:
   rke2Version: v1.34.1+rke2r1
   registry: kuberegistry.k8.cantrellcloud.net:8443
   system-default-registry: kuberegistry.k8.cantrellcloud.net:8443
-  defaultDns: [172.16.69.71, 172.16.69.72]
+  defaultDns: [172.16.10.11, 172.16.10.12]
   defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net, cantrelloffice.cloud]
   customCA:
     rootCrt: /rke2-node-init/certs/root-ca.crt

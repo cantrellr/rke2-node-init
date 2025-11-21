@@ -15,21 +15,21 @@ spec:
     # vlan118
     - name: eth0
       ip: 10.0.69.61
-      prefix: 27
-      gateway: 10.0.69.33
-      dns: ["172.16.69.71", "172.16.69.72"]
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan18
     - name: eth1
       ip: 172.16.69.61
-      prefix: 27
+      prefix: 24
       gateway:
-      dns: ["172.16.69.71", "172.16.69.72"]
+      dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan9
     - name: eth2
       ip: 172.16.255.241
-      prefix: 27
+      prefix: 24
       gateway:
       dns: ["10.0.69.41"]
       searchDomains: ["cantrell.cloud"]
