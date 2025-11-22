@@ -1,0 +1,21 @@
+---
+apiVersion: vmconfig/v1
+kind: ClusterConfig
+metadata:
+  name: cotpa
+  
+spec:
+  defaults:
+    hypervisor:
+      type: hyperv
+      connection:
+        host: hyperv-host.example.com
+        credentialsSecret: HYPERV_CREDENTIALS
+      vmSettings:
+        templateName: ubuntu22-rke2-template
+        network: "Internal Network"
+        cpus: 4
+        memoryMB: 8192
+    
+    rke2Config:
+      autoStart: true
