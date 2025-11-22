@@ -14,3 +14,8 @@ spec:
     intermediateCrt: /rke2-node-init/certs/subordinate-ca.crt
     intermediateKey: /rke2-node-init/certs/subordinate-ca-key.pem
     installToOSTrust: true
+  bootService:
+    enabled: true
+    yamlPath: /root/server-config.yaml
+    mode: oneshot
+    platform: hyperv
