@@ -174,6 +174,28 @@ install_k8s_tools() {
   fi
 }
 
+install_powershell() {
+  log "Installing PowerShell"
+  if command -v pwsh >/dev/null 2>&1; then
+    log "PowerShell already installed: $(pwsh --version)"
+    return
+  fi
+  
+  # Install PowerShell per Microsoft instructions for Ubuntu
+  # Download the Microsoft repository GPG keys
+  wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+  dpkg -i packages-microsoft-prod.deb
+  rm packages-microsoft-prod.deb
+  
+  # Update the list of packages after adding packages.microsoft.com
+  apt update
+  
+  # Install PowerShell
+  apt install -y powershell
+  
+  log "PowerShell installed: $(pwsh --version)"
+}
+
 install_misc_tools() {
   log "Installing misc CLI tools: gh, shellcheck, docker-compose plugin"
   apt install -y gh shellcheck docker-compose-plugin || true
@@ -190,6 +212,7 @@ Setup complete (or mostly complete). Next steps / verification:
 - Verify kubectl: kubectl version --client
 - Verify helm: helm version
 - Verify kind: kind --version
+- Verify PowerShell: pwsh --version
 - Verify node and npm: node --version && npm --version
 - Verify python: python3 --version; try 'pyenv install 3.11.8' as the non-root user
 
@@ -212,6 +235,7 @@ main() {
   install_nvm_node
   install_go
   install_k8s_tools
+  install_powershell
   install_misc_tools
   post_install_notes
 }

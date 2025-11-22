@@ -3803,6 +3803,11 @@ detect_vm_platform() {
 # Purpose : Generate and install the first-boot automation script that queries
 #           VM hostname, discovers matching config file, copies it to target
 #           directory, and executes rke2nodeinit with the configuration.
+# 
+# Note for Hyper-V: The VM name must be set from the Hyper-V host using:
+#   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
+#   Otherwise, the guest OS hostname will be used as fallback.
+#
 # Arguments:
 #   None (uses global BOOT_SCRIPT_PATH, BOOT_CONFIG_SEARCH_PATHS, BOOT_TARGET_DIR)
 # Returns :
@@ -3838,8 +3843,33 @@ install_boot_script() {
       hostname_query_cmd='VM_HOSTNAME=$(vmtoolsd --cmd "info-get guestinfo.hostname" 2>/dev/null || hostname)'
       ;;
     hyperv)
-      # Hyper-V: Try KVP pool file first, fallback to hostname
-      hostname_query_cmd='VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | grep -a HostName | cut -d: -f2 | tr -d "\\0" | xargs 2>/dev/null || hostname)'
+      # Hyper-V: Query VM name from KVP pool (requires host-side configuration)
+      # Preferred method: Host admin sets custom KVP item via PowerShell:
+      #   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
+      # 
+      # Alternative: Use PowerShell to read VirtualMachineName from KVP pool_0
+      # Fallback: Use guest hostname if not found
+      hostname_query_cmd='
+if command -v pwsh >/dev/null 2>&1; then
+  # Try PowerShell to read KVP VirtualMachineName
+  VM_HOSTNAME=$(pwsh -NoProfile -Command '\''
+    try {
+      $kvp0 = [System.IO.File]::ReadAllBytes("/var/lib/hyperv/.kvp_pool_0")
+      $text = [System.Text.Encoding]::ASCII.GetString($kvp0)
+      $lines = $text -split "\x00" | Where-Object {$_.Trim()}
+      for($i=0; $i -lt $lines.Count; $i++) {
+        if($lines[$i] -eq "VirtualMachineName" -and $i+1 -lt $lines.Count) {
+          Write-Output $lines[$i+1].Trim()
+          exit 0
+        }
+      }
+    } catch {}
+  '\'' 2>/dev/null)
+fi
+# Fallback to bash method if PowerShell fails or not available
+[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | tr "\\0" "\\n" | grep -A1 "^VirtualMachineName$" | tail -1 | xargs 2>/dev/null)
+# Final fallback to hostname
+[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(hostname)'
       ;;
     virtualbox)
       hostname_query_cmd='VM_HOSTNAME=$(VBoxControl guestproperty get /VirtualBox/HostInfo/VBoxVer 2>/dev/null | cut -d: -f2 | xargs 2>/dev/null || hostname)'
@@ -7269,6 +7299,16 @@ action_image() {
       done
       log_info "  Target directory: $BOOT_TARGET_DIR"
       
+      # Display Hyper-V specific requirements
+      if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+        log_info ""
+        log_info "Hyper-V Configuration Required:"
+        log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
+        log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+        log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
+        log_info "  Without this, the guest hostname will be used as fallback."
+      fi
+      
       # Check if boot service should be enabled
       if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
         if enable_boot_service; then
@@ -7582,8 +7622,18 @@ PY
     log_info "  2. Place node-specific YAML configs in: $REPO_ROOT/configs/"
     log_info "     - Naming pattern: {hostname}.yaml (e.g., node01.yaml)"
     log_info "     - Boot service will auto-discover configs by VM hostname"
-    log_info "  3. Clone/template this VM for deployment"
-    log_info "  4. First boot will automatically:"
+    
+    # Add Hyper-V specific instructions
+    if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+      log_info "  3. Configure VM names on Hyper-V host (PowerShell on host):"
+      log_info "     Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+      log_info "     (Without this, guest hostname will be used as fallback)"
+      log_info "  4. Clone/template this VM for deployment"
+      log_info "  5. First boot will automatically:"
+    else
+      log_info "  3. Clone/template this VM for deployment"
+      log_info "  4. First boot will automatically:"
+    fi
     log_info "     - Query VM hostname from hypervisor"
     log_info "     - Search for matching config: {hostname}.yaml"
     log_info "     - Copy config to: $BOOT_TARGET_DIR/{hostname}.yaml"
