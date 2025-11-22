@@ -181,6 +181,10 @@ def find_all_configs(base_path: Path) -> List[Path]:
     
     # Exclude schema files and other non-config files
     configs = [c for c in configs if c.name not in ['schema.yaml', 'schema.yml']]
+    
+    # Exclude rke2-configs subdirectory (different schema format)
+    configs = [c for c in configs if 'rke2-configs' not in c.parts]
+    
     return sorted(configs)
 
 
