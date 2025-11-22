@@ -1,0 +1,220 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RKE2 VM Configuration Schema",
+  "description": "Schema for defining VM configurations and RKE2 cluster nodes in a GitOps workflow",
+  "definitions": {
+    "VirtualMachineConfig": {
+      "type": "object",
+      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "enum": ["vmconfig/v1"],
+          "description": "API version for VM configuration"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["VirtualMachineConfig"],
+          "description": "Resource kind"
+        },
+        "metadata": {
+          "type": "object",
+          "required": ["name", "cluster"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+              "description": "VM name (DNS-compatible, will be used as hostname)"
+            },
+            "cluster": {
+              "type": "string",
+              "description": "Cluster this VM belongs to"
+            },
+            "environment": {
+              "type": "string",
+              "enum": ["production", "staging", "development", "test"],
+              "default": "production",
+              "description": "Environment classification"
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Custom labels for organization"
+            }
+          }
+        },
+        "spec": {
+          "type": "object",
+          "required": ["hypervisor", "rke2Config"],
+          "properties": {
+            "hypervisor": {
+              "type": "object",
+              "required": ["type", "connection"],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["hyperv", "vmware", "proxmox"],
+                  "description": "Hypervisor platform"
+                },
+                "connection": {
+                  "type": "object",
+                  "required": ["host"],
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "description": "Hypervisor host address"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "description": "Connection port (optional)"
+                    },
+                    "credentialsSecret": {
+                      "type": "string",
+                      "description": "GitHub secret name for credentials"
+                    }
+                  }
+                },
+                "vmSettings": {
+                  "type": "object",
+                  "properties": {
+                    "templateName": {
+                      "type": "string",
+                      "description": "Source template VM name"
+                    },
+                    "resourcePool": {
+                      "type": "string",
+                      "description": "Target resource pool (VMware)"
+                    },
+                    "datastore": {
+                      "type": "string",
+                      "description": "Target datastore"
+                    },
+                    "network": {
+                      "type": "string",
+                      "description": "Network/vSwitch name"
+                    },
+                    "cpus": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "CPU count"
+                    },
+                    "memoryMB": {
+                      "type": "integer",
+                      "minimum": 1024,
+                      "description": "Memory in MB"
+                    }
+                  }
+                },
+                "guestVariables": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Custom variables exposed to guest via KVP/guestinfo"
+                }
+              }
+            },
+            "rke2Config": {
+              "type": "object",
+              "required": ["role"],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["server", "agent"],
+                  "description": "RKE2 node role"
+                },
+                "configPath": {
+                  "type": "string",
+                  "description": "Path to rkeprep YAML config (relative to vm-configs/)"
+                },
+                "autoStart": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Whether boot service should auto-execute config"
+                }
+              }
+            },
+            "operations": {
+              "type": "object",
+              "properties": {
+                "onCreate": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Commands to run after VM creation"
+                },
+                "onUpdate": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Commands to run on configuration update"
+                },
+                "onDelete": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Commands to run before VM deletion"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ClusterConfig": {
+      "type": "object",
+      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "enum": ["vmconfig/v1"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["ClusterConfig"]
+        },
+        "metadata": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Cluster name"
+            }
+          }
+        },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "defaults": {
+              "type": "object",
+              "properties": {
+                "hypervisor": {
+                  "type": "object",
+                  "description": "Default hypervisor settings for all VMs"
+                },
+                "rke2Config": {
+                  "type": "object",
+                  "description": "Default RKE2 settings for all nodes"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/definitions/VirtualMachineConfig"
+    },
+    {
+      "$ref": "#/definitions/ClusterConfig"
+    }
+  ]
+}

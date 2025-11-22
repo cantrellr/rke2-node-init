@@ -1,0 +1,172 @@
+name: Validate VM Configurations
+
+on:
+  pull_request:
+    paths:
+      - 'vm-configs/**/*.yaml'
+      - 'vm-configs/**/*.yml'
+      - 'vm-configs/schema.json'
+      - 'scripts/vm-config/**'
+      - '.github/workflows/validate-vm-configs.yml'
+
+jobs:
+  validate:
+    name: Validate VM Configs
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install jsonschema pyyaml
+      
+      - name: Validate all VM configurations
+        run: |
+          echo "=================================="
+          echo "VM Configuration Validation"
+          echo "=================================="
+          
+          # Find all changed YAML files in vm-configs/
+          changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' || true)
+          
+          if [ -z "$changed_files" ]; then
+            echo "No VM config files changed in this PR"
+            exit 0
+          fi
+          
+          echo "Changed VM configuration files:"
+          echo "$changed_files" | sed 's/^/  - /'
+          echo ""
+          
+          # Validate each changed file
+          exit_code=0
+          for file in $changed_files; do
+            if [ -f "$file" ]; then
+              echo "Validating: $file"
+              if ! python3 scripts/vm-config/config_validator.py "$file"; then
+                exit_code=1
+              fi
+              echo ""
+            fi
+          done
+          
+          if [ $exit_code -eq 0 ]; then
+            echo "✓ All VM configurations are valid"
+          else
+            echo "✗ Validation failed - see errors above"
+          fi
+          
+          exit $exit_code
+      
+      - name: Validate schema integrity
+        run: |
+          echo "Validating JSON schema structure..."
+          python3 -c "import json; json.load(open('vm-configs/schema.json'))"
+          echo "✓ Schema is valid JSON"
+      
+      - name: Check for naming conflicts
+        run: |
+          echo "Checking for VM name conflicts..."
+          
+          # Extract all VM names from VirtualMachineConfig files
+          vm_names=$(find vm-configs -name '*.yaml' -o -name '*.yml' | while read file; do
+            python3 -c "
+import yaml, sys
+try:
+    with open('$file') as f:
+        config = yaml.safe_load(f)
+        if config and config.get('kind') == 'VirtualMachineConfig':
+            print(config.get('metadata', {}).get('name', ''))
+except: pass
+" 2>/dev/null
+          done | sort)
+          
+          # Check for duplicates
+          duplicates=$(echo "$vm_names" | uniq -d)
+          
+          if [ -n "$duplicates" ]; then
+            echo "✗ ERROR: Duplicate VM names found:"
+            echo "$duplicates" | sed 's/^/  - /'
+            exit 1
+          else
+            echo "✓ No VM name conflicts detected"
+          fi
+      
+      - name: Dry-run configuration application
+        run: |
+          echo "Testing configuration application (dry-run)..."
+          
+          # Install additional dependencies for dry-run
+          pip3 install pywinrm
+          
+          # Find changed VM configs
+          changed_configs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' | grep -v 'cluster-defaults' || true)
+          
+          if [ -z "$changed_configs" ]; then
+            echo "No VirtualMachineConfig files changed"
+            exit 0
+          fi
+          
+          # Test each config
+          for config in $changed_configs; do
+            if [ -f "$config" ]; then
+              echo "Dry-run: $config"
+              python3 scripts/vm-config/apply_vm_config.py "$config" --dry-run || exit 1
+            fi
+          done
+          
+          echo "✓ All configurations passed dry-run validation"
+      
+      - name: Generate validation report
+        if: always()
+        run: |
+          echo "# VM Configuration Validation Report" > validation-report.md
+          echo "" >> validation-report.md
+          echo "**PR**: #${{ github.event.pull_request.number }}" >> validation-report.md
+          echo "**Branch**: ${{ github.head_ref }}" >> validation-report.md
+          echo "**Commit**: ${{ github.sha }}" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          # List changed files
+          echo "## Changed Files" >> validation-report.md
+          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/' | sed 's/^/- /' >> validation-report.md
+          
+          # Run validation with JSON output
+          echo "" >> validation-report.md
+          echo "## Validation Results" >> validation-report.md
+          python3 scripts/vm-config/config_validator.py vm-configs/ --all --json > validation-results.json 2>&1 || true
+          
+          # Parse and format results
+          python3 -c "
+import json
+with open('validation-results.json') as f:
+    results = json.load(f)
+    print(f\"- **Total files**: {results['total_files']}\")
+    print(f\"- **Errors**: {results['total_errors']}\")
+    print(f\"- **Warnings**: {results['total_warnings']}\")
+" >> validation-report.md
+          
+          cat validation-report.md
+      
+      - name: Comment PR with validation results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('validation-report.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
