@@ -1,0 +1,334 @@
+name: Validate RKE2 Configs
+
+on:
+  pull_request:
+    paths:
+      - 'configs/**/*.yaml'
+      - 'configs/**/*.yml'
+      - 'examples/config/**/*.yaml'
+      - 'examples/config/**/*.yml'
+      - 'vm-configs/**/rke2-configs/**/*.yaml'
+      - 'vm-configs/**/rke2-configs/**/*.yml'
+      - '.github/workflows/validate-rke-configs.yml'
+
+jobs:
+  validate:
+    name: Validate RKE2 Configs (rkeprep/v1)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git diff
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install pyyaml jsonschema
+      
+      - name: Find changed RKE2 config files
+        id: find-files
+        run: |
+          echo "Finding changed rkeprep/v1 configuration files..."
+          
+          # Find all changed YAML files that might be RKE2 configs
+          if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
+            all_changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.ya*ml$' || true)
+          else
+            echo "Warning: Could not find origin/${{ github.base_ref }}, checking all YAML files"
+            all_changed=$(find . -name '*.yaml' -o -name '*.yml' | sed 's|^\./||' || true)
+          fi
+          
+          # Filter for files that contain apiVersion: rkeprep/v1
+          changed_files=""
+          for file in $all_changed; do
+            if [ -f "$file" ] && grep -q "apiVersion: rkeprep/v1" "$file" 2>/dev/null; then
+              changed_files="${changed_files}${file}"$'\n'
+            fi
+          done
+          
+          if [ -z "$changed_files" ]; then
+            echo "No rkeprep/v1 config files changed in this PR"
+            echo "has_files=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changed rkeprep/v1 configuration files:"
+            echo "$changed_files" | sed 's/^/  - /'
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            # Save to file for next step
+            echo "$changed_files" > /tmp/changed_files.txt
+          fi
+      
+      - name: Validate YAML syntax
+        if: steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "=================================="
+          echo "YAML Syntax Validation"
+          echo "=================================="
+          
+          exit_code=0
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              echo "Checking syntax: $file"
+              if ! python3 -c "import yaml; yaml.safe_load(open('$file'))" 2>&1; then
+                echo "  ✗ YAML syntax error in $file"
+                exit_code=1
+              else
+                echo "  ✓ Valid YAML syntax"
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          if [ $exit_code -ne 0 ]; then
+            echo ""
+            echo "✗ YAML syntax validation failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✓ All files have valid YAML syntax"
+      
+      - name: Validate apiVersion and kind
+        if: steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "=================================="
+          echo "API Version & Kind Validation"
+          echo "=================================="
+          
+          exit_code=0
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              echo "Validating: $file"
+              
+              # Extract apiVersion and kind
+              api_version=$(python3 -c "import yaml; doc=yaml.safe_load(open('$file')); print(doc.get('apiVersion', ''))" 2>/dev/null || echo "")
+              kind=$(python3 -c "import yaml; doc=yaml.safe_load(open('$file')); print(doc.get('kind', ''))" 2>/dev/null || echo "")
+              
+              # Validate apiVersion
+              if [ "$api_version" != "rkeprep/v1" ]; then
+                echo "  ✗ ERROR: Invalid apiVersion '$api_version' (expected: rkeprep/v1)"
+                exit_code=1
+                continue
+              fi
+              
+              # Validate kind (case-insensitive check)
+              kind_lower=$(echo "$kind" | tr '[:upper:]' '[:lower:]')
+              valid_kinds="server|agent|addserver|image|push|verify|airgap|customca|labelnode|taintnode|serverconfig|agentconfig"
+              
+              if echo "$kind_lower" | grep -qE "^($valid_kinds)$"; then
+                echo "  ✓ Valid: apiVersion=$api_version, kind=$kind"
+              else
+                echo "  ✗ ERROR: Invalid kind '$kind'"
+                echo "     Valid kinds: Server, Agent, AddServer, Image, Push, Verify, Airgap,"
+                echo "                  CustomCA, LabelNode, TaintNode, ServerConfig, AgentConfig"
+                exit_code=1
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          if [ $exit_code -ne 0 ]; then
+            echo ""
+            echo "✗ API version/kind validation failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✓ All files have valid apiVersion and kind"
+      
+      - name: Validate required fields
+        if: steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "=================================="
+          echo "Required Fields Validation"
+          echo "=================================="
+          
+          cat > /tmp/validate_fields.py << 'PYEOF'
+          import yaml
+          import sys
+          
+          def validate_config(file_path):
+              """Validate required fields based on kind"""
+              errors = []
+              warnings = []
+              
+              with open(file_path) as f:
+                  config = yaml.safe_load(f)
+              
+              kind = config.get('kind', '').lower()
+              metadata = config.get('metadata', {})
+              spec = config.get('spec', {})
+              
+              # Common validations
+              if not metadata:
+                  errors.append("Missing 'metadata' section")
+              elif not metadata.get('name'):
+                  errors.append("Missing 'metadata.name'")
+              
+              if not spec and kind not in ['verify']:
+                  warnings.append("Missing 'spec' section (may be intentional for some configs)")
+              
+              # Kind-specific validations
+              if kind in ['server', 'serverconfig']:
+                  # Server node validations
+                  if 'nodeIp' not in spec and 'node-ip' not in spec:
+                      warnings.append("Missing nodeIp/node-ip (recommended for server nodes)")
+                  
+                  if 'tokenFile' not in spec and 'token-file' not in spec:
+                      warnings.append("Missing tokenFile/token-file (required for cluster authentication)")
+              
+              elif kind in ['agent', 'agentconfig']:
+                  # Agent node validations
+                  if 'cluster' not in spec:
+                      if 'serverUrl' not in spec and 'server-url' not in spec:
+                          errors.append("Missing serverUrl/server-url (required for agent nodes)")
+                  
+                  if 'tokenFile' not in spec and 'token-file' not in spec and 'token' not in spec.get('rke2', {}):
+                      warnings.append("Missing tokenFile/token-file or rke2.token (required for cluster join)")
+              
+              elif kind == 'addserver':
+                  # Additional server validations
+                  if 'serverUrl' not in spec and 'server-url' not in spec:
+                      errors.append("Missing serverUrl/server-url (required for joining existing cluster)")
+                  
+                  if 'tokenFile' not in spec and 'token-file' not in spec:
+                      warnings.append("Missing tokenFile/token-file (required for cluster authentication)")
+              
+              elif kind == 'image':
+                  # Image preparation validations
+                  if 'rke2Version' not in spec and 'rke2-version' not in spec:
+                      errors.append("Missing rke2Version/rke2-version (required for image preparation)")
+              
+              elif kind == 'push':
+                  # Registry push validations
+                  if 'registry' not in spec:
+                      errors.append("Missing registry (required for push operation)")
+              
+              return errors, warnings
+          
+          if __name__ == '__main__':
+              file_path = sys.argv[1]
+              errors, warnings = validate_config(file_path)
+              
+              if errors:
+                  for err in errors:
+                      print(f"  ERROR: {err}")
+              if warnings:
+                  for warn in warnings:
+                      print(f"  WARNING: {warn}")
+              
+              sys.exit(1 if errors else 0)
+          PYEOF
+          
+          exit_code=0
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              echo "Checking: $file"
+              if python3 /tmp/validate_fields.py "$file"; then
+                echo "  ✓ All required fields present"
+              else
+                exit_code=1
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          if [ $exit_code -ne 0 ]; then
+            echo ""
+            echo "✗ Required fields validation failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✓ All required fields validated"
+      
+      - name: Check for sensitive data
+        if: steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "=================================="
+          echo "Sensitive Data Check"
+          echo "=================================="
+          
+          # Patterns that might indicate sensitive data
+          sensitive_patterns=(
+            "password.*:.*[^{$]"  # Passwords not using variables
+            "token.*:.*K10[a-zA-Z0-9]{40}"  # Actual RKE2 tokens
+            "privateKey"  # Private keys
+            "BEGIN.*PRIVATE KEY"  # PEM private keys
+          )
+          
+          found_issues=0
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              echo "Scanning: $file"
+              
+              for pattern in "${sensitive_patterns[@]}"; do
+                if grep -qE "$pattern" "$file" 2>/dev/null; then
+                  echo "  ⚠ WARNING: Possible sensitive data detected (pattern: $pattern)"
+                  echo "    Please ensure this file doesn't contain real credentials"
+                  found_issues=$((found_issues + 1))
+                fi
+              done
+              
+              if [ $found_issues -eq 0 ]; then
+                echo "  ✓ No obvious sensitive data detected"
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          if [ $found_issues -gt 0 ]; then
+            echo ""
+            echo "⚠ WARNING: Potential sensitive data detected in $found_issues location(s)"
+            echo "  This is not a failure, but please review carefully"
+          else
+            echo ""
+            echo "✓ No sensitive data patterns detected"
+          fi
+      
+      - name: Generate validation report
+        if: always() && steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "# RKE2 Configuration Validation Report" > validation-report.md
+          echo "" >> validation-report.md
+          echo "**PR**: #${{ github.event.pull_request.number }}" >> validation-report.md
+          echo "**Branch**: ${{ github.head_ref }}" >> validation-report.md
+          echo "**Commit**: ${{ github.sha }}" >> validation-report.md
+          echo "" >> validation-report.md
+          
+          echo "## Validated Files" >> validation-report.md
+          if [ -f /tmp/changed_files.txt ]; then
+            cat /tmp/changed_files.txt | sed 's/^/- /' >> validation-report.md
+          else
+            echo "- (no files to validate)" >> validation-report.md
+          fi
+          
+          echo "" >> validation-report.md
+          echo "## Validation Steps" >> validation-report.md
+          echo "- ✓ YAML syntax validation" >> validation-report.md
+          echo "- ✓ apiVersion: rkeprep/v1 validation" >> validation-report.md
+          echo "- ✓ kind field validation" >> validation-report.md
+          echo "- ✓ Required fields check" >> validation-report.md
+          echo "- ✓ Sensitive data scan" >> validation-report.md
+          
+          cat validation-report.md
+      
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rke2-config-validation-report
+          path: validation-report.md
+          retention-days: 30
+      
+      - name: Summary
+        if: always() && steps.find-files.outputs.has_files == 'true'
+        run: |
+          echo "=================================="
+          echo "Validation Complete"
+          echo "=================================="
+          echo ""
+          echo "All rkeprep/v1 configuration files have been validated."
+          echo "Report artifact: rke2-config-validation-report"

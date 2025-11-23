@@ -37,9 +37,10 @@ jobs:
           echo "=================================="
           
           # Find all changed YAML files in vm-configs/
+          # Exclude rke2-configs subdirectory (uses different schema: rkeprep/v1)
           # Handle case where base branch doesn't exist in origin
           if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
-            changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' || true)
+            changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' | grep -v 'rke2-configs' || true)
           else
             # Fallback: check all vm-configs files
             echo "Warning: Could not find origin/${{ github.base_ref }}, validating all vm-configs files"
