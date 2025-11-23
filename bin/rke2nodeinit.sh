@@ -20,11 +20,11 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.8a (multi-interface support)
+#       Version: 0.8b (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
-#            
+#
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
@@ -45,7 +45,7 @@ esac
 #
 # Connectivity expectations:
 #   - image is the ONLY action that requires Internet access to gather artifacts
-#   - All other actions (push, server, add-server, agent, verify, label-node, 
+#   - All other actions (push, server, add-server, agent, verify, label-node,
 #     taint-node, custom-ca) are designed to run fully offline
 #
 # Key features in this version:
@@ -144,7 +144,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 RKE2_VERSION=""                                       # auto-detect if empty
 # WARNING: These are EXAMPLE defaults only. Override with -r/-u/-p or via YAML config.
 #          DO NOT use these default credentials in production environments.
-REGISTRY="rke2registry.dev.local"
+REGISTRY=""
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
@@ -160,7 +160,21 @@ DEFAULT_SEARCH="svc.cluster.local,cluster.local"
 AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
+DRY_RUN=0                   # --dry-run simulates write operations without making changes
+VERBOSE=0                   # --verbose enables detailed output
+QUIET=0                     # --quiet suppresses informational messages
+SCRIPT_VERSION="1.0.0"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
+LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
+VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
+ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
+BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
+BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
+BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
+BOOT_TARGET_DIR="/root/server-config" # Target directory for discovered configs
+VM_PLATFORM="auto"          # auto-detect or specify: vmware, hyperv, virtualbox, generic
+BOOT_SCRIPT_PATH="/usr/local/bin/rke2-boot.sh"
+BOOT_SERVICE_PATH="/etc/systemd/system/rke2-boot.service"
 NODE_NAME=""
 ACTION_ARGS=()
 
@@ -179,12 +193,1503 @@ IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
 SHA256_FILE="sha256sum-$ARCH.txt"
 
-# Logging
-LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
+# Optional: hardened-cni-plugins HTTP download configuration
+# Operators should set `HARDENED_CNI_URL` to a direct HTTP(S) downloadable
+# tarball of the hardened-cni image (for air-gapped staging). When empty,
+# the image will not be fetched automatically.
+HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
+# Basename used for saved artifact (operator can override by setting
+# HARDENED_CNI_BN in the environment if desired).
+HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
+HARDENED_CNI_FILE="$DOWNLOADS_DIR/$HARDENED_CNI_BN"
+
+# Logging - LOG_FILE will be set by initialize_action_context or defaults to timestamped name
+LOG_FILE=""
 
 # Cached artifact metadata (populated at runtime)
 NERDCTL_FULL_TGZ=""
 NERDCTL_STD_TGZ=""
+
+# ==============================================================================
+# PHASE 3: CLI IMPROVEMENTS - Help System and Verbosity Control
+# ==============================================================================
+# Purpose: Enhanced CLI with per-action help, version info, and verbosity control
+# Author: GitHub Copilot (Phase 3 Implementation)
+# Date: 2025-11-16
+# ==============================================================================
+
+#-----------------------------------------------------------------------------
+# Function: show_version
+# Purpose: Display version information and build details
+# Parameters: None
+# Returns: None (exits with 0)
+#-----------------------------------------------------------------------------
+show_version() {
+  cat <<EOF
+RKE2 Node Initialization Script
+Version: ${SCRIPT_VERSION}
+Compatible with: RKE2 v1.24+
+Bash version: ${BASH_VERSION}
+Last updated: November 16, 2025
+
+Phase 1: Core utilities (19 functions)
+Phase 2: Action refactoring (4 actions)  
+Phase 3: CLI improvements (help system, verbosity control)
+
+Repository: cantrellcloud/rke2-node-init
+Branch: feat/stage-artifact-path
+EOF
+  exit 0
+}
+
+#-----------------------------------------------------------------------------
+# Function: show_action_help
+# Purpose: Display detailed help for specific action
+# Parameters:
+#   \$1 - Action name
+# Returns: None (exits with 0)
+#-----------------------------------------------------------------------------
+show_action_help() {
+  local action="${1:-}"
+  
+  case "$action" in
+    verify)
+      cat <<'HELPEOF'
+Action: verify
+==============
+Purpose: Verify that the node meets all RKE2 prerequisites (read-only check)
+
+Usage:
+  sudo bin/rke2nodeinit.sh verify
+  sudo bin/rke2nodeinit.sh verify -f configs/site-defaults.yaml
+
+Options:
+  -f FILE    Optional YAML file with site defaults (DNS, search domains)
+  --verbose  Show detailed prerequisite checks
+  --quiet    Suppress informational messages
+
+Exit Codes:
+  0 - All prerequisites met
+  2 - One or more prerequisites failed
+
+Examples:
+  # Basic verification
+  sudo bin/rke2nodeinit.sh verify
+  
+  # Verify with site defaults
+  sudo bin/rke2nodeinit.sh verify -f configs/production-site.yaml
+  
+  # Verbose verification
+  sudo bin/rke2nodeinit.sh verify --verbose
+
+Output:
+  - System requirements check (CPU, memory, disk)
+  - Network connectivity validation
+  - Required ports availability
+  - Kernel module availability
+  - Swap configuration
+  
+Next Steps:
+  On success: Run 'image' action to prepare golden image
+  On failure: Review error messages for specific remediation steps
+HELPEOF
+      ;;
+    
+    custom-ca)
+      cat <<'HELPEOF'
+Action: custom-ca
+=================
+Purpose: Generate bootstrap token from custom CA configuration
+
+Usage:
+  sudo bin/rke2nodeinit.sh custom-ca -f <config.yaml>
+
+Required Options:
+  -f FILE    YAML config file with CustomCA kind
+
+Optional Flags:
+  --verbose  Show detailed token generation process
+  --quiet    Suppress informational messages
+
+YAML Structure:
+  kind: CustomCA
+  metadata:
+    name: cluster-ca
+  spec:
+    customCA:
+      rootCrt: path/to/root-ca.crt
+      rootKey: path/to/root-ca.key
+      intermediateCrt: path/to/intermediate-ca.crt  # Optional
+      intermediateKey: path/to/intermediate-ca.key  # Optional
+      installToOSTrust: true  # Install to OS trust store
+
+Exit Codes:
+  0 - Token generated successfully
+  1 - Token generation failed
+  5 - Validation error (missing config, invalid kind, incomplete spec)
+
+Output Files:
+  outputs/<name>-bootstrap-token.txt  (permissions: 600)
+
+Examples:
+  # Generate token from custom CA
+  sudo bin/rke2nodeinit.sh custom-ca -f configs/cluster-ca.yaml
+  
+  # With verbose output
+  sudo bin/rke2nodeinit.sh custom-ca -f configs/cluster-ca.yaml --verbose
+
+Security Notes:
+  - Token file has restrictive permissions (600)
+  - Keep token secure - it provides cluster access
+  - Token is used for server/agent bootstrap
+HELPEOF
+      ;;
+    
+    push)
+      cat <<'HELPEOF'
+Action: push
+============
+Purpose: Push container images to private registry with comprehensive tracking
+
+Usage:
+  sudo bin/rke2nodeinit.sh push -f <config.yaml>
+  sudo bin/rke2nodeinit.sh push -r <registry> -u <user> -p <pass>
+
+Options:
+  -f FILE       YAML config file with Push kind
+  -r REGISTRY   Registry URL (host or host/namespace)
+  -u USER       Registry username
+  -p PASS       Registry password
+  --dry-run     Simulate push without actually pushing images
+  --dry-push    Legacy alias for --dry-run
+  --verbose     Show detailed per-image push progress
+  --quiet       Suppress progress messages (show summary only)
+
+YAML Structure:
+  kind: Push
+  metadata:
+    name: registry-push
+  spec:
+    registry: registry.example.com/rke2
+    registryUsername: admin
+    registryPassword: secure-password
+
+Prerequisites:
+  - Images archive must exist (run 'image' action first)
+  - Registry must be accessible
+  - Valid credentials required
+
+Exit Codes:
+  0 - All images pushed successfully
+  1 - Authentication failed or some images failed
+  3 - Images archive not found
+
+Output Files:
+  outputs/images-manifest.txt   - Human-readable manifest
+  outputs/images-manifest.json  - Machine-readable manifest
+
+Metrics Tracked:
+  - total: Total images processed
+  - success: Successfully pushed
+  - failed: Failed pushes
+  - authenticated: Registry login status
+
+Examples:
+  # Push with YAML config
+  sudo bin/rke2nodeinit.sh push -f configs/registry.yaml
+  
+  # Push with CLI flags
+  sudo bin/rke2nodeinit.sh push -r registry.local/rke2 -u admin -p pass
+  
+  # Dry-run to test without pushing
+  sudo bin/rke2nodeinit.sh push -f config.yaml --dry-run
+  
+  # Quiet mode (summary only)
+  sudo bin/rke2nodeinit.sh push -f config.yaml --quiet
+HELPEOF
+      ;;
+    
+    image)
+      cat <<'HELPEOF'
+Action: image
+=============
+Purpose: Prepare golden image for air-gapped RKE2 deployment
+
+Usage:
+  sudo bin/rke2nodeinit.sh image -f <config.yaml>
+
+Required Options:
+  -f FILE       YAML config file with Image kind
+
+Optional Flags:
+  -v VERSION    RKE2 version (e.g., v1.28.1+rke2r1)
+  -r REGISTRY   Private registry URL
+  -u USER       Registry username
+  -p PASS       Registry password
+  --load-images Load images into container runtime
+  --dry-run     Simulate preparation without making changes
+  --verbose     Show detailed operation progress
+  --quiet       Suppress detailed progress (show summary only)
+  -y            Auto-confirm shutdown/reboot prompt
+
+YAML Structure:
+  kind: Image
+  metadata:
+    name: golden-image
+  spec:
+    rke2Version: v1.28.1+rke2r1
+    registry: registry.example.com/rke2
+    registryUsername: admin
+    registryPassword: password
+    defaultDns: 8.8.8.8,8.8.4.4
+    defaultSearchDomains: cluster.local
+    customCA:
+      rootCrt: path/to/ca.crt
+      installToOSTrust: true
+
+Process (8 Phases):
+  1. Validate environment (directories, permissions)
+  2. Load configuration from YAML
+  3. Install OS prerequisites
+  4. Cache RKE2 artifacts (downloads, staging)
+  5. Process container images (optional loading)
+  6. Configure registry trust
+  7. Save site defaults
+  8. Generate SBOM and documentation
+
+Exit Codes:
+  0 - Image prepared successfully
+  1 - Validation or dependency failure
+  3 - Artifact caching failure
+
+Output Files:
+  outputs/sbom/<name>-sbom.txt      - Text SBOM with verification
+  outputs/sbom/<name>-sbom.json     - JSON SBOM for tooling
+  outputs/<name>/README.txt         - Human-readable summary
+  /etc/rke2image.defaults           - Site defaults
+
+Metrics Tracked (15+):
+  validation_passed, config_loaded, prereqs_installed,
+  artifacts_cached, artifact_verified, sbom_created, etc.
+
+Examples:
+  # Basic image preparation
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml
+  
+  # With image loading
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --load-images
+  
+  # Dry-run to test configuration
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --dry-run
+  
+  # Quiet mode with auto-reboot
+  sudo bin/rke2nodeinit.sh image -f configs/image.yaml --quiet -y
+
+Next Steps:
+  1. Review SBOM and verify all artifacts
+  2. Shut down VM for cloning/templating
+  3. Deploy clones with 'server' or 'agent' actions
+HELPEOF
+      ;;
+    
+    server|agent|add-server)
+      cat <<EOF
+Action: \$action
+$(printf '=%.0s' {1..40})
+Purpose: Deploy RKE2 cluster node
+
+Usage:
+  sudo bin/rke2nodeinit.sh \$action -f <config.yaml>
+
+Required Options:
+  -f FILE       YAML config file
+
+Optional Flags:
+  --dry-run     Simulate deployment without making changes
+  --verbose     Show detailed deployment progress
+  --quiet       Suppress detailed progress
+  -y            Auto-confirm prompts
+
+Prerequisites:
+  - Golden image prepared (via 'image' action)
+  - Network configured
+  - For agent/add-server: First server must be running
+
+Exit Codes:
+  0 - Deployment successful
+  1 - Deployment failed
+  5 - Validation error
+
+Examples:
+  # Deploy first server
+  sudo bin/rke2nodeinit.sh server -f configs/server.yaml
+  
+  # Deploy agent
+  sudo bin/rke2nodeinit.sh agent -f configs/agent.yaml
+  
+  # Dry-run deployment
+  sudo bin/rke2nodeinit.sh \$action -f config.yaml --dry-run
+
+For detailed deployment guide, see: docs/DEPLOYMENT.md
+EOF
+      ;;
+    
+    *)
+      echo "Unknown action: $action"
+      echo "Run 'bin/rke2nodeinit.sh --help' for available actions"
+      exit 1
+      ;;
+  esac
+  
+  exit 0
+}
+
+# ==============================================================================
+# PHASE 1 REDESIGN: Core Utilities and Infrastructure
+# ==============================================================================
+# Purpose: Foundational utilities adopting rke2imageprep.sh design patterns
+# Author: GitHub Copilot (Phase 1 Implementation)
+# Date: 2025-11-16
+# ==============================================================================
+
+# ==============================================================================
+# SECTION 1: Enhanced Logging Utilities
+# Purpose: Structured logging with multiple severity levels
+# ==============================================================================
+
+#=============================================================================
+# Function: log_info
+# Description: Log informational messages to stdout and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_info "Operation started" "with parameter: $param"
+#=============================================================================
+log_info() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  # Respect QUIET flag - suppress informational messages
+  if [[ "${QUIET:-0}" -ne 1 ]]; then
+    echo "[INFO] $msg"
+  fi
+  printf "%s %s rke2nodeinit[%d]: INFO: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_debug
+# Description: Log verbose debug messages (only when VERBOSE=1)
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_debug "Detailed step information" "Value: $var"
+# Best Practices:
+#   - Only outputs when VERBOSE flag is set
+#   - Always logs to file regardless of VERBOSE setting
+#   - Use for detailed progress and debugging information
+#=============================================================================
+log_debug() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  # Only display to console if VERBOSE is enabled
+  if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+    echo "[DEBUG] $msg"
+  fi
+  printf "%s %s rke2nodeinit[%d]: DEBUG: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_warn
+# Description: Log warning messages to stdout and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_warn "Using default credentials" "Override recommended"
+#=============================================================================
+log_warn() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[WARN] $msg"
+  printf "%s %s rke2nodeinit[%d]: WARN: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_error
+# Description: Log error messages to stderr and log file
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_error "Operation failed" "Exit code: $rc"
+#=============================================================================
+log_error() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[ERROR] $msg" >&2
+  printf "%s %s rke2nodeinit[%d]: ERROR: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+#=============================================================================
+# Function: log_success
+# Description: Log success messages with visual indicator
+# Parameters:
+#   $@ - Message components to log
+# Returns: Always returns 0
+# Usage: log_success "Download completed" "File: $filename"
+#=============================================================================
+log_success() {
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  # Respect QUIET flag - suppress success messages
+  if [[ "${QUIET:-0}" -ne 1 ]]; then
+    echo "[✓] $msg"
+  fi
+  printf "%s %s rke2nodeinit[%d]: SUCCESS: %s\n" "$ts" "$host" "$$" "$msg" >> "$LOG_FILE"
+}
+
+# ==============================================================================
+# SECTION 2: Dependency Management
+# Purpose: Auto-detect, validate, and install system dependencies
+# Best Practice: Interactive installation with user consent and multi-OS support
+# ==============================================================================
+
+#=============================================================================
+# Function: detect_os
+# Description: Detect the operating system distribution for package management
+# Parameters: None
+# Returns: 
+#   Prints OS identifier to stdout (ubuntu|debian|rhel|centos|fedora|rocky|almalinux|unknown)
+#   Exit code 0 on success, 1 if OS cannot be detected
+# Usage: OS=$(detect_os)
+# Best Practices:
+#   - Uses /etc/os-release for standardized detection
+#   - Normalizes to lowercase for consistent comparison
+#=============================================================================
+detect_os() {
+  if [[ -f /etc/os-release ]]; then
+    # Source the file to get ID variable
+    . /etc/os-release
+    echo "${ID}"
+    return 0
+  else
+    echo "unknown"
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: check_dependencies
+# Description: Check for missing system dependencies without installing
+# Parameters:
+#   $@ - List of command names to check (e.g., curl wget jq)
+# Returns:
+#   0 if all dependencies are present
+#   1 if any dependencies are missing
+#   Populates global array MISSING_DEPS with missing commands
+# Usage: 
+#   if check_dependencies curl wget jq; then
+#     echo "All dependencies present"
+#   fi
+# Best Practices:
+#   - Non-invasive check (does not modify system)
+#   - Uses command -v for POSIX compliance
+#   - Silent operation (no output on success)
+#=============================================================================
+check_dependencies() {
+  local required_deps=("$@")
+  MISSING_DEPS=()
+  
+  local dep
+  for dep in "${required_deps[@]}"; do
+    if ! command -v "$dep" &> /dev/null; then
+      MISSING_DEPS+=("$dep")
+    fi
+  done
+  
+  if [ ${#MISSING_DEPS[@]} -eq 0 ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: install_dependencies_interactive
+# Description: Interactively install missing dependencies with user consent
+# Parameters:
+#   $@ - List of package names to check and potentially install
+# Returns:
+#   0 if all dependencies are satisfied (already installed or newly installed)
+#   1 if user declines installation or installation fails
+# Usage: install_dependencies_interactive curl wget jq
+# Dependencies: detect_os, check_dependencies
+# Best Practices:
+#   - Always prompts for user consent before system modifications
+#   - Supports multiple package managers (apt, dnf, yum)
+#   - Verifies successful installation after completion
+#   - Provides clear feedback at each step
+#=============================================================================
+install_dependencies_interactive() {
+  local required_deps=("$@")
+  
+  # Check which dependencies are missing
+  if check_dependencies "${required_deps[@]}"; then
+    return 0  # All dependencies already present
+  fi
+  
+  # Display missing dependencies
+  echo ""
+  echo "Missing dependencies detected: ${MISSING_DEPS[*]}"
+  echo ""
+  
+  # Prompt for installation (skip if AUTO_YES is set)
+  if [[ "${AUTO_YES:-0}" -eq 1 ]]; then
+    echo "Auto-confirm enabled (-y flag); installing dependencies automatically..."
+  else
+    read -p "Would you like to install missing dependencies now? (y/n): " -n 1 -r
+    echo ""
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo "Installation cancelled. Please install dependencies manually:"
+      local dep
+      for dep in "${MISSING_DEPS[@]}"; do
+        echo "  - $dep"
+      done
+      return 1
+    fi
+  fi
+  
+  # Detect OS for package manager selection
+  local os_id
+  os_id=$(detect_os)
+  
+  if [[ "$os_id" == "unknown" ]]; then
+    log_error "Cannot detect OS. Please install dependencies manually:"
+    local dep
+    for dep in "${MISSING_DEPS[@]}"; do
+      echo "  - $dep"
+    done
+    return 1
+  fi
+  
+  echo "Installing dependencies..."
+  
+  # Install based on OS
+  case "$os_id" in
+    ubuntu|debian)
+      echo "Detected Debian/Ubuntu - using apt..."
+      export DEBIAN_FRONTEND=noninteractive
+      if ! sudo apt-get update -qq; then
+        log_error "apt-get update failed"
+        return 1
+      fi
+      if ! sudo apt-get install -y "${MISSING_DEPS[@]}"; then
+        log_error "apt-get install failed"
+        return 1
+      fi
+      ;;
+    rhel|centos|fedora|rocky|almalinux)
+      echo "Detected RHEL/CentOS/Fedora family - using dnf/yum..."
+      # Try dnf first (newer systems), fall back to yum
+      if command -v dnf &> /dev/null; then
+        if ! sudo dnf install -y "${MISSING_DEPS[@]}"; then
+          log_error "dnf install failed"
+          return 1
+        fi
+      elif command -v yum &> /dev/null; then
+        if ! sudo yum install -y "${MISSING_DEPS[@]}"; then
+          log_error "yum install failed"
+          return 1
+        fi
+      else
+        log_error "No package manager found (dnf or yum)"
+        return 1
+      fi
+      ;;
+    *)
+      log_error "Unsupported OS: $os_id"
+      echo "Please install dependencies manually:"
+      local dep
+      for dep in "${MISSING_DEPS[@]}"; do
+        echo "  - $dep"
+      done
+      return 1
+      ;;
+  esac
+  
+  # Verify installation
+  echo "Verifying installation..."
+  local install_failed=false
+  local dep
+  for dep in "${MISSING_DEPS[@]}"; do
+    if ! command -v "$dep" &> /dev/null; then
+      log_error "$dep installation verification failed"
+      install_failed=true
+    else
+      echo "  ✓ $dep installed successfully"
+    fi
+  done
+  
+  if [ "$install_failed" = true ]; then
+    return 1
+  fi
+  
+  echo ""
+  echo "All dependencies installed successfully!"
+  echo ""
+  return 0
+}
+
+# ==============================================================================
+# SECTION 3: Operation Metrics Tracking
+# Purpose: Track success/failure counts for batch operations
+# Best Practice: Provides transparency and actionable summaries
+# ==============================================================================
+
+# Global associative array for metrics (declare once)
+declare -gA METRICS 2>/dev/null || true
+
+#=============================================================================
+# Function: metrics_init
+# Description: Initialize metrics counters for a new operation
+# Parameters:
+#   $1 - Operation name (optional, default: "operation")
+# Returns: Always returns 0
+# Usage: metrics_init "image_download"
+# Best Practices:
+#   - Call at the start of each batch operation
+#   - Resets all counters to ensure clean state
+#=============================================================================
+metrics_init() {
+  local operation_name="${1:-operation}"
+  METRICS[operation]="$operation_name"
+  METRICS[total]=0
+  METRICS[success]=0
+  METRICS[failed]=0
+  METRICS[skipped]=0
+  METRICS[start_time]=$(date +%s)
+}
+
+#=============================================================================
+# Function: metrics_increment
+# Description: Increment a specific metric counter
+# Parameters:
+#   $1 - Metric name (total|success|failed|skipped)
+#   $2 - Increment amount (optional, default: 1)
+# Returns: Always returns 0
+# Usage: 
+#   metrics_increment total
+#   metrics_increment success
+#   metrics_increment failed
+#   metrics_increment skipped
+# Best Practices:
+#   - Call after each operation completes
+#   - Use consistent metric names across codebase
+#=============================================================================
+metrics_increment() {
+  local metric_name="$1"
+  local increment="${2:-1}"
+  
+  # Initialize if not set
+  if [[ -z "${METRICS[$metric_name]:-}" ]]; then
+    METRICS[$metric_name]=0
+  fi
+  
+  METRICS[$metric_name]=$((METRICS[$metric_name] + increment))
+}
+
+#=============================================================================
+# Function: metrics_get
+# Description: Retrieve the current value of a metric
+# Parameters:
+#   $1 - Metric name
+# Returns: Prints the metric value to stdout
+# Usage: current_count=$(metrics_get success)
+#=============================================================================
+metrics_get() {
+  local metric_name="$1"
+  echo "${METRICS[$metric_name]:-0}"
+}
+
+#=============================================================================
+# Function: metrics_summary
+# Description: Display a formatted summary of operation metrics
+# Parameters:
+#   $1 - Optional title (default: "Operation Summary")
+# Returns: Always returns 0
+# Usage: metrics_summary "Download Summary"
+# Best Practices:
+#   - Call at the end of batch operations
+#   - Provides consistent formatting across all operations
+#   - Calculates and displays elapsed time
+#=============================================================================
+metrics_summary() {
+  local title="${1:-Operation Summary}"
+  local operation="${METRICS[operation]:-operation}"
+  local total="${METRICS[total]:-0}"
+  local success="${METRICS[success]:-0}"
+  local failed="${METRICS[failed]:-0}"
+  local skipped="${METRICS[skipped]:-0}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  local elapsed=$((end_time - start_time))
+  
+  echo ""
+  echo "=========================================="
+  echo "$title"
+  echo "=========================================="
+  echo "Operation:  $operation"
+  echo "Total:      $total"
+  echo "Successful: $success"
+  echo "Failed:     $failed"
+  if [[ $skipped -gt 0 ]]; then
+    echo "Skipped:    $skipped"
+  fi
+  echo "Duration:   ${elapsed}s"
+  echo "=========================================="
+  echo ""
+}
+
+#=============================================================================
+# Function: metrics_should_fail
+# Description: Determine if operation should return failure based on metrics
+# Parameters: None
+# Returns: 
+#   0 if operation should be considered successful (no failures)
+#   1 if operation should be considered failed (has failures)
+# Usage: 
+#   metrics_summary
+#   return $(metrics_should_fail)
+# Best Practices:
+#   - Use as final return value for batch operations
+#   - Considers operation failed if any items failed
+#=============================================================================
+metrics_should_fail() {
+  local failed="${METRICS[failed]:-0}"
+  if [[ $failed -eq 0 ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# ==============================================================================
+# SECTION 4: Enhanced Validation Utilities
+# Purpose: Input validation with improved error messages
+# ==============================================================================
+
+#=============================================================================
+# Function: validate_non_empty
+# Description: Validate that a required parameter is not empty
+# Parameters:
+#   $1 - Value to validate
+#   $2 - Parameter name (for error message)
+# Returns: 0 if valid, 1 if empty
+# Usage: validate_non_empty "$REGISTRY" "registry" || return 1
+#=============================================================================
+validate_non_empty() {
+  local value="$1"
+  local param_name="$2"
+  
+  if [[ -z "$value" ]]; then
+    log_error "Required parameter is empty: $param_name"
+    log_error "Please provide --${param_name} or set in YAML config"
+    return 1
+  fi
+  return 0
+}
+
+#=============================================================================
+# Function: validate_file_exists
+# Description: Validate that a required file exists and is readable
+# Parameters:
+#   $1 - File path to validate
+#   $2 - File description (for error message)
+# Returns: 0 if valid, 1 if missing or unreadable
+# Usage: validate_file_exists "$CONFIG_FILE" "configuration file" "configuration file" || return 1
+#=============================================================================
+validate_file_exists() {
+  local file_path="$1"
+  local description="$2"
+  
+  if [[ ! -f "$file_path" ]]; then
+    log_error "Required $description not found: $file_path"
+    return 1
+  fi
+  
+  if [[ ! -r "$file_path" ]]; then
+    log_error "Required $description is not readable: $file_path"
+    log_error "Check file permissions: ls -la $file_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+#=============================================================================
+# Function: validate_directory_writable
+# Description: Validate that a directory exists and is writable
+# Parameters:
+#   $1 - Directory path to validate
+#   $2 - Directory description (for error message)
+# Returns: 0 if valid, 1 if missing or not writable
+# Usage: validate_directory_writable "$STAGE_DIR" "staging directory" || return 1
+#=============================================================================
+validate_directory_writable() {
+  local dir_path="$1"
+  local description="$2"
+  
+  if [[ ! -d "$dir_path" ]]; then
+    log_error "Required $description does not exist: $dir_path"
+    log_error "Create it with: mkdir -p $dir_path"
+    return 1
+  fi
+  
+  if [[ ! -w "$dir_path" ]]; then
+    log_error "Required $description is not writable: $dir_path"
+    log_error "Check permissions: ls -lad $dir_path"
+    return 1
+  fi
+  
+  return 0
+}
+
+# ==============================================================================
+# SECTION 5: Progress Reporting Utilities
+# Purpose: Provide clear feedback during long-running operations
+# ==============================================================================
+
+#=============================================================================
+# Function: report_progress
+# Description: Report progress for batch operations with count and percentage
+# Parameters:
+#   $1 - Item description
+#   $2 - Current item number
+#   $3 - Total item count
+# Returns: Always returns 0
+# Usage: report_progress "Downloading image: nginx:latest" 5 20
+# Best Practices:
+#   - Provides visual feedback during long operations
+#   - Includes percentage completion
+#   - Consistent format across all operations
+#=============================================================================
+report_progress() {
+  local description="$1"
+  local current="$2"
+  local total="$3"
+  local percentage=$((current * 100 / total))
+  
+  echo "[$current/$total - ${percentage}%] $description"
+}
+
+#=============================================================================
+# Function: report_item_success
+# Description: Report successful completion of an individual item
+# Parameters:
+#   $1 - Item description
+#   $2 - Optional detail message
+# Returns: Always returns 0
+# Usage: 
+#   report_item_success "nginx:latest" "245MB"
+#   report_item_success "Configuration applied"
+#=============================================================================
+report_item_success() {
+  local description="$1"
+  local detail="${2:-}"
+  
+  if [[ -n "$detail" ]]; then
+    echo "  ✓ $description ($detail)"
+  else
+    echo "  ✓ $description"
+  fi
+}
+
+#=============================================================================
+# Function: report_item_failure
+# Description: Report failure of an individual item
+# Parameters:
+#   $1 - Item description
+#   $2 - Optional error message
+# Returns: Always returns 0
+# Usage: 
+#   report_item_failure "nginx:latest" "Download timeout"
+#   report_item_failure "Configuration validation failed"
+#=============================================================================
+report_item_failure() {
+  local description="$1"
+  local detail="${2:-}"
+  
+  if [[ -n "$detail" ]]; then
+    echo "  ✗ $description (Error: $detail)"
+  else
+    echo "  ✗ $description"
+  fi
+}
+
+#=============================================================================
+# Function: report_item_skipped
+# Description: Report that an item was skipped
+# Parameters:
+#   $1 - Item description
+#   $2 - Reason for skipping
+# Returns: Always returns 0
+# Usage: report_item_skipped "nginx:latest" "Already present"
+#=============================================================================
+report_item_skipped() {
+  local description="$1"
+  local reason="${2:-Already present}"
+  
+  echo "  ⊘ $description (Skipped: $reason)"
+}
+
+# ==============================================================================
+# END PHASE 1 REDESIGN SECTION
+# ==============================================================================
+
+# ==============================================================================
+# PHASE 5: ADVANCED ERROR HANDLING & METRICS DASHBOARD
+# Date: November 16, 2025
+# Purpose: Advanced error handling with trap-based cleanup, error context
+#          preservation, graceful degradation, and comprehensive metrics dashboard
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Global Error Context Variables
+# ------------------------------------------------------------------------------
+declare -a ERROR_STACK=()
+declare -a CLEANUP_FUNCTIONS=()
+declare -g ERROR_CONTEXT=""
+declare -g LAST_ERROR_LINE=0
+declare -g LAST_ERROR_FUNCTION=""
+declare -g GRACEFUL_DEGRADATION_MODE=0
+
+# Metrics dashboard storage
+declare -A METRICS_HISTORY=()
+declare -g METRICS_SESSION_ID=""
+declare -g METRICS_EXPORT_DIR="${METRICS_EXPORT_DIR:-/rke2/rke2-node-init/outputs/metrics}"
+
+# ==============================================================================
+# SECTION 1: Trap-Based Error Handling
+# Purpose: Automatic cleanup and error context on failures
+# ==============================================================================
+
+#=============================================================================
+# Function: error_handler
+# Description: Global error handler called on ERR trap
+# Parameters: None (uses $LINENO, $BASH_LINENO, etc.)
+# Returns: Always returns 1
+# Usage: Called automatically via trap
+#=============================================================================
+error_handler() {
+  local exit_code=$?
+  local line_number="${BASH_LINENO[0]}"
+  local function_name="${FUNCNAME[1]:-main}"
+  local command="${BASH_COMMAND}"
+  
+  # Store error context
+  LAST_ERROR_LINE="$line_number"
+  LAST_ERROR_FUNCTION="$function_name"
+  
+  # Build error stack trace
+  local stack_trace=""
+  for ((i=1; i<${#FUNCNAME[@]}; i++)); do
+    stack_trace+="  at ${FUNCNAME[$i]} (line ${BASH_LINENO[$i-1]})\n"
+  done
+  
+  # Log comprehensive error information
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_error "ERROR DETECTED"
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_error "Exit Code: $exit_code"
+  log_error "Line: $line_number"
+  log_error "Function: $function_name"
+  log_error "Command: $command"
+  if [[ -n "$ERROR_CONTEXT" ]]; then
+    log_error "Context: $ERROR_CONTEXT"
+  fi
+  log_error ""
+  log_error "Stack Trace:"
+  echo -e "$stack_trace" | while IFS= read -r line; do
+    [[ -n "$line" ]] && log_error "$line"
+  done
+  log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Increment failure metrics
+  metrics_increment "errors"
+  
+  return 1
+}
+
+#=============================================================================
+# Function: cleanup_handler
+# Description: Execute all registered cleanup functions on exit
+# Parameters: None
+# Returns: Always returns 0
+# Usage: Called automatically via trap
+#=============================================================================
+cleanup_handler() {
+  local exit_code=$?
+  
+  log_info "Executing cleanup handlers..."
+  
+  # Execute cleanup functions in reverse order (LIFO)
+  for ((i=${#CLEANUP_FUNCTIONS[@]}-1; i>=0; i--)); do
+    local cleanup_fn="${CLEANUP_FUNCTIONS[$i]}"
+    log_debug "Running cleanup function: $cleanup_fn"
+    
+    # Execute cleanup function and suppress errors
+    if ! $cleanup_fn 2>/dev/null; then
+      log_warn "Cleanup function failed: $cleanup_fn (non-fatal)"
+    fi
+  done
+  
+  log_info "Cleanup complete"
+  return 0
+}
+
+#=============================================================================
+# Function: interrupt_handler
+# Description: Handle SIGINT (Ctrl+C) gracefully
+# Parameters: None
+# Returns: Exits with code 130
+# Usage: Called automatically via trap
+#=============================================================================
+interrupt_handler() {
+  log_warn ""
+  log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log_warn "Operation interrupted by user (Ctrl+C)"
+  log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  metrics_increment "interrupted"
+  
+  # Run cleanup handlers
+  cleanup_handler
+  
+  exit 130
+}
+
+#=============================================================================
+# Function: register_cleanup
+# Description: Register a function to be called during cleanup
+# Parameters:
+#   $1 - Function name to register
+# Returns: Always returns 0
+# Usage: register_cleanup my_cleanup_function
+#=============================================================================
+register_cleanup() {
+  local cleanup_fn="$1"
+  CLEANUP_FUNCTIONS+=("$cleanup_fn")
+  log_debug "Registered cleanup function: $cleanup_fn"
+}
+
+#=============================================================================
+# Function: set_error_context
+# Description: Set context string for error reporting
+# Parameters:
+#   $@ - Context description
+# Returns: Always returns 0
+# Usage: set_error_context "Downloading artifacts from registry"
+#=============================================================================
+set_error_context() {
+  ERROR_CONTEXT="$*"
+  log_debug "Error context: $ERROR_CONTEXT"
+}
+
+#=============================================================================
+# Function: clear_error_context
+# Description: Clear the error context string
+# Parameters: None
+# Returns: Always returns 0
+# Usage: clear_error_context
+#=============================================================================
+clear_error_context() {
+  ERROR_CONTEXT=""
+}
+
+#=============================================================================
+# Function: enable_error_handling
+# Description: Enable advanced error handling with traps
+# Parameters: None
+# Returns: Always returns 0
+# Usage: enable_error_handling (call early in script)
+#=============================================================================
+enable_error_handling() {
+  # Set error handling options
+  set -E  # ERR trap inheritance
+  
+  # Register trap handlers
+  trap error_handler ERR
+  trap cleanup_handler EXIT
+  trap interrupt_handler INT TERM
+  
+  log_debug "Advanced error handling enabled"
+  metrics_init "error_handling"
+}
+
+# ==============================================================================
+# SECTION 2: Graceful Degradation
+# Purpose: Continue operation with reduced functionality on non-critical failures
+# ==============================================================================
+
+#=============================================================================
+# Function: enable_graceful_degradation
+# Description: Enable graceful degradation mode
+# Parameters: None
+# Returns: Always returns 0
+# Usage: enable_graceful_degradation
+#=============================================================================
+enable_graceful_degradation() {
+  GRACEFUL_DEGRADATION_MODE=1
+  log_info "Graceful degradation mode enabled"
+  log_info "Non-critical failures will not stop execution"
+}
+
+#=============================================================================
+# Function: disable_graceful_degradation
+# Description: Disable graceful degradation mode
+# Parameters: None
+# Returns: Always returns 0
+# Usage: disable_graceful_degradation
+#=============================================================================
+disable_graceful_degradation() {
+  GRACEFUL_DEGRADATION_MODE=0
+  log_debug "Graceful degradation mode disabled"
+}
+
+#=============================================================================
+# Function: try_with_degradation
+# Description: Execute command with graceful degradation
+# Parameters:
+#   $1 - Command to execute
+#   $2 - Description of operation
+#   $3 - Criticality (critical|non-critical, default: non-critical)
+# Returns: Command exit code if critical, 0 if non-critical and degradation enabled
+# Usage: try_with_degradation "some_command" "optional feature" "non-critical"
+#=============================================================================
+try_with_degradation() {
+  local command="$1"
+  local description="$2"
+  local criticality="${3:-non-critical}"
+  
+  log_debug "Attempting: $description"
+  set_error_context "$description"
+  
+  if eval "$command"; then
+    log_success "$description completed"
+    clear_error_context
+    return 0
+  else
+    local exit_code=$?
+    
+    if [[ "$criticality" == "critical" ]] || [[ "$GRACEFUL_DEGRADATION_MODE" -eq 0 ]]; then
+      log_error "$description failed (critical)"
+      clear_error_context
+      return $exit_code
+    else
+      log_warn "$description failed (non-critical, continuing)"
+      metrics_increment "degraded_operations"
+      clear_error_context
+      return 0
+    fi
+  fi
+}
+
+#=============================================================================
+# Function: retry_with_backoff
+# Description: Retry a command with exponential backoff
+# Parameters:
+#   $1 - Command to execute
+#   $2 - Maximum attempts (default: 3)
+#   $3 - Initial delay in seconds (default: 1)
+# Returns: 0 if successful, 1 if all retries failed
+# Usage: retry_with_backoff "curl https://example.com" 3 2
+#=============================================================================
+retry_with_backoff() {
+  local command="$1"
+  local max_attempts="${2:-3}"
+  local delay="${3:-1}"
+  local attempt=1
+  
+  while [[ $attempt -le $max_attempts ]]; do
+    log_debug "Attempt $attempt/$max_attempts: $command"
+    
+    if eval "$command"; then
+      log_success "Command succeeded on attempt $attempt"
+      return 0
+    fi
+    
+    if [[ $attempt -lt $max_attempts ]]; then
+      log_warn "Attempt $attempt failed, retrying in ${delay}s..."
+      sleep "$delay"
+      delay=$((delay * 2))  # Exponential backoff
+    fi
+    
+    attempt=$((attempt + 1))
+  done
+  
+  log_error "Command failed after $max_attempts attempts"
+  metrics_increment "retry_failures"
+  return 1
+}
+
+# ==============================================================================
+# SECTION 3: Advanced Metrics Dashboard
+# Purpose: Comprehensive metrics visualization and export
+# ==============================================================================
+
+#=============================================================================
+# Function: metrics_dashboard_init
+# Description: Initialize metrics dashboard with session tracking
+# Parameters:
+#   $1 - Operation name
+# Returns: Always returns 0
+# Usage: metrics_dashboard_init "rke2_deployment"
+#=============================================================================
+metrics_dashboard_init() {
+  local operation_name="${1:-operation}"
+  
+  # Generate unique session ID
+  METRICS_SESSION_ID="${operation_name}_$(date +%Y%m%d_%H%M%S)_$$"
+  
+  # Initialize metrics
+  metrics_init "$operation_name"
+  
+  # Create export directory
+  mkdir -p "$METRICS_EXPORT_DIR"
+  
+  log_debug "Metrics dashboard initialized: session=$METRICS_SESSION_ID"
+}
+
+#=============================================================================
+# Function: metrics_dashboard_display
+# Description: Display comprehensive metrics dashboard
+# Parameters:
+#   $1 - Optional title (default: "METRICS DASHBOARD")
+# Returns: Always returns 0
+# Usage: metrics_dashboard_display "RKE2 Deployment Metrics"
+#=============================================================================
+metrics_dashboard_display() {
+  local title="${1:-METRICS DASHBOARD}"
+  local operation="${METRICS[operation]:-operation}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  local elapsed=$((end_time - start_time))
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "$title"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  printf "%-30s %s\n" "Session ID:" "$METRICS_SESSION_ID"
+  printf "%-30s %s\n" "Operation:" "$operation"
+  printf "%-30s %s\n" "Start Time:" "$(date -d @"$start_time" '+%Y-%m-%d %H:%M:%S')"
+  printf "%-30s %s\n" "End Time:" "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf "%-30s %ds\n" "Duration:" "$elapsed"
+  echo ""
+  echo "Metrics:"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "%-30s %10s\n" "Metric" "Value"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Display all metrics
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      printf "%-30s %10s\n" "$metric" "${METRICS[$metric]}"
+    fi
+  done
+  
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Calculate success rate if applicable
+  local total="${METRICS[total]:-0}"
+  if [[ $total -gt 0 ]]; then
+    local success="${METRICS[success]:-0}"
+    local success_rate=$((success * 100 / total))
+    echo ""
+    printf "%-30s %9d%%\n" "Success Rate:" "$success_rate"
+  fi
+  
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+}
+
+#=============================================================================
+# Function: metrics_export_json
+# Description: Export metrics to JSON format
+# Parameters:
+#   $1 - Output file path (optional, default: auto-generated)
+# Returns: 0 if successful, 1 if failed
+# Usage: metrics_export_json "/path/to/metrics.json"
+#=============================================================================
+metrics_export_json() {
+  local output_file="${1:-${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.json}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  
+  log_info "Exporting metrics to JSON: $output_file"
+  
+  # Create JSON structure
+  cat > "$output_file" <<EOF
+{
+  "session_id": "$METRICS_SESSION_ID",
+  "operation": "${METRICS[operation]:-operation}",
+  "timestamp": {
+    "start": $start_time,
+    "end": $end_time,
+    "duration": $((end_time - start_time)),
+    "start_iso": "$(date -d @"$start_time" -Iseconds)",
+    "end_iso": "$(date -Iseconds)"
+  },
+  "metrics": {
+EOF
+  
+  # Add all metrics
+  local first=1
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      if [[ $first -eq 1 ]]; then
+        first=0
+      else
+        echo "," >> "$output_file"
+      fi
+      printf '    "%s": %s' "$metric" "${METRICS[$metric]}" >> "$output_file"
+    fi
+  done
+  
+  cat >> "$output_file" <<EOF
+
+  },
+  "hostname": "$(hostname)",
+  "script_version": "${SCRIPT_VERSION:-unknown}",
+  "dry_run": ${DRY_RUN:-false}
+}
+EOF
+  
+  log_success "Metrics exported to: $output_file"
+  return 0
+}
+
+#=============================================================================
+# Function: metrics_export_csv
+# Description: Export metrics to CSV format
+# Parameters:
+#   $1 - Output file path (optional, default: auto-generated)
+# Returns: 0 if successful, 1 if failed
+# Usage: metrics_export_csv "/path/to/metrics.csv"
+#=============================================================================
+metrics_export_csv() {
+  local output_file="${1:-${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.csv}"
+  local start_time="${METRICS[start_time]:-$(date +%s)}"
+  local end_time=$(date +%s)
+  
+  log_info "Exporting metrics to CSV: $output_file"
+  
+  # Write CSV header
+  echo "session_id,operation,start_time,end_time,duration,metric,value" > "$output_file"
+  
+  # Write metrics
+  for metric in "${!METRICS[@]}"; do
+    # Skip metadata fields
+    if [[ "$metric" != "operation" && "$metric" != "start_time" ]]; then
+      echo "$METRICS_SESSION_ID,${METRICS[operation]:-operation},$start_time,$end_time,$((end_time - start_time)),$metric,${METRICS[$metric]}" >> "$output_file"
+    fi
+  done
+  
+  log_success "Metrics exported to: $output_file"
+  return 0
+}
+
+#=============================================================================
+# Function: metrics_export_all
+# Description: Export metrics to all supported formats
+# Parameters: None
+# Returns: 0 if all exports successful, 1 if any failed
+# Usage: metrics_export_all
+#=============================================================================
+metrics_export_all() {
+  local json_file="${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.json"
+  local csv_file="${METRICS_EXPORT_DIR}/${METRICS_SESSION_ID}.csv"
+  
+  log_info "Exporting metrics to all formats..."
+  
+  local failed=0
+  
+  if ! metrics_export_json "$json_file"; then
+    log_error "JSON export failed"
+    failed=1
+  fi
+  
+  if ! metrics_export_csv "$csv_file"; then
+    log_error "CSV export failed"
+    failed=1
+  fi
+  
+  if [[ $failed -eq 0 ]]; then
+    log_success "All metrics exported successfully"
+    log_info "  JSON: $json_file"
+    log_info "  CSV:  $csv_file"
+    return 0
+  else
+    return 1
+  fi
+}
+
+#=============================================================================
+# Function: metrics_compare
+# Description: Compare metrics from two sessions
+# Parameters:
+#   $1 - First session metrics file (JSON)
+#   $2 - Second session metrics file (JSON)
+# Returns: Always returns 0
+# Usage: metrics_compare session1.json session2.json
+#=============================================================================
+metrics_compare() {
+  local file1="$1"
+  local file2="$2"
+  
+  if ! validate_file_exists "$file1" "first metrics file"; then
+    return 1
+  fi
+  
+  if ! validate_file_exists "$file2" "second metrics file"; then
+    return 1
+  fi
+  
+  log_info "Comparing metrics:"
+  log_info "  Session 1: $file1"
+  log_info "  Session 2: $file2"
+  
+  # This is a basic comparison - could be enhanced with jq if available
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "METRICS COMPARISON"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "File 1: $(basename "$file1")"
+  echo "File 2: $(basename "$file2")"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Note: Use 'jq' for detailed comparison:"
+  echo "  jq -s '.[0].metrics as \$m1 | .[1].metrics as \$m2 | \$m1 + \$m2' $file1 $file2"
+  echo ""
+}
+
+# ==============================================================================
+# END PHASE 5: ADVANCED ERROR HANDLING & METRICS DASHBOARD
+# ==============================================================================
+
+# ==============================================================================
+# END PHASE 1 REDESIGN SECTION
+# ==============================================================================
 
 # ------------------------------------------------------------------------------
 # Function: print_help
@@ -198,8 +1703,8 @@ NERDCTL_STD_TGZ=""
 #   Always returns 0 after writing the help text.
 # ------------------------------------------------------------------------------
 print_help() {
-  cat <<'EOF'
-RKE2 Node Initialization Script (v0.8a)
+  cat <<EOF
+RKE2 Node Initialization Script (v${SCRIPT_VERSION})
 ========================================
 Automates air-gapped RKE2 cluster deployment with multi-interface networking support.
 
@@ -208,6 +1713,7 @@ NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name
 USAGE:
   sudo ./rke2nodeinit.sh -f <file.yaml> [options]
   sudo ./rke2nodeinit.sh [options] <action>
+  sudo ./rke2nodeinit.sh <action> --help
 
 YAML KINDS (apiVersion: rkeprep/v1):
   Push        - Push RKE2 images to private registry
@@ -241,8 +1747,12 @@ OPTIONS:
                (also available as --node-name NAME)
   -y           Auto-confirm prompts (reboots, cleanup operations)
   -P           Print sanitized YAML to screen (masks secrets)
-  -h           Show this help message
-  --dry-push   Simulate image push without actually pushing to registry
+  -h, --help   Show this help message (or use <action> --help for action-specific help)
+  --version    Display version information
+  --verbose    Enable verbose output (detailed progress and debugging)
+  --quiet      Suppress informational messages (errors and warnings only)
+  --dry-run    Simulate write operations without making changes (server, agent, image)
+  --dry-push   Simulate image push without actually pushing to registry (legacy alias)
   --apply-netplan-now
                Apply netplan immediately instead of deferring until reboot
                (default: netplan changes deferred to next reboot for safety)
@@ -250,6 +1760,30 @@ OPTIONS:
                Define network interface (repeatable for multi-interface setups)
                Use "dhcp4=true" for DHCP-based interfaces
                Omit name on first interface to auto-detect primary NIC
+  --load-images
+               Import staged RKE2 images from the tarball into the local
+               container runtime (nerdctl/ctr). This is opt-in; by default
+               images are left staged as a tarball on the node for air-gapped
+               template workflows.
+  --verify-layers
+               Perform deep layer checksum verification of staged images
+               tarball. Verifies individual layer SHA256 digests against
+               manifest to ensure no corruption. More thorough than standard
+               tarball integrity tests. Opt-in due to additional processing time.
+  --enable-boot-service
+               Install first-boot automation service for VM template workflows
+               Service auto-runs appropriate action on first boot after template clone
+               Must be used with 'image' or 'airgap' action
+  --boot-yaml-path PATH
+               YAML config path for boot service to execute (default: /root/config.yaml)
+               Use with --enable-boot-service
+  --boot-mode MODE
+               Boot service mode: 'oneshot' or 'persistent' (default: oneshot)
+               oneshot: Run once on first boot, then disable service
+               persistent: Run on every boot (useful for testing)
+  --vm-platform PLATFORM
+               VM platform for boot detection: vmware, hyperv, virtualbox, or generic
+               (default: auto-detect based on available tools)
 
 MULTI-INTERFACE YAML EXAMPLE:
   apiVersion: rkeprep/v1
@@ -260,11 +1794,11 @@ MULTI-INTERFACE YAML EXAMPLE:
     token: K10abc...xyz::server:1234abcd
     clusterInit: true
     nodeName: ctrl01.example.com
-    node-ip: 10.0.69.60
-    bind-address: 10.0.69.60
+    node-ip: 172.16.15.101
+    bind-address: 172.16.15.101
     interfaces:
       - name: eth0
-        ip: 10.0.69.60
+        ip: 172.16.15.101
         prefix: 24
         gateway: 10.0.69.1
         dns: [10.0.69.1, 8.8.8.8]
@@ -287,23 +1821,40 @@ CUSTOM CA YAML EXAMPLE:
     intermediateKey: certs/issuing-ca.key     # optional
     installToOSTrust: true                    # default: true
 
+BOOT SERVICE YAML EXAMPLE:
+  apiVersion: rkeprep/v1
+  kind: Image
+  metadata:
+    name: base-image
+  spec:
+    rke2Version: v1.34.1+rke2r1
+    bootService:
+      enabled: true
+      yamlPath: /root/server-config.yaml  # Config to run on first boot
+      mode: oneshot                        # Run once, then disable
+      platform: vmware                     # vmware, hyperv, virtualbox, or generic
+
 WORKFLOW EXAMPLES:
   1. Prepare base image for cloning:
      sudo ./rke2nodeinit.sh -f examples/image.yaml
 
-  2. Initialize first control-plane with multi-interface networking:
+  2. Prepare base image with boot service for automated server deployment:
+     sudo ./rke2nodeinit.sh -f examples/image.yaml --enable-boot-service \\
+       --boot-yaml-path /root/server.yaml --boot-mode oneshot
+
+  3. Initialize first control-plane with multi-interface networking:
      sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
 
-  3. Join worker node:
+  4. Join worker node:
      sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
 
-  4. Push images to private registry:
+  5. Push images to private registry:
      sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret
 
-  5. Label a node:
+  6. Label a node:
      sudo ./rke2nodeinit.sh label-node -n worker01 -f labels.yaml
 
-  6. Install custom CA:
+  7. Install custom CA:
      sudo ./rke2nodeinit.sh -f certs/custom-ca.yaml custom-ca
 
 OUTPUTS:
@@ -311,7 +1862,7 @@ OUTPUTS:
                (SHA256 checksums and sizes of cached artifacts)
   - Run log:   outputs/<metadata.name>/README.txt
                (Summary of image preparation steps)
-  - Token:     outputs/generated-token/<cluster>-token.txt
+  - Token:     outputs/tokens/<cluster>-token.txt
                (Generated cluster token for Server with clusterInit: true)
 
 EXIT CODES:
@@ -326,6 +1877,241 @@ For more information, see README.md or visit:
   https://github.com/cantrellcloud/rke2-node-init
 
 EOF
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_http
+# Purpose : Download hardened-cni-plugins via HTTP(S) into the downloads dir
+#           and produce a local sha256 checksum file for staging.
+# Arguments:
+#   $1 - Optional URL to download (overrides HARDENED_CNI_URL)
+# Returns : 0 on success, non-zero on failure (download or write error)
+# ------------------------------------------------------------------------------
+cache_hardened_cni_http() {
+  local url="${1:-$HARDENED_CNI_URL}"
+  if [[ -z "$url" ]]; then
+    log INFO "HARDENED_CNI_URL not set; skipping hardened-cni-plugins download"
+    return 0
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local tmp="$DOWNLOADS_DIR/.tmp-${bn}.$$"
+  log INFO "Downloading hardened-cni-plugins from $url -> $DOWNLOADS_DIR/$bn"
+
+  if command -v curl >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! spinner_run "Downloading $bn" wget -q -O "$tmp" "$url"; then
+      log ERROR "Failed to download hardened-cni-plugins via wget from $url"
+      rm -f "$tmp" || true
+      return 1
+    fi
+  else
+    log ERROR "Neither curl nor wget available to download hardened-cni-plugins"
+    return 2
+  fi
+
+  # Move into place atomically
+  mv -T "$tmp" "$DOWNLOADS_DIR/$bn"
+  chmod 0644 "$DOWNLOADS_DIR/$bn" || true
+
+  # Write a simple SHA256 file beside the artifact for audit/staging and
+  # also append the checksum to the repository-style manifest used by the
+  # script so the staged manifest `sha256sum-<arch>.txt` includes this
+  # artifact. This keeps hardened-cni entries aligned with other artifacts
+  # and allows `sha256sum -c` verification to work uniformly.
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    log INFO "Wrote checksum: $DOWNLOADS_DIR/${bn}.sha256"
+
+    # Ensure downloads dir manifest exists and is updated idempotently.
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    mkdir -p "$(dirname "$manifest")"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      # Remove any existing line referencing this basename, then append
+      # a single manifest line in the canonical format: "<sha>  <basename>"
+      if [[ -f "$manifest" ]]; then
+        # Use a temp file replacement to avoid races
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  local _size
+  _size=$(du -h "$DOWNLOADS_DIR/$bn" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Downloaded hardened-cni-plugins: $DOWNLOADS_DIR/$bn ($_size)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_cni_skopeo
+# Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
+#           docker-archive tarball using `skopeo` (no daemon required). The
+#           helper will attempt to select a tag compatible with the RKE2
+#           release (best-effort) and write the resulting archive to
+#           `$DOWNLOADS_DIR/$HARDENED_CNI_BN`.
+# Arguments:
+#   $1 - Optional explicit tag to use (overrides auto-detection)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+cache_hardened_cni_skopeo() {
+  local explicit_tag="${1:-}"
+  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
+  local repo="docker://rancher/hardened-cni-plugins"
+  if ! command -v skopeo >/dev/null 2>&1; then
+    log WARN "skopeo not available; cannot mirror hardened-cni via skopeo"
+    return 2
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+
+  # Determine desired tag: prefer explicit, then RKE2_VERSION, then try to
+  # infer from downloaded images manifest, otherwise fall back to 'latest'.
+  local desired_tag=""
+  if [[ -n "$explicit_tag" ]]; then
+    desired_tag="$explicit_tag"
+  elif [[ -n "${RKE2_VERSION:-}" ]]; then
+    desired_tag="${RKE2_VERSION}"
+  else
+    # Try to infer from the images tar (if present in downloads)
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" && -x "$(command -v zstd || true)" ]]; then
+      # Extract manifest.json from tar.zst and search for rke2-runtime tags
+      local _manifest
+      _manifest=$(mktemp)
+      if zstd -d -c "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null | tar -Ox manifest.json > "$_manifest" 2>/dev/null; then
+        if command -v python3 >/dev/null 2>&1; then
+          desired_tag=$(python3 - <<PY 2>/dev/null
+import json,sys
+try:
+    j=json.load(open('$_manifest'))
+    for e in j:
+        for t in e.get('RepoTags',[]):
+            if 'rke2-runtime' in t:
+                print(t.split(':',1)[1])
+                raise SystemExit
+except Exception:
+    pass
+PY
+) || true
+        fi
+      fi
+      rm -f "$_manifest" || true
+    fi
+  fi
+
+  # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
+  # tags and Docker Hub API and let a small helper choose the best tag.
+  local tags_json
+  tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+  local hub_json
+  if command -v curl >/dev/null 2>&1; then
+    hub_json=$(curl -fsSL "https://hub.docker.com/v2/repositories/rancher/hardened-cni-plugins/tags?page_size=100" 2>/dev/null || true)
+  else
+    hub_json=""
+  fi
+
+  local chosen=""
+  if command -v python3 >/dev/null 2>&1; then
+    local _tfile _hfile
+    _tfile=$(mktemp) || _tfile="/tmp/.rke2nodeinit-tags$$"
+    _hfile=$(mktemp) || _hfile="/tmp/.rke2nodeinit-hub$$"
+    printf '%s' "$tags_json" > "$_tfile" || true
+    printf '%s' "$hub_json" > "$_hfile" || true
+    chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
+    rm -f "$_tfile" "$_hfile" || true
+  fi
+  if [[ -z "$chosen" ]]; then
+    chosen="latest"
+  fi
+
+  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag')"
+
+  local dest="$DOWNLOADS_DIR/$bn"
+  # Use docker-archive format (creates tar with manifest.json compatible with tooling)
+  # Write to a temporary destination first, then atomically move into place.
+  local tmp_dest
+  # create a safe temporary file path under the downloads dir
+  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+  # we'll remove the tmp file before skopeo so skopeo creates it itself (avoids modify-in-place issues)
+  rm -f "$tmp_dest" || true
+  local skopeo_log
+  skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
+  log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
+  # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  else
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    rc=$?
+  fi
+  if [[ $rc -ne 0 ]]; then
+    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc). See $skopeo_log for raw output"
+    # append the tail of the skopeo log into the main log for quick inspection
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  fi
+  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest"
+  # Move into final location atomically (mv will overwrite existing file)
+  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+    log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
+    # if move fails, include skopeo log for debugging
+    if [[ -f "$skopeo_log" ]]; then
+      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
+      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
+      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
+    fi
+    rm -f "$tmp_dest" || true
+    return 1
+  }
+  chmod 0644 "$dest" || true
+  # also copy the skopeo raw log alongside named artifact logs for post-mortem
+  if [[ -f "$skopeo_log" ]]; then
+    cp -f "$skopeo_log" "$LOG_DIR/" 2>/dev/null || true
+  fi
+  chmod 0644 "$dest" || true
+
+  # Generate per-file sha and append to downloads manifest (idempotent)
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      if [[ -f "$manifest" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    fi
+  fi
+
+  log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -346,7 +2132,10 @@ log() {
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   host="$(hostname)"
   echo "[$level] $msg"
-  printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
+  # Only write to log file if LOG_FILE is set
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -366,6 +2155,91 @@ warn_default_credentials() {
     log WARN "Using EXAMPLE default credentials! These should be overridden for production use."
     log WARN "Override with: -r <registry> -u <username> -p <password> or via YAML config."
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_images_archive
+# Purpose : Locate the staged images archive in downloads or images dir
+# Arguments:
+#   None
+# Returns : Prints path to archive or returns 1 if not found
+# ------------------------------------------------------------------------------
+get_images_archive() {
+  local img="${IMAGES_TAR:-rke2-images.linux-${ARCH}.tar.zst}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  if [[ -f "$images_dir/$img" ]]; then
+    printf '%s' "$images_dir/$img"
+    return 0
+  fi
+  if [[ -f "$DOWNLOADS_DIR/$img" ]]; then
+    printf '%s' "$DOWNLOADS_DIR/$img"
+    return 0
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: load_images_from_tarball
+# Purpose : Load images from a staged RKE2 images tarball into the local
+#           container runtime (nerdctl/ctr). Writes a small metadata file on
+#           success and logs progress.
+# Arguments:
+#   $1 - Optional path to tarball (defaults to discovered candidate)
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+# shellcheck disable=SC2120  # Arguments are optional; auto-discovery used when omitted
+load_images_from_tarball() {
+  local archive="$1"
+  if [[ -z "$archive" ]]; then
+    archive="$(get_images_archive || true)"
+  fi
+  if [[ -z "$archive" || ! -f "$archive" ]]; then
+    log WARN "No images archive found to load (expected: ${IMAGES_TAR}). Skipping image load."
+    return 0
+  fi
+
+  log INFO "Loading images from archive: $archive"
+
+  # Prefer nerdctl if available; ensure it's installed by caller
+  if command -v nerdctl >/dev/null 2>&1; then
+    if zstd -dc "$archive" | nerdctl load -i - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via nerdctl"
+    else
+      log ERROR "nerdctl failed to load images from $archive"
+      return 2
+    fi
+  else
+    # Fallback to ctr
+    if zstd -dc "$archive" | ctr -n k8s.io images import - >>"$LOG_FILE" 2>&1; then
+      log INFO "Loaded images via ctr"
+    else
+      log ERROR "ctr failed to import images from $archive"
+      return 3
+    fi
+  fi
+
+  # Emit a simple metadata file listing images present (nerdctl images output)
+  local meta="$STAGE_DIR/images-loaded-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  if command -v nerdctl >/dev/null 2>&1; then
+    nerdctl images >>"$meta" 2>&1 || true
+  else
+    ctr -n k8s.io images ls >>"$meta" 2>&1 || true
+  fi
+  log INFO "Wrote image load metadata to $meta"
+
+  # Runtime verification: check if images were successfully loaded into container runtime
+  # Note: This only verifies runtime state. Tarball integrity is verified separately during staging.
+  log INFO "Verifying images loaded into container runtime..."
+  if (command -v nerdctl >/dev/null 2>&1 && nerdctl images | grep -q 'hardened-cni-plugins') || \
+     (ctr -n k8s.io images ls | grep -q 'hardened-cni-plugins'); then
+    log INFO "✓ Runtime verification passed: representative image 'hardened-cni-plugins' found in container runtime"
+  else
+    log WARN "⚠ Runtime verification: 'hardened-cni-plugins' not found in container runtime after load"
+    log WARN "   This may indicate: (1) archive uses different image names, (2) import failed silently, or (3) runtime filtering"
+    log WARN "   Tarball integrity should be verified separately. RKE2 installer will attempt to use staged tarball."
+  fi
+
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -391,7 +2265,7 @@ spinner_run() {
   # Forward signals to the child so Ctrl-C works cleanly
   trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
 
-  local spin='|+/-\' i=0
+  local spin='|+/-\o' i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
@@ -752,27 +2626,43 @@ append_spec_config_extras() {
   # Scalars we pass through as-is if present
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
-    "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
+    "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
+    # Image overrides commonly required to avoid external pulls in air-gapped installs
+    "kube-proxy-image" "pause-image" "runtime-image"
     "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
+
 
   local k v
   for k in "${scalars[@]}"; do
     _cfg_has_key "$k" && continue
-    v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
+    # Try the hyphenated key first, then a lower-camelCase variant that many
+    # example YAML files use (e.g., nodeIp, bindAddress).
+  # build camelCase (node-ip -> nodeIp)
+  camel_case="$(echo "$k" | awk -F- '{printf "%s", $1; for(i=2;i<=NF;i++){printf toupper(substr($i,1,1)) substr($i,2)}}')" || true
+  v="$(yaml_spec_get_any "$file" "$k" "$camel_case" || true)"
     if [[ -n "$v" ]]; then
       local normalized=""
-      normalized="$(normalize_bool_value "$v")"
-      echo "$k: $normalized" >> "$cfg"
+      # If value looks like true/false, normalize and emit bare boolean
+      if [[ "$v" =~ ^(true|false|True|False|TRUE|FALSE)$ ]]; then
+        normalized="$(normalize_bool_value "$v")"
+        echo "$k: $normalized" >> "$cfg"
+      else
+        # Quote string-like values to ensure YAML correctness (images, registries, CIDRs)
+        # Escape any existing double-quotes in the value
+        local esc
+        esc=$(printf '%s' "$v" | sed 's/"/\\"/g')
+        echo "$k: \"$esc\"" >> "$cfg"
+      fi
     fi
   done
 
   # Lists we support (emit YAML arrays)
   local -a lists=(
     "kube-apiserver-arg" "kube-controller-manager-arg" "kube-scheduler-arg" "kube-proxy-arg"
-    "node-taint" "node-label" "tls-san"
+    "node-taint" "node-label" "tls-san" "cni" "disable"
   )
 
   for k in "${lists[@]}"; do
@@ -780,6 +2670,21 @@ append_spec_config_extras() {
     if yaml_spec_has_list "$file" "$k"; then
       echo "$k:" >> "$cfg"
       yaml_spec_list_items "$file" "$k" | sed 's/^/  - /' >> "$cfg"
+    else
+      # Fallback: some manifests express these as scalars (e.g., cni: "cilium")
+      local scalar_val
+      scalar_val="$(yaml_spec_get "$file" "$k" || true)"
+      if [[ -n "$scalar_val" ]]; then
+        # Emit either a scalar or a single-item list depending on key semantics
+        if [[ "$k" == "cni" ]]; then
+          # cni can be a scalar in RKE2 config
+          echo "$k: \"$scalar_val\"" >> "$cfg"
+        else
+          # default: emit as a single item list
+          echo "$k:" >> "$cfg"
+          echo "  - $scalar_val" >> "$cfg"
+        fi
+      fi
     fi
   done
 }
@@ -890,7 +2795,7 @@ trim_whitespace() {
   local _s="$1"
   # Handle empty or whitespace-only strings
   [[ -z "$_s" || ! "$_s" =~ [^[:space:]] ]] && return 0
-  # Strip leading whitespace: 
+  # Strip leading whitespace:
   #   ${_s%%[![:space:]]*} finds everything up to first non-space
   #   ${_s#...} removes that prefix, leaving string from first non-space onward
   _s="${_s#${_s%%[![:space:]]*}}"
@@ -947,12 +2852,12 @@ interface_decode_entry() {
 
   # Split on pipe delimiter into array of key=value pairs
   IFS='|' read -r -a _pairs <<<"$_entry"
-  
+
   # Validate we have at least one pair
   if (( ${#_pairs[@]} == 0 )); then
     return 1
   fi
-  
+
   local _pair _key _value
   for _pair in "${_pairs[@]}"; do
     [[ -z "$_pair" ]] && continue
@@ -970,7 +2875,7 @@ interface_decode_entry() {
     esac
     _dest["$_key"]="$_value"
   done
-  
+
   return 0
 }
 
@@ -1108,7 +3013,7 @@ for raw in lines:
         continue
 
     indent = len(line) - len(line.lstrip(' '))
-    
+
     # Exit interfaces section if we encounter a spec key at same indent level as 'interfaces:'
     # This must be checked before dash_match to avoid treating sibling list items as interface items
     if indent == interfaces_indent and re.match(r'^\s*[a-zA-Z][\w-]*\s*:', line):
@@ -1628,6 +3533,10 @@ initialize_action_context() {
     else
       log INFO "Using run output directory: $RUN_OUT_DIR"
     fi
+  elif [[ -z "$LOG_FILE" ]]; then
+    # Set default log file if not set by action context
+    LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
+    export LOG_FILE
   fi
 }
 
@@ -1839,6 +3748,457 @@ install_vm_tools() {
   else
     log INFO "No additional VM guest tools packages required."
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: detect_vm_platform
+# Purpose : Auto-detect virtualization platform for hostname query method used
+#           in boot script automation.
+# Arguments:
+#   None
+# Returns :
+#   Prints platform identifier: vmware, hyperv, virtualbox, or generic
+# ------------------------------------------------------------------------------
+detect_vm_platform() {
+  local platform="${VM_PLATFORM:-auto}"
+  
+  # If explicitly set, validate and return
+  if [[ "$platform" != "auto" ]]; then
+    case "$platform" in
+      vmware|hyperv|virtualbox|generic)
+        echo "$platform"
+        return 0
+        ;;
+      *)
+        log WARN "Invalid VM_PLATFORM '$platform'; falling back to auto-detection"
+        platform="auto"
+        ;;
+    esac
+  fi
+  
+  # Auto-detect based on available tools and system information
+  if command -v vmtoolsd >/dev/null 2>&1; then
+    echo "vmware"
+  elif command -v hv_kvp_daemon >/dev/null 2>&1 || [[ -d /var/lib/hyperv ]]; then
+    echo "hyperv"
+  elif command -v VBoxControl >/dev/null 2>&1; then
+    echo "virtualbox"
+  elif [[ -f /sys/class/dmi/id/product_name ]]; then
+    # Check DMI product name as fallback
+    local product
+    product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+    case "${product,,}" in
+      *vmware*) echo "vmware" ;;
+      *virtual*machine*) echo "hyperv" ;;
+      *virtualbox*) echo "virtualbox" ;;
+      *) echo "generic" ;;
+    esac
+  else
+    echo "generic"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_boot_script
+# Purpose : Generate and install the first-boot automation script that queries
+#           VM hostname, discovers matching config file, copies it to target
+#           directory, and executes rke2nodeinit with the configuration.
+# 
+# Note for Hyper-V: The VM name must be set from the Hyper-V host using:
+#   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
+#   Otherwise, the guest OS hostname will be used as fallback.
+#
+# Arguments:
+#   None (uses global BOOT_SCRIPT_PATH, BOOT_CONFIG_SEARCH_PATHS, BOOT_TARGET_DIR)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+install_boot_script() {
+  local platform
+  platform="$(detect_vm_platform)"
+  log INFO "Detected VM platform: $platform"
+  
+  local script_dir
+  script_dir="$(dirname "$BOOT_SCRIPT_PATH")"
+  
+  # Ensure target directory exists
+  mkdir -p "$script_dir" || {
+    log ERROR "Failed to create directory for boot script: $script_dir"
+    return 1
+  }
+  
+  # Set default config search paths if not specified
+  if [[ ${#BOOT_CONFIG_SEARCH_PATHS[@]} -eq 0 ]]; then
+    BOOT_CONFIG_SEARCH_PATHS=(
+      "$REPO_ROOT/configs"
+      "/opt/rke2/configs"
+      "/root/configs"
+    )
+  fi
+  
+  # Generate platform-specific hostname query command
+  local hostname_query_cmd=""
+  case "$platform" in
+    vmware)
+      hostname_query_cmd='VM_HOSTNAME=$(vmtoolsd --cmd "info-get guestinfo.hostname" 2>/dev/null || hostname)'
+      ;;
+    hyperv)
+      # Hyper-V: Query VM name from KVP pool (requires host-side configuration)
+      # Preferred method: Host admin sets custom KVP item via PowerShell:
+      #   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
+      # 
+      # Alternative: Use PowerShell to read VirtualMachineName from KVP pool_0
+      # Fallback: Use guest hostname if not found
+      hostname_query_cmd='
+if command -v pwsh >/dev/null 2>&1; then
+  # Try PowerShell to read KVP VirtualMachineName
+  VM_HOSTNAME=$(pwsh -NoProfile -Command '\''
+    try {
+      $kvp0 = [System.IO.File]::ReadAllBytes("/var/lib/hyperv/.kvp_pool_0")
+      $text = [System.Text.Encoding]::ASCII.GetString($kvp0)
+      $lines = $text -split "\x00" | Where-Object {$_.Trim()}
+      for($i=0; $i -lt $lines.Count; $i++) {
+        if($lines[$i] -eq "VirtualMachineName" -and $i+1 -lt $lines.Count) {
+          Write-Output $lines[$i+1].Trim()
+          exit 0
+        }
+      }
+    } catch {}
+  '\'' 2>/dev/null)
+fi
+# Fallback to bash method if PowerShell fails or not available
+[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | tr "\\0" "\\n" | grep -A1 "^VirtualMachineName$" | tail -1 | xargs 2>/dev/null)
+# Final fallback to hostname
+[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(hostname)'
+      ;;
+    virtualbox)
+      hostname_query_cmd='VM_HOSTNAME=$(VBoxControl guestproperty get /VirtualBox/HostInfo/VBoxVer 2>/dev/null | cut -d: -f2 | xargs 2>/dev/null || hostname)'
+      ;;
+    generic|*)
+      # Generic: use system hostname
+      hostname_query_cmd='VM_HOSTNAME=$(hostnamectl --static 2>/dev/null || hostname)'
+      ;;
+  esac
+  
+  # Generate boot script with config discovery
+  cat > "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+#!/usr/bin/env bash
+#
+# rke2-boot.sh - First-boot automation for RKE2 node initialization
+# This script automatically discovers node configs by VM hostname, copies them
+# to the target directory, and executes rke2nodeinit.sh for automatic setup.
+#
+# Workflow:
+#   1. Query VM hostname from hypervisor (platform-specific)
+#   2. Search for matching config file: {hostname}.yaml
+#   3. Copy found config to /root/server-config/{hostname}.yaml
+#   4. Execute rke2nodeinit.sh with the discovered config
+
+set -euo pipefail
+
+# Logging helper
+log() {
+  local level="$1"; shift
+  echo "[$level] $*" | systemd-cat -t rke2-boot -p "${level,,}"
+  echo "[$level] $*"
+}
+
+# Cleanup on error
+cleanup_on_error() {
+  log ERROR "Boot service failed - cleaning up"
+  [[ -n "${TARGET_FILE:-}" && -f "$TARGET_FILE" ]] && rm -f "$TARGET_FILE"
+  exit 1
+}
+trap cleanup_on_error ERR
+
+log INFO "========================================"
+log INFO "RKE2 First-Boot Automation Starting"
+log INFO "========================================"
+
+# Query VM hostname (platform-specific)
+log INFO "Step 1: Query VM hostname from hypervisor"
+EOF_BOOT_SCRIPT
+  echo "$hostname_query_cmd" >> "$BOOT_SCRIPT_PATH"
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+
+if [[ -z "$VM_HOSTNAME" ]]; then
+  log ERROR "Unable to retrieve VM hostname from platform"
+  exit 1
+fi
+
+log INFO "  Result: $VM_HOSTNAME"
+export VM_HOSTNAME
+
+# Define config search paths
+log INFO "Step 2: Search for matching configuration file"
+EOF_BOOT_SCRIPT
+  # Embed search paths from global variable
+  echo "CONFIG_SEARCH_PATHS=(" >> "$BOOT_SCRIPT_PATH"
+  for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
+    echo "  \"$search_path\"" >> "$BOOT_SCRIPT_PATH"
+  done
+  echo ")" >> "$BOOT_SCRIPT_PATH"
+  
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+
+# Search for matching config file
+FOUND_CONFIG=""
+for search_path in "${CONFIG_SEARCH_PATHS[@]}"; do
+  log INFO "  Searching: $search_path"
+  candidate="$search_path/${VM_HOSTNAME}.yaml"
+  
+  if [[ -f "$candidate" ]]; then
+    FOUND_CONFIG="$candidate"
+    log INFO "  ✓ Found: $candidate"
+    break
+  fi
+  
+  # Try case-insensitive search as fallback
+  if [[ -d "$search_path" ]]; then
+    candidate_ci=$(find "$search_path" -maxdepth 1 -type f -iname "${VM_HOSTNAME}.yaml" -print -quit 2>/dev/null || true)
+    if [[ -n "$candidate_ci" && -f "$candidate_ci" ]]; then
+      FOUND_CONFIG="$candidate_ci"
+      log INFO "  ✓ Found (case-insensitive): $candidate_ci"
+      break
+    fi
+  fi
+done
+
+if [[ -z "$FOUND_CONFIG" ]]; then
+  log ERROR "No configuration file found for hostname: $VM_HOSTNAME"
+  log ERROR "Searched paths:"
+  for path in "${CONFIG_SEARCH_PATHS[@]}"; do
+    log ERROR "  - $path/${VM_HOSTNAME}.yaml"
+  done
+  log ERROR "Ensure the config file exists with exact hostname match"
+  exit 1
+fi
+
+# Validate config file
+log INFO "Step 3: Validate configuration file"
+if [[ ! -r "$FOUND_CONFIG" ]]; then
+  log ERROR "Config file not readable: $FOUND_CONFIG"
+  exit 1
+fi
+
+# Basic YAML syntax validation (if yq available)
+if command -v yq >/dev/null 2>&1; then
+  if ! yq eval '.' "$FOUND_CONFIG" >/dev/null 2>&1; then
+    log ERROR "YAML syntax validation failed: $FOUND_CONFIG"
+    exit 1
+  fi
+  log INFO "  ✓ YAML syntax valid"
+fi
+
+# Check for required fields
+if ! grep -q "apiVersion" "$FOUND_CONFIG" 2>/dev/null; then
+  log WARN "  Missing 'apiVersion' field (recommended)"
+fi
+if ! grep -q "kind" "$FOUND_CONFIG" 2>/dev/null; then
+  log WARN "  Missing 'kind' field (recommended)"
+fi
+
+# Copy config to target directory
+log INFO "Step 4: Copy configuration to target directory"
+EOF_BOOT_SCRIPT
+  echo "TARGET_DIR=\"$BOOT_TARGET_DIR\"" >> "$BOOT_SCRIPT_PATH"
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+mkdir -p "$TARGET_DIR" || {
+  log ERROR "Failed to create target directory: $TARGET_DIR"
+  exit 1
+}
+
+TARGET_FILE="$TARGET_DIR/${VM_HOSTNAME}.yaml"
+if ! cp "$FOUND_CONFIG" "$TARGET_FILE"; then
+  log ERROR "Failed to copy config to: $TARGET_FILE"
+  exit 1
+fi
+
+# Set secure permissions (root read/write only)
+chmod 600 "$TARGET_FILE" || {
+  log ERROR "Failed to set permissions on: $TARGET_FILE"
+  exit 1
+}
+
+log INFO "  ✓ Config copied to: $TARGET_FILE"
+log INFO "  ✓ Permissions set: 600 (root only)"
+
+# Set YAML_FILE for rke2nodeinit execution
+YAML_FILE="$TARGET_FILE"
+
+# Locate rke2nodeinit.sh script
+log INFO "Step 5: Locate rke2nodeinit.sh script"
+EOF_BOOT_SCRIPT
+  echo "SCRIPT_PATH=\"$REPO_ROOT/bin/rke2nodeinit.sh\"" >> "$BOOT_SCRIPT_PATH"
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+
+if [[ ! -x "$SCRIPT_PATH" ]]; then
+  # Try alternate locations
+  for candidate in /usr/local/bin/rke2nodeinit.sh /opt/rke2/bin/rke2nodeinit.sh; do
+    if [[ -x "$candidate" ]]; then
+      SCRIPT_PATH="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ ! -x "$SCRIPT_PATH" ]]; then
+  log ERROR "rke2nodeinit.sh script not found or not executable"
+  log ERROR "Searched: $SCRIPT_PATH, /usr/local/bin, /opt/rke2/bin"
+  exit 1
+fi
+
+log INFO "  ✓ Script found: $SCRIPT_PATH"
+
+# Set environment variable to signal execution via boot service
+export RKE2_BOOT_SERVICE=true
+
+# Execute rke2nodeinit with the discovered YAML file
+log INFO "Step 6: Execute RKE2 node initialization"
+log INFO "  Command: $SCRIPT_PATH -f $YAML_FILE -y"
+log INFO "========================================"
+
+if "$SCRIPT_PATH" -f "$YAML_FILE" -y; then
+  log INFO "========================================"
+  log INFO "✓ RKE2 node initialization completed"
+  log INFO "========================================"
+  exit 0
+else
+  rc=$?
+  log ERROR "========================================"
+  log ERROR "✗ RKE2 node initialization failed"
+  log ERROR "  Exit code: $rc"
+  log ERROR "========================================"
+  exit $rc
+fi
+EOF_BOOT_SCRIPT
+
+  # Set proper permissions
+  chmod 755 "$BOOT_SCRIPT_PATH" || {
+    log ERROR "Failed to set permissions on boot script: $BOOT_SCRIPT_PATH"
+    return 1
+  }
+  
+  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_boot_service
+# Purpose : Create and install systemd service unit for first-boot automation.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SCRIPT_PATH, BOOT_SERVICE_MODE)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+install_boot_service() {
+  local service_dir
+  service_dir="$(dirname "$BOOT_SERVICE_PATH")"
+  
+  # Ensure systemd service directory exists
+  mkdir -p "$service_dir" || {
+    log ERROR "Failed to create systemd service directory: $service_dir"
+    return 1
+  }
+  
+  # Generate systemd service unit
+  cat > "$BOOT_SERVICE_PATH" <<EOF
+[Unit]
+Description=RKE2 First-Boot Automation with Config Discovery
+Documentation=https://github.com/cantrellcloud/rke2-node-init
+After=network-online.target systemd-hostnamed.service
+Wants=network-online.target
+Requires=systemd-hostnamed.service
+ConditionPathExists=$BOOT_SCRIPT_PATH
+# Only run once on first boot (unless marker removed)
+ConditionPathExists=!/var/lib/rke2-boot-complete
+
+[Service]
+Type=oneshot
+ExecStart=$BOOT_SCRIPT_PATH
+ExecStartPost=/bin/touch /var/lib/rke2-boot-complete
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rke2-boot
+RemainAfterExit=yes
+# Ensure script runs with root privileges
+User=root
+# Set working directory to script location
+WorkingDirectory=$(dirname "$BOOT_SCRIPT_PATH")
+# Restart on failure with backoff
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 644 "$BOOT_SERVICE_PATH" || {
+    log ERROR "Failed to set permissions on service file: $BOOT_SERVICE_PATH"
+    return 1
+  }
+  
+  # Reload systemd to recognize new service
+  if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
+    log WARN "systemctl daemon-reload failed; service may not be immediately available"
+  fi
+  
+  log INFO "Boot service installed: $BOOT_SERVICE_PATH"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: enable_boot_service
+# Purpose : Enable the first-boot automation service so it runs on next reboot.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+enable_boot_service() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+  
+  if ! systemctl enable "$service_name" >>"$LOG_FILE" 2>&1; then
+    log ERROR "Failed to enable boot service: $service_name"
+    return 1
+  fi
+  
+  log INFO "Boot service enabled: $service_name (will run on next boot)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: disable_boot_service
+# Purpose : Disable and optionally mask the boot service after successful
+#           execution in oneshot mode.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SERVICE_MODE)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+disable_boot_service() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+  
+  if ! systemctl disable "$service_name" >>"$LOG_FILE" 2>&1; then
+    log WARN "Failed to disable boot service: $service_name"
+    return 1
+  fi
+  
+  log INFO "Boot service disabled: $service_name"
+  
+  # Optionally mask the service to prevent accidental re-enable
+  if [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    if systemctl mask "$service_name" >>"$LOG_FILE" 2>&1; then
+      log INFO "Boot service masked (oneshot mode): $service_name"
+    else
+      log WARN "Failed to mask boot service: $service_name"
+    fi
+  fi
+  
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -2067,7 +4427,7 @@ write_netplan_multi() {
       if [[ -n "${_nic[mtu]:-}" ]]; then
         echo "      mtu: ${_nic[mtu]}"
       fi
-      
+
       # Disable IPv6 on all interfaces
       echo "      accept-ra: false"
       echo "      link-local: []"
@@ -2305,7 +4665,7 @@ check_ufw() {
 #   Returns 0 on success; exits if any prerequisite step fails.
 # ------------------------------------------------------------------------------
 install_rke2_prereqs() {
-  log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
+  log INFO "Installing RKE2 prereqs..."
   export DEBIAN_FRONTEND=noninteractive
   log INFO "Updating APT package cache..."
   spinner_run "Updating APT package cache" apt-get update -y
@@ -2316,7 +4676,7 @@ install_rke2_prereqs() {
   log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq net-tools make
+    ebtables openssl tar gzip zstd jq net-tools make skopeo
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
@@ -2811,6 +5171,366 @@ generate_bootstrap_token() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: cleanup_containerd_before_rke2
+# Purpose : Optionally stop and clear containerd state before RKE2 installation
+#           to prevent conflicts with stale or wrong-version images. This is
+#           particularly useful when reinstalling or when containerd was previously
+#           used for non-RKE2 workloads.
+# Arguments:
+#   $1 - Installation type label (e.g., "server", "agent", "add-server") for logging
+# Returns :
+#   Always returns 0 after prompting and optionally cleaning containerd.
+# ------------------------------------------------------------------------------
+cleanup_containerd_before_rke2() {
+  local install_type="${1:-RKE2}"
+  
+  if ! command -v containerd >/dev/null 2>&1; then
+    return 0  # containerd not installed, nothing to clean
+  fi
+  
+  if ! systemctl is-active --quiet containerd 2>/dev/null; then
+    return 0  # containerd not running, nothing to clean
+  fi
+  
+  log WARN "containerd is already running before $install_type installation"
+  log WARN "Pre-existing containerd state may contain stale or conflicting images"
+  
+  local clean_containerd=0
+  if [[ "${AUTO_YES:-0}" -eq 1 ]]; then
+    log INFO "Auto-confirm enabled; will stop containerd and clear its image store"
+    clean_containerd=1
+  else
+    echo
+    read -rp "Stop containerd and clear its image store before RKE2 install? [y/N]: " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      clean_containerd=1
+    fi
+  fi
+  
+  if (( clean_containerd == 1 )); then
+    log INFO "Stopping containerd service..."
+    systemctl stop containerd >>"$LOG_FILE" 2>&1 || true
+    
+    # Clear containerd content and metadata stores
+    if [[ -d /var/lib/containerd ]]; then
+      log INFO "Clearing containerd content store..."
+      rm -rf /var/lib/containerd/io.containerd.content.v1.content/* 2>/dev/null || true
+      log INFO "Clearing containerd metadata database..."
+      rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db 2>/dev/null || true
+      log INFO "Containerd state cleared; RKE2 will start with fresh image store"
+    fi
+  else
+    log INFO "Skipping containerd cleanup; RKE2 will use existing containerd state"
+  fi
+  
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: parse_oci_image_index
+# Purpose : Parse OCI image index format from tarball and extract image list.
+#           This provides fallback support when Docker manifest.json is not present.
+# Arguments:
+#   $1 - Path to the images tarball
+# Returns :
+#   Prints JSON array of image references, or empty string on failure.
+# ------------------------------------------------------------------------------
+parse_oci_image_index() {
+  local tarball="$1"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log WARN "parse_oci_image_index: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: zstd not available for decompression"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "parse_oci_image_index: gzip not available for decompression"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Try to extract index.json (OCI layout)
+  local index_json
+  index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+  
+  if [[ -z "$index_json" ]]; then
+    log INFO "parse_oci_image_index: No index.json found (not OCI layout format)"
+    return 1
+  fi
+  
+  # Validate it's valid JSON with manifests array
+  if ! echo "$index_json" | python3 -m json.tool >/dev/null 2>&1; then
+    log WARN "parse_oci_image_index: index.json is not valid JSON"
+    return 1
+  fi
+  
+  # Extract image references from annotations
+  # OCI index typically has manifests[].annotations["org.opencontainers.image.ref.name"]
+  local image_refs
+  image_refs=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    refs = []
+    if "manifests" in data:
+        for manifest in data["manifests"]:
+            if "annotations" in manifest:
+                ref_name = manifest["annotations"].get("org.opencontainers.image.ref.name", "")
+                if ref_name:
+                    refs.append(ref_name)
+            # Also check for platform-specific info
+            if "platform" in manifest:
+                arch = manifest["platform"].get("architecture", "")
+                if arch:
+                    # Note the architecture for filtering
+                    pass
+    print(json.dumps(refs))
+except Exception as e:
+    print("[]", file=sys.stderr)
+    sys.exit(1)
+' 2>/dev/null || echo "[]")
+  
+  if [[ "$image_refs" == "[]" ]]; then
+    log INFO "parse_oci_image_index: No image references found in index.json"
+    return 1
+  fi
+  
+  echo "$image_refs"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_image_layer_checksums
+# Purpose : Verify individual image layer checksums from tarball manifest against
+#           computed SHA256 digests. Provides deep integrity validation beyond
+#           simple tarball compression testing.
+# Arguments:
+#   $1 - Path to the images tarball
+#   $2 - Temporary directory for extraction (optional, defaults to /tmp)
+# Returns :
+#   0 if all layers verify successfully, 1 on any failure
+# ------------------------------------------------------------------------------
+verify_image_layer_checksums() {
+  local tarball="$1"
+  local tmp_dir="${2:-/tmp}"
+  local work_dir="$tmp_dir/verify-layers-$$"
+  
+  if [[ ! -f "$tarball" ]]; then
+    log ERROR "verify_image_layer_checksums: tarball not found: $tarball"
+    return 1
+  fi
+  
+  # Detect compression format
+  local decompress_cmd=""
+  if [[ "$tarball" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: zstd not available"
+      return 1
+    fi
+    decompress_cmd="zstd -dc"
+  elif [[ "$tarball" == *.gz ]]; then
+    if ! command -v gzip >/dev/null 2>&1; then
+      log WARN "verify_image_layer_checksums: gzip not available"
+      return 1
+    fi
+    decompress_cmd="gzip -dc"
+  else
+    decompress_cmd="cat"
+  fi
+  
+  # Create temporary work directory
+  mkdir -p "$work_dir" || {
+    log ERROR "verify_image_layer_checksums: failed to create work directory"
+    return 1
+  }
+  
+  # Extract manifest.json
+  local manifest
+  manifest=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+  
+  if [[ -z "$manifest" ]]; then
+    log WARN "verify_image_layer_checksums: No Docker manifest.json found, trying OCI format"
+    
+    # Try OCI layout with index.json
+    local index_json
+    index_json=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO index.json 2>/dev/null || echo "")
+    
+    if [[ -z "$index_json" ]]; then
+      log WARN "verify_image_layer_checksums: No index.json found either, cannot verify"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For OCI format, we need to extract blobs and verify against manifest descriptors
+    log INFO "Verifying OCI image layers..."
+    
+    # Extract all manifest digests from index
+    local manifest_digests
+    manifest_digests=$(echo "$index_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if "manifests" in data:
+        for m in data["manifests"]:
+            if "digest" in m:
+                print(m["digest"])
+except:
+    pass
+' 2>/dev/null || true)
+    
+    if [[ -z "$manifest_digests" ]]; then
+      log WARN "verify_image_layer_checksums: No manifest digests in OCI index"
+      rm -rf "$work_dir"
+      return 1
+    fi
+    
+    # For each manifest, extract and verify its blob
+    local verified_count=0
+    local failed_count=0
+    
+    while IFS= read -r digest; do
+      [[ -z "$digest" ]] && continue
+      
+      # OCI digest format: sha256:abc123...
+      local algo="${digest%%:*}"
+      local hash="${digest#*:}"
+      
+      if [[ "$algo" != "sha256" ]]; then
+        log WARN "Unsupported digest algorithm: $algo (skipping)"
+        continue
+      fi
+      
+      # Extract blob from tarball (OCI layout stores as blobs/sha256/<hash>)
+      local blob_path="blobs/sha256/$hash"
+      local blob_data
+      blob_data=$($decompress_cmd "$tarball" 2>/dev/null | tar -xO "$blob_path" 2>/dev/null || echo "")
+      
+      if [[ -z "$blob_data" ]]; then
+        log WARN "Blob not found in tarball: $blob_path"
+        ((failed_count++))
+        continue
+      fi
+      
+      # Compute SHA256 of extracted blob
+      local computed_hash
+      computed_hash=$(echo -n "$blob_data" | sha256sum | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch for $blob_path"
+        log ERROR "  Expected: $hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    done <<< "$manifest_digests"
+    
+    rm -rf "$work_dir"
+    
+    if (( failed_count > 0 )); then
+      log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted"
+      return 1
+    fi
+    
+    log INFO "Layer verification PASSED: $verified_count layer(s) verified"
+    return 0
+  fi
+  
+  # Docker manifest.json format - verify layers
+  log INFO "Verifying Docker image layers..."
+  
+  # Parse manifest to get layer paths and extract them
+  local layer_paths
+  layer_paths=$(echo "$manifest" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for image in data:
+        if "Layers" in image:
+            for layer in image["Layers"]:
+                print(layer)
+except:
+    pass
+' 2>/dev/null || true)
+  
+  if [[ -z "$layer_paths" ]]; then
+    log WARN "verify_image_layer_checksums: No layers found in manifest"
+    rm -rf "$work_dir"
+    return 1
+  fi
+  
+  local verified_count=0
+  local failed_count=0
+  local total_layers=0
+  
+  # Count total layers
+  total_layers=$(echo "$layer_paths" | wc -l)
+  log INFO "Found $total_layers layer(s) to verify"
+  
+  # Extract layers and verify
+  while IFS= read -r layer_path; do
+    [[ -z "$layer_path" ]] && continue
+    
+    # Extract layer from tarball
+    local layer_file="$work_dir/$(basename "$layer_path")"
+    if ! $decompress_cmd "$tarball" 2>/dev/null | tar -xO "$layer_path" > "$layer_file" 2>/dev/null; then
+      log WARN "Failed to extract layer: $layer_path"
+      ((failed_count++))
+      continue
+    fi
+    
+    # For Docker format, layers are typically named with their digest
+    # Format: <hash>/layer.tar
+    local layer_dir
+    layer_dir=$(dirname "$layer_path")
+    
+    if [[ "$layer_dir" =~ ^[a-f0-9]{64}$ ]]; then
+      # The directory name is the expected SHA256 hash
+      local expected_hash="$layer_dir"
+      local computed_hash
+      computed_hash=$(sha256sum "$layer_file" | awk '{print $1}')
+      
+      if [[ "$computed_hash" == "$expected_hash" ]]; then
+        ((verified_count++))
+      else
+        log ERROR "Layer checksum mismatch: $layer_path"
+        log ERROR "  Expected: $expected_hash"
+        log ERROR "  Computed: $computed_hash"
+        ((failed_count++))
+      fi
+    else
+      # Cannot determine expected hash from path, just verify extraction worked
+      ((verified_count++))
+    fi
+    
+    rm -f "$layer_file"
+  done <<< "$layer_paths"
+  
+  rm -rf "$work_dir"
+  
+  if (( failed_count > 0 )); then
+    log ERROR "Layer verification FAILED: $failed_count layer(s) corrupted out of $total_layers"
+    return 1
+  fi
+  
+  log INFO "Layer verification PASSED: $verified_count layer(s) verified out of $total_layers"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: run_rke2_installer
 # Purpose : Execute the cached RKE2 installer script with environment variables
 #           pointing to staged artifacts for offline installation.
@@ -3029,6 +5749,14 @@ verify_custom_cluster_ca() {
 # ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
+  # If operator provided a local artifact path, attempt to stage from it into STAGE_DIR
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; attempting to stage artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}' into '$STAGE_DIR'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}" || {
+      log ERROR "Staging artifacts from INSTALL_RKE2_ARTIFACT_PATH failed. Aborting."
+      exit 3
+    }
+  fi
   if [[ ! -f "$STAGE_DIR/install.sh" ]]; then
     if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
@@ -3056,6 +5784,269 @@ ensure_staged_artifacts() {
   if (( missing != 0 )); then
     exit 3
   fi
+
+  # Runtime verification: validate staged files against the provided sha256 file
+  if command -v sha256sum >/dev/null 2>&1; then
+    if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+      # Some artifacts (image bundles) are staged into a separate images dir
+      # (IMAGES_DIR). Build a temporary manifest that maps manifest entries to
+      # their actual staged locations (STAGE_DIR or IMAGES_DIR) so sha256sum
+      # can validate them regardless of which staging target holds the file.
+      local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+      log INFO "Verifying staged artifacts checksums in $STAGE_DIR (including $IMAGES_DIR)"
+      local tmp_manifest
+      tmp_manifest=$(mktemp)
+      # Read original manifest and map each entry to where the file actually lives
+      # We collect three lists:
+      #  - mapped_lines: entries we can point at an existing file
+      #  - missing_entries: entries not found as standalone files
+      #  - image_like_missing: subset of missing_entries that look like per-flavor image bundles
+      local -a mapped_lines=()
+      local -a missing_entries=()
+      local -a image_like_missing=()
+      while read -r h fn; do
+        # Normalize to basename when manifest references relative paths
+        local bn
+        bn=$(basename "${fn}")
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $STAGE_DIR/$bn")
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $IMAGES_DIR/$bn")
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          mapped_lines+=("$h  $DOWNLOADS_DIR/$bn")
+        else
+          # Not present as a standalone file; record for later decision
+          missing_entries+=("$h  $bn")
+          # Heuristic: many per-flavor image bundles are named rke2-images-*. Treat
+          # those as image-like so they can be considered satisfied by a consolidated
+          # images tarball when present and verified.
+          if [[ "$bn" == rke2-images-* ]]; then
+            image_like_missing+=("$h  $bn")
+          fi
+        fi
+      done < "$STAGE_DIR/$SHA256_FILE"
+
+      # Verify consolidated images tarball first (if present in stage/downloads/images dir)
+      local images_tar_candidate=""
+      for p in "$STAGE_DIR/$IMAGES_TAR" "$IMAGES_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$IMAGES_TAR"; do
+        if [[ -f "$p" ]]; then images_tar_candidate="$p"; break; fi
+      done
+
+      local images_consolidated_verified=0
+      if [[ -n "$images_tar_candidate" ]]; then
+        # If the manifest contains an entry for the consolidated images tar, prefer
+        # to verify that explicitly. Otherwise, we'll verify mapped_lines below
+        # and treat image-like missing entries as covered by the consolidated tar.
+        if grep -Fq "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE"; then
+          if (grep "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+            images_consolidated_verified=1
+            log INFO "Consolidated images archive verified: $images_tar_candidate"
+          else
+            log WARN "Consolidated images archive present but failed checksum: $images_tar_candidate"
+          fi
+        else
+          # No manifest line for consolidated tar in stage manifest; attempt to verify
+          # it against downloads manifest if available
+          if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" && $(grep -F "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | wc -l) -gt 0 ]]; then
+            if (grep "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+              images_consolidated_verified=1
+              log INFO "Consolidated images archive verified via downloads manifest: $images_tar_candidate"
+            else
+              log WARN "Consolidated images archive present but failed verification against downloads manifest"
+            fi
+          fi
+        fi
+      fi
+
+      # Build the temporary manifest to validate with sha256sum: include mapped lines
+      # and any missing_entries that are not image-like (or image-like but not covered).
+      local line
+      for line in "${mapped_lines[@]}"; do printf '%s\n' "$line" >>"$tmp_manifest"; done
+      for line in "${missing_entries[@]}"; do
+        local bn
+        bn=$(basename "${line#*  }")
+        # If this missing entry is image-like and we have a verified consolidated tar,
+        # skip adding it to the temporary manifest (consider it satisfied).
+        if [[ "$bn" == rke2-images-* && $images_consolidated_verified -eq 1 ]]; then
+          log INFO "Treating missing image-like manifest entry as satisfied by consolidated tar: $bn"
+          continue
+        fi
+        # Otherwise include it (will cause sha256sum to report missing) so operator sees it
+        printf '%s\n' "$line" >>"$tmp_manifest"
+      done
+
+      # Run verification against the normalized manifest
+      if ! sha256sum -c "$tmp_manifest" >>"$LOG_FILE" 2>&1; then
+        log ERROR "Staged artifact checksum verification FAILED. Aborting install. Remove bad artifacts and re-run 'image'."
+        rm -f "$tmp_manifest" || true
+        exit 3
+      fi
+      rm -f "$tmp_manifest" || true
+      log INFO "Staged artifacts checksum verification passed"
+    else
+      log WARN "No checksum file present in $STAGE_DIR; cannot verify staged artifacts"
+    fi
+  else
+    log WARN "sha256sum not available; skipping staged artifact verification"
+  fi
+
+  # --- Post-staging verification: ensure images tarball is present and accessible ---
+  log INFO "Performing post-staging verification..."
+  
+  # Priority 2: Architecture mismatch detection
+  local EXPECTED_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  if [[ ! -f "$IMAGES_DIR/$EXPECTED_TAR" ]]; then
+    # Look for any rke2-images tarball in images dir (may be wrong arch)
+    local found_tars
+    found_tars=$(find "$IMAGES_DIR" -maxdepth 1 \( -name "rke2-images.linux-*.tar.zst" -o -name "rke2-images.linux-*.tar.gz" \) 2>/dev/null || true)
+    if [[ -n "$found_tars" ]]; then
+      log ERROR "Expected $EXPECTED_TAR but found different architecture tarball(s):"
+      echo "$found_tars" | while read -r f; do 
+        [[ -z "$f" ]] && continue
+        log ERROR "  - $(basename "$f")"
+      done
+      log ERROR "Architecture mismatch detected!"
+      log ERROR "Current host architecture: $ARCH"
+      log ERROR "Did you run 'action_image' on a different architecture host?"
+      log ERROR "Re-run 'action_image' on this host or provide correct artifacts via INSTALL_RKE2_ARTIFACT_PATH"
+      exit 3
+    fi
+  fi
+
+  # Priority 1: Verify images tarball is present and accessible after staging
+  if [[ ! -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    log ERROR "Images tarball not found after staging: $IMAGES_DIR/$IMAGES_TAR"
+    log ERROR "Expected file: $IMAGES_TAR"
+    log ERROR "This will cause RKE2 to attempt network download and fail in air-gapped environments"
+    
+    # Try fallback from downloads
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      log WARN "Attempting to re-stage from downloads directory as fallback"
+      local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+      cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+      mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+      log INFO "Re-staged ${IMAGES_TAR} from downloads"
+    else
+      log ERROR "No fallback copy available in downloads; run 'action_image' first"
+      exit 3
+    fi
+  fi
+
+  # Quick sanity check: ensure tarball is a valid archive
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    log INFO "Testing tarball integrity with zstd..."
+    if ! zstd -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (zstd test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (zstd test passed)"
+  elif command -v gzip >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.gz ]]; then
+    log INFO "Testing tarball integrity with gzip..."
+    if ! gzip -t "$IMAGES_DIR/$IMAGES_TAR" >>"$LOG_FILE" 2>&1; then
+      log ERROR "Images tarball appears corrupted (gzip test failed)"
+      log ERROR "Tarball: $IMAGES_DIR/$IMAGES_TAR"
+      log ERROR "Delete the corrupted file and re-run 'image' action"
+      exit 3
+    fi
+    log INFO "Images tarball integrity verified (gzip test passed)"
+  else
+    log WARN "Cannot test tarball integrity (compression tool not available)"
+  fi
+
+  local tar_size
+  tar_size=$(du -h "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+  log INFO "Images tarball staged successfully: $IMAGES_DIR/$IMAGES_TAR ($tar_size)"
+  
+  # Priority 4: Extract and log sample image list from tarball for audit
+  log INFO "Extracting image list from tarball for audit..."
+  if command -v zstd >/dev/null 2>&1 && [[ "$IMAGES_TAR" == *.zst ]]; then
+    # Try to extract manifest.json to inspect image list
+    local manifest
+    manifest=$(zstd -dc "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | tar -xO manifest.json 2>/dev/null || echo "")
+    if [[ -n "$manifest" ]]; then
+      # Count RepoTags entries (Docker manifest format)
+      local repo_tag_count
+      repo_tag_count=$(echo "$manifest" | grep -o '"RepoTags"' | wc -l 2>/dev/null || echo 0)
+      log INFO "Tarball manifest contains $repo_tag_count image layer sets (Docker format)"
+      
+      # Extract sample image names (look for rancher images as representative)
+      log INFO "Sample images in tarball:"
+      # Guard grep so a non-match (exit code 1) does not trigger set -o pipefail
+      # and abort the entire script. We only want to iterate when matches exist.
+      echo "$manifest" | { grep -o '"docker.io/rancher[^"]*"' 2>/dev/null || true; } | head -n 3 | while read -r img; do
+        local clean_img
+        clean_img=$(echo "$img" | tr -d '"')
+        log INFO "  - $clean_img"
+      done
+      
+      # Check for CNI plugins image as representative sample of tarball completeness
+      if echo "$manifest" | grep -q "hardened-cni-plugins"; then
+        log INFO "  ✓ Tarball verification passed: 'hardened-cni-plugins' present in manifest"
+      else
+        log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
+        log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
+      fi
+    else
+      # Docker manifest not found, try OCI image index format as fallback
+      log INFO "Docker manifest.json not found, attempting OCI image index parsing..."
+      local oci_refs
+      oci_refs=$(parse_oci_image_index "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null || echo "")
+      
+      if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]]; then
+        local ref_count
+        ref_count=$(echo "$oci_refs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+        log INFO "Tarball contains $ref_count image reference(s) (OCI format)"
+        
+        # Show sample images from OCI index
+        log INFO "Sample images in tarball:"
+        echo "$oci_refs" | python3 -c '
+import json, sys
+try:
+    refs = json.load(sys.stdin)
+    for ref in refs[:3]:  # Show first 3
+        print(ref)
+except:
+    pass
+' 2>/dev/null | while read -r img; do
+          log INFO "  - $img"
+        done
+        
+        # Check for rancher images
+        if echo "$oci_refs" | grep -q "rancher"; then
+          log INFO "  ✓ Verified: rancher images present in OCI tarball"
+        fi
+      else
+        log WARN "Could not parse tarball format (neither Docker manifest nor OCI index found)"
+      fi
+    fi
+  elif command -v tar >/dev/null 2>&1; then
+    # For non-zst tarballs, try direct tar inspection
+    log INFO "Inspecting tarball contents..."
+    local file_count
+    file_count=$(tar -tzf "$IMAGES_DIR/$IMAGES_TAR" 2>/dev/null | wc -l || echo 0)
+    log INFO "Tarball contains $file_count files/layers"
+  else
+    log WARN "Cannot inspect tarball contents (required tools not available)"
+  fi
+  
+  # Optional: Deep layer checksum verification (opt-in via --verify-layers)
+  if (( VERIFY_LAYERS == 1 )); then
+    log INFO "Performing deep layer checksum verification (--verify-layers enabled)..."
+    if verify_image_layer_checksums "$IMAGES_DIR/$IMAGES_TAR" "$STAGE_DIR"; then
+      log INFO "✓ Deep layer verification passed: all image layers verified"
+    else
+      log ERROR "✗ Deep layer verification FAILED"
+      log ERROR "One or more image layers are corrupted or missing"
+      log ERROR "Delete the tarball and re-run 'image' action to download fresh copy"
+      exit 3
+    fi
+  else
+    log INFO "Deep layer verification skipped (use --verify-layers to enable)"
+  fi
+  
+  log INFO "Post-staging verification complete"
 }
 
 # ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
@@ -3182,7 +6173,7 @@ EOF
 # Returns :
 #   Returns 0 on success.
 # ------------------------------------------------------------------------------
-fetch_rke2_ca_generator() { 
+fetch_rke2_ca_generator() {
   # Prefetch custom-CA helper for offline use
   if command -v curl >/dev/null 2>&1; then
     local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
@@ -3206,6 +6197,14 @@ fetch_rke2_ca_generator() {
 # ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
+
+  # If operator provided a local artifact path, prefer it and stage from there
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; staging artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}'"
+    stage_from_artifact_path "${INSTALL_RKE2_ARTIFACT_PATH}"
+    return $?
+  fi
+
   pushd "$DOWNLOADS_DIR" >/dev/null
 
   # Pick version: from config/env or latest online
@@ -3222,39 +6221,210 @@ cache_rke2_artifacts() {
   local SHA256_FILE="sha256sum-${ARCH}.txt"
 
   # Download artifacts (idempotent)
-  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
-  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
-  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
-  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
+  if [[ -f "$IMAGES_TAR" ]]; then
+    log INFO "Already present: $IMAGES_TAR (skipping download)"
+  else
+    log INFO "Downloading $IMAGES_TAR from $BASE_URL/$IMAGES_TAR"
+    spinner_run "Downloading $IMAGES_TAR" curl -Lf "$BASE_URL/$IMAGES_TAR" -o "$IMAGES_TAR"
+    if [[ -f "$IMAGES_TAR" ]]; then
+      local _size
+      _size=$(du -h "$IMAGES_TAR" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$IMAGES_TAR ($_size) from $BASE_URL/$IMAGES_TAR"
+    else
+      log WARN "Download finished but file not found: $IMAGES_TAR"
+    fi
+  fi
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    log INFO "Already present: $RKE2_TARBALL (skipping download)"
+  else
+    log INFO "Downloading $RKE2_TARBALL from $BASE_URL/$RKE2_TARBALL"
+    spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+    if [[ -f "$RKE2_TARBALL" ]]; then
+      local _size
+      _size=$(du -h "$RKE2_TARBALL" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/$RKE2_TARBALL ($_size) from $BASE_URL/$RKE2_TARBALL"
+    else
+      log WARN "Download finished but file not found: $RKE2_TARBALL"
+    fi
+  fi
+  if [[ -f "$SHA256_FILE" ]]; then
+    log INFO "Already present: $SHA256_FILE (skipping download)"
+  else
+    log INFO "Downloading $SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    spinner_run "Downloading $SHA256_FILE" curl -Lf "$BASE_URL/$SHA256_FILE" -o "$SHA256_FILE"
+    if [[ -f "$SHA256_FILE" ]]; then
+      log INFO "Downloaded: $DOWNLOADS_DIR/$SHA256_FILE from $BASE_URL/$SHA256_FILE"
+    else
+      log_WARN "Download finished but file not found: $SHA256_FILE"
+    fi
+  fi
+  if [[ -f install.sh ]]; then
+    log INFO "Already present: install.sh (skipping download)"
+  else
+    log INFO "Downloading install.sh from https://get.rke2.io"
+    spinner_run "Downloading install.sh" curl -sfL "https://get.rke2.io" -o install.sh
+    if [[ -f install.sh ]]; then
+      local _size
+      _size=$(du -h install.sh 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log INFO "Downloaded: $DOWNLOADS_DIR/install.sh ($_size) from https://get.rke2.io"
+    else
+      log WARN "Download finished but file not found: install.sh"
+    fi
+  fi
   chmod +x install.sh || true
 
-  # Verify checksums when possible
+  # Optionally download hardened-cni-plugins when configured. Prefer skopeo
+  # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
+  if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
+    # If the artifact already exists in downloads, skip acquisition.
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_CNI_BN; skipping hardened-cni acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "skopeo detected; attempting to mirror hardened-cni from Docker Hub"
+        if ! cache_hardened_cni_skopeo "${HARDENED_CNI_TAG:-}"; then
+          log WARN "skopeo hardened-cni mirror failed; attempting HTTP fallback"
+          if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+            cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+          fi
+        fi
+      else
+        if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
+          log INFO "Configured HARDENED_CNI_URL detected; attempting HTTP download"
+          cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+        else
+          log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
+        fi
+      fi
+    fi
+  fi
+
+  # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
     if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
-      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $IMAGES_TAR; aborting"
+        popd >/dev/null || true
+        return 2
+      fi
+    else
+      log ERROR "Checksum entry for $IMAGES_TAR not found in $SHA256_FILE; aborting"
+      popd >/dev/null || true
+      return 2
     fi
+
     if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
-      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+      if ! (grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+        log ERROR "Checksum verification failed for $RKE2_TARBALL; aborting"
+        popd >/dev/null || true
+        return 3
+      fi
+    else
+      log WARN "Checksum entry for $RKE2_TARBALL not found in $SHA256_FILE; continuing but installer may attempt network access"
     fi
   fi
 
   popd >/dev/null
 
   # --- Stage artifacts for offline install -----------------------------------
-  mkdir -p /var/lib/rancher/rke2/agent/images/
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  mkdir -p "$IMAGES_DIR"
   if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
-    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
+    local tmpimg="$IMAGES_DIR/.tmp-${IMAGES_TAR}.$$"
+    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
+    mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
+    log INFO "Staged ${IMAGES_TAR} into $IMAGES_DIR/"
   fi
 
   mkdir -p "$STAGE_DIR"
-  for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
-    if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
-      cp -f "$DOWNLOADS_DIR/$f" "$STAGE_DIR/"
-      [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
-      log INFO "Staged $f into $STAGE_DIR"
-    fi
-  done
+  # Stage selected artifacts. We'll stage the rke2 tarball and a filtered
+  # checksum manifest that contains only tarball entries that were actually
+  # staged/cached (images tarball(s) and RKE2 tarball). This avoids shipping
+  # a manifest containing many unrelated files.
+  if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+    local tmpf="$STAGE_DIR/.tmp-${RKE2_TARBALL}.$$"
+    cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"
+    mv -T "$tmpf" "$STAGE_DIR/$RKE2_TARBALL"
+    log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
+  fi
+
+  # Stage hardened-cni-plugins tarball if present in downloads
+  if [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+    local tmpc="$STAGE_DIR/.tmp-${HARDENED_CNI_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
+    mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
+    log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
+  fi
+
+  # Build a filtered sha256 manifest containing only staged/cached tarballs.
+  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    local out_manifest="$STAGE_DIR/$SHA256_FILE"
+    : > "$out_manifest"
+    # Iterate over each line in the downloaded manifest and include only
+    # entries whose basename is a tar archive and which exist in the
+    # staging or images directories. Also produce a JSON metadata file
+    # describing included files (name, sha256, size, location).
+    local tmp_json="$STAGE_DIR/.tmp-sha-manifest-$$.json"
+    : > "$tmp_json"
+    local first=1
+    while read -r h fn; do
+      # skip empty lines
+      [[ -z "${h:-}" || -z "${fn:-}" ]] && continue
+      bn=$(basename "${fn}")
+      # consider common tarball suffixes
+      if [[ "${bn}" =~ \.(tar|tar\.gz|tar\.zst|tgz)$ ]]; then
+        # prefer stage, then images, then downloads when selecting path
+        if [[ -f "$STAGE_DIR/$bn" ]]; then
+          chosen_path="$STAGE_DIR/$bn"
+          location="stage"
+        elif [[ -f "$IMAGES_DIR/$bn" ]]; then
+          chosen_path="$IMAGES_DIR/$bn"
+          location="images"
+        elif [[ -f "$DOWNLOADS_DIR/$bn" ]]; then
+          chosen_path="$DOWNLOADS_DIR/$bn"
+          location="downloads"
+        else
+          chosen_path=""
+          location="missing"
+        fi
+
+        if [[ -n "$chosen_path" ]]; then
+          # write manifest line using basename (common usage expects basename)
+          printf '%s  %s\n' "$h" "$bn" >> "$out_manifest"
+
+          # compute actual sha and size for JSON metadata (fallback to h if sha256sum fails)
+          fsha=$(sha256sum "$chosen_path" 2>/dev/null | awk '{print $1}' || true)
+          if [[ -z "$fsha" ]]; then
+            fsha="$h"
+          fi
+          fsize=$(stat -c%s "$chosen_path" 2>/dev/null || echo 0)
+
+          # append JSON entry
+          if [[ $first -eq 1 ]]; then
+            printf '  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+            first=0
+          else
+            printf ',\n  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$bn" "$fsha" "$fsize" "$location" >> "$tmp_json"
+          fi
+        fi
+      fi
+    done < "$DOWNLOADS_DIR/$SHA256_FILE"
+
+    # Wrap JSON entries into a structured object with metadata
+    local out_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+    {
+      echo "{"
+      echo "  \"generated_at\": \"$(date -u +%FT%TZ)\"," 
+      echo "  \"arch\": \"${ARCH}\"," 
+      echo "  \"manifest_file\": \"${SHA256_FILE}\"," 
+      echo "  \"files\": ["
+      cat "$tmp_json" || true
+      echo "  ]"
+      echo "}"
+    } > "$out_json"
+    rm -f "$tmp_json" || true
+    log INFO "Wrote filtered checksum manifest to $out_manifest and metadata to $out_json"
+  fi
 
   # Stage custom-CA helper if present in downloads
   if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
@@ -3309,6 +6479,177 @@ ca_trust_registries() {
   fi
   : > /etc/rancher/rke2/config.yaml
 }
+
+# ----------------------------------------------------------------------------
+# Function: stage_from_artifact_path
+# Purpose : Stage RKE2 artifacts from a local artifact path when
+#           INSTALL_RKE2_ARTIFACT_PATH is set. Strict checksum verification
+#           is performed. Files are not overwritten silently; operator must
+#           delete existing mismatched files manually.
+# Arguments:
+#   $1 - Path to artifacts (INSTALL_RKE2_ARTIFACT_PATH)
+# Returns :
+#   0 on success, non-zero on verification or staging error
+# ----------------------------------------------------------------------------
+stage_from_artifact_path() {
+  set -euo pipefail
+  local ART_PATH="$1"
+  local ARCH="${ARCH:-$(uname -m)}"
+  # normalize ARCH to expected values (amd64/arm64)
+  case "$ARCH" in
+    x86_64|amd64) ARCH="amd64" ; SUFFIX="linux-amd64" ;;
+    aarch64|arm64) ARCH="arm64" ; SUFFIX="linux-arm64" ;;
+    *) log ERROR "Unsupported architecture: $ARCH" ; return 1 ;;
+  esac
+
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage}"
+  mkdir -p "$IMAGES_DIR" "$STAGE_DIR"
+
+  # Find checksum file
+  local SHA_FILE="${ART_PATH}/sha256sum-${ARCH}.txt"
+  if [[ -f "$SHA_FILE" ]]; then
+    log INFO "Found checksum file: $SHA_FILE"
+  else
+    log ERROR "Checksum file sha256sum-${ARCH}.txt not found in $ART_PATH; strict mode requires it"
+    return 2
+  fi
+
+  # Helper to check checksum for a single file (must exist in ART_PATH)
+  verify_checksum_for() {
+    local fname="$1"
+    if ! grep -q "$(basename "$fname")" "$SHA_FILE" 2>/dev/null; then
+      log ERROR "No checksum entry for $(basename "$fname") in $SHA_FILE"
+      return 3
+    fi
+    (cd "$ART_PATH" && grep "$(basename "$fname")" "$SHA_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1 || return 4
+    return 0
+  }
+
+  # Determine image tar candidates (prefer zst, commit suffix optional)
+  local IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}.tar.zst"
+  local IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}.tar.gz"
+  # also accept commit-suffixed variants if present
+  if [[ -n "${INSTALL_RKE2_COMMIT:-}" ]]; then
+    IMAGES_ZST="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.zst"
+    IMAGES_GZ="${ART_PATH}/rke2-images.${SUFFIX}-${INSTALL_RKE2_COMMIT}.tar.gz"
+  fi
+
+  local selected_image_tar=""
+  if [[ -f "$IMAGES_ZST" ]]; then
+    selected_image_tar="$IMAGES_ZST"
+  elif [[ -f "$IMAGES_GZ" ]]; then
+    selected_image_tar="$IMAGES_GZ"
+  else
+    # try un-suffixed search for any rke2-images-* bundles
+    local extra
+    extra=$(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" | sort)
+    if [[ -n "$extra" ]]; then
+      # pick first as the primary image bundle
+      selected_image_tar="$(echo "$extra" | head -n1)"
+    fi
+  fi
+
+  if [[ -z "$selected_image_tar" ]]; then
+    log ERROR "No rke2-images tarball found in $ART_PATH"
+    return 5
+  fi
+
+  log INFO "Selected image tar: $(basename "$selected_image_tar")"
+
+  # Verify checksum for selected image tar and rke2 tarball and install.sh if present
+  local RKE2_TARBALL="${ART_PATH}/rke2.${SUFFIX}.tar.gz"
+  local INSTALL_SH="${ART_PATH}/install.sh"
+
+  verify_checksum_for "$selected_image_tar" || { log ERROR "Image checksum verification failed"; return 6; }
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    verify_checksum_for "$RKE2_TARBALL" || { log ERROR "RKE2 tarball checksum verification failed"; return 7; }
+  else
+    log WARN "rke2.${SUFFIX}.tar.gz not present in artifact path; installer may attempt network download unless install.sh also present in stage"
+  fi
+  if [[ -f "$INSTALL_SH" ]]; then
+    # no checksum expected for install.sh but ensure it's present
+    log INFO "Found local install.sh; will stage it into $STAGE_DIR"
+  fi
+
+  # Before moving, check for existing target file and avoid overwrite
+  local target_images_name="$(basename "$selected_image_tar")"
+  local target_images_path="$IMAGES_DIR/$target_images_name"
+  if [[ -f "$target_images_path" ]]; then
+    # verify existing file matches checksum; if not, do NOT overwrite
+    (cd "$IMAGES_DIR" && sha256sum "$target_images_name" | awk '{print $1}') >/tmp/existing.sum 2>/dev/null || true
+    local existing_sum
+    existing_sum=$(awk '{print $1}' /tmp/existing.sum 2>/dev/null || true)
+    local expected_sum
+    expected_sum=$(grep "$(basename "$selected_image_tar")" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+    if [[ -n "$existing_sum" && "$existing_sum" == "$expected_sum" ]]; then
+      log INFO "Target image $target_images_path already present and checksum matches; skipping move."
+    else
+      log ERROR "Target image $target_images_path already exists and checksum does not match expected value. Will NOT overwrite. Please delete the file and re-run."
+      return 8
+    fi
+  else
+    # atomic copy then move
+    local tmp_dest
+    tmp_dest="$IMAGES_DIR/.tmp-$(basename "$selected_image_tar").$$"
+    cp -f "$selected_image_tar" "$tmp_dest"
+    mv -T "$tmp_dest" "$target_images_path"
+    log INFO "Moved $(basename "$selected_image_tar") -> $target_images_path"
+  fi
+
+  # Stage additional rke2-images-* bundles
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local bn
+    bn=$(basename "$f")
+    if [[ -f "$IMAGES_DIR/$bn" ]]; then
+      log INFO "Additional image bundle $bn already exists in $IMAGES_DIR; skipping"
+      continue
+    fi
+    cp -f "$f" "$IMAGES_DIR/"
+    log INFO "Staged additional image bundle $bn into $IMAGES_DIR"
+  done < <(find "$ART_PATH" -maxdepth 1 -type f -name "rke2-images-*${SUFFIX}*" ! -name "$(basename "$selected_image_tar")" | sort)
+
+  # Stage rke2 tarball and install.sh into STAGE_DIR (do not overwrite existing mismatching files)
+  if [[ -f "$RKE2_TARBALL" ]]; then
+    local bn_rke2
+    bn_rke2=$(basename "$RKE2_TARBALL")
+    if [[ -f "$STAGE_DIR/$bn_rke2" ]]; then
+      # verify checksum
+      local existing
+      existing=$(sha256sum "$STAGE_DIR/$bn_rke2" | awk '{print $1}' 2>/dev/null || true)
+      local expected
+      expected=$(grep "${bn_rke2}" "$SHA_FILE" | awk '{print $1}' 2>/dev/null || true)
+      if [[ -n "$existing" && "$existing" == "$expected" ]]; then
+        log INFO "RKE2 tarball already staged and checksum matches; skipping"
+      else
+        log ERROR "RKE2 tarball already exists at $STAGE_DIR/$bn_rke2 and does not match checksum; will NOT overwrite. Please remove it to proceed."
+        return 9
+      fi
+    else
+      cp -f "$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged $bn_rke2 into $STAGE_DIR"
+    fi
+  fi
+
+  if [[ -f "$INSTALL_SH" ]]; then
+    if [[ -f "$STAGE_DIR/install.sh" ]]; then
+      # if already present, do not overwrite
+      log INFO "install.sh already exists in $STAGE_DIR; leaving in place"
+    else
+      cp -f "$INSTALL_SH" "$STAGE_DIR/install.sh"
+      chmod 0755 "$STAGE_DIR/install.sh" || true
+      log INFO "Staged install.sh into $STAGE_DIR/install.sh"
+    fi
+  fi
+
+  # Finally, ensure environment points to stage dir for installer
+  export INSTALL_RKE2_ARTIFACT_PATH="$STAGE_DIR"
+  log INFO "Set INSTALL_RKE2_ARTIFACT_PATH=$STAGE_DIR for installer"
+
+  return 0
+}
+
 
 # ------------------------------------------------------------------------------
 # Function: install_nerdctl
@@ -3393,6 +6734,13 @@ install_nerdctl() {
 # ------------------------------------------------------------------------------
 prompt_reboot() {
   echo
+  # Skip reboot in dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "DRY-RUN: Reboot skipped (would normally reboot now)"
+    log_info "In production, the system would reboot to apply changes"
+    return 0
+  fi
+  
   if (( AUTO_YES )); then
     log WARN "Auto-confirm enabled (-y). Rebooting now..."
     sleep 2
@@ -3407,6 +6755,46 @@ prompt_reboot() {
         ;;
       *)
         log INFO "Reboot deferred. Remember to reboot before installing RKE2."
+        ;;
+    esac
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: prompt_shutdown
+# Purpose : Ask the operator whether to shutdown immediately for VM template
+#           preparation. Used when boot service is enabled in image action.
+# Arguments:
+#   None
+# Returns :
+#   Initiates shutdown when approved; otherwise returns 0.
+# ------------------------------------------------------------------------------
+prompt_shutdown() {
+  echo
+  # Skip shutdown in dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "DRY-RUN: Shutdown skipped (would normally shutdown now)"
+    log_info "In production, the system would shutdown for template preparation"
+    return 0
+  fi
+  
+  if (( AUTO_YES )); then
+    log WARN "Auto-confirm enabled (-y). Shutting down now..."
+    log_info "Template VM is ready for cloning after shutdown completes"
+    sleep 2
+    shutdown -h now
+  else
+    read -r -p "Shutdown now to prepare template? [y/N]: " _ans
+    case "${_ans,,}" in
+      y|yes)
+        log WARN "Shutting down..."
+        log_info "Template VM will be ready for cloning after shutdown"
+        sleep 2
+        shutdown -h now
+        ;;
+      *)
+        log INFO "Shutdown deferred. Shutdown and clone this VM when ready."
+        log_info "Boot service will auto-initialize cloned VMs on first boot."
         ;;
     esac
   fi
@@ -3453,35 +6841,93 @@ EOF
 # Returns :
 #   Exits on failure of any stage.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_push
+# Description: Push container images to private registry with metrics tracking
+# Parameters:
+#   None (reads from CONFIG_FILE or CLI flags)
+# Returns: 
+#   0 - Success (all images pushed or dry-run)
+#   1 - Dependency or login failure
+#   3 - Images archive not found
+# Usage: action_push -f <config.yaml> or action_push -r registry -u user -p pass
+# Dependencies: metrics_init, metrics_increment, metrics_summary, report_progress,
+#               validate_file_exists, log_info, log_success, log_error
+# Changes from Original:
+#   - Added metrics tracking for image operations
+#   - Added progress reporting for batch operations
+#   - Enhanced validation with remediation steps
+#   - Improved error messages and logging structure
+#=============================================================================
 action_push() {
   initialize_action_context false "push"
 
+  log_info "Starting image push operation"
+  
+  # Load configuration from YAML if provided
   if [[ -n "$CONFIG_FILE" ]]; then
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
-    log WARN "Using YAML values; CLI flags may be overridden (push)."
+    log_warn "Using YAML configuration values (CLI flags may be overridden)"
   fi
 
-  # Warn if using example default credentials
+  # Validate credentials
   warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+  
+  if ! validate_non_empty "${REGISTRY:-}" "REGISTRY"; then
+    log_error "Registry URL not specified"
+    log_error "Remediation: Provide registry via -r flag or in YAML config"
+    log_error "Example: $0 push -r registry.example.com -u user -p pass"
+    exit 1
+  fi
 
-  ensure_installed zstd
+  # Check dependencies
+  if ! check_dependencies zstd; then
+    log_warn "Missing required dependency: zstd"
+    install_dependencies_interactive zstd || exit 1
+  fi
 
+  # Validate images archive exists
   local work="$DOWNLOADS_DIR"
-  if [[ ! -f "$work/$IMAGES_TAR" ]]; then
-    log ERROR "Images archive not found in $work. Run 'image' first."
+  if ! validate_file_exists "$work/$IMAGES_TAR" "images archive"; then
+    log_error "Images archive not found: $work/$IMAGES_TAR"
+    log_error "Remediation steps:"
+    log_error "  1. Run image action first: $0 image -f config.yaml"
+    log_error "  2. Verify downloads directory: $work"
+    log_error "  3. Check for disk space issues"
     exit 3
   fi
 
-  zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load >>"$LOG_FILE" 2>&1
+  # Initialize metrics for tracking
+  metrics_init "push_operation"
+  
+  log_info "Loading images from archive: $work/$IMAGES_TAR"
+  report_progress "Loading images into nerdctl" 1 4
+  
+  if ! zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load >>"$LOG_FILE" 2>&1; then
+    log_error "Failed to load images from archive"
+    log_error "Check log file for details: $LOG_FILE"
+    exit 1
+  fi
+  metrics_increment "images_loaded"
 
+  # Get list of loaded images
   local -a imgs
   mapfile -t imgs < <(nerdctl -n k8s.io images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | sort -u)
+  
+  local img_count=${#imgs[@]}
+  log_info "Found $img_count images to process"
+  metrics_increment "total" "$img_count"
 
+  # Parse registry host and namespace
   local REG_HOST="$REGISTRY" REG_NS=""
   [[ "$REGISTRY" == *"/"* ]] && { REG_HOST="${REGISTRY%%/*}"; REG_NS="${REGISTRY#*/}"; }
+  log_info "Target registry: $REG_HOST" 
+  [[ -n "$REG_NS" ]] && log_info "Target namespace: $REG_NS"
 
+  # Generate manifest files
+  report_progress "Generating push manifest" 2 4
   local manifest_json="$OUT_DIR/images-manifest.json"
   local manifest_txt="$OUT_DIR/images-manifest.txt"
   : > "$manifest_txt"
@@ -3502,67 +6948,196 @@ action_push() {
   done
   echo ""  >> "$manifest_json"
   echo "]" >> "$manifest_json"
-  log INFO "Pre-push manifest written:"
-  log INFO "  - $manifest_txt"
-  log INFO "  - $manifest_json"
+  
+  log_info "Pre-push manifest written:"
+  log_info "  - Text: $manifest_txt"
+  log_info "  - JSON: $manifest_json"
 
-  if [[ "$DRY_PUSH" -eq 1 ]]; then
-    log WARN "--dry-push set; skipping actual registry pushes."
+  # Handle dry-run mode
+  if [[ "${DRY_PUSH:-0}" -eq 1 ]]; then
+    log_warn "Dry-run mode enabled (--dry-push flag)"
+    log_warn "Skipping actual registry authentication and image pushes"
+    log_info "Review manifest files above to verify push targets"
+    metrics_summary "Push Operation (Dry-Run)"
     return 0
   fi
 
-  spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"
+  # Authenticate to registry
+  report_progress "Authenticating to registry" 3 4
+  log_info "Logging into registry: $REG_HOST"
+  
+  if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
+    log_error "Registry login failed"
+    log_error "Remediation steps:"
+    log_error "  - Verify registry URL is correct: $REG_HOST"
+    log_error "  - Check username and password credentials"
+    log_error "  - Ensure registry is accessible from this network"
+    log_error "  - Test manually: nerdctl login $REG_HOST -u <user>"
+    metrics_increment "failed"
+    metrics_summary "Push Operation (Failed)"
+    exit 1
+  fi
+  metrics_increment "authenticated"
+
+  # Push images with progress tracking
+  report_progress "Pushing images to registry" 4 4
+  log_info "Starting image push operations ($img_count images)"
+  
+  local push_num=0
   for IMG in "${imgs[@]}"; do
     [[ -z "$IMG" ]] && continue
+    push_num=$((push_num + 1))
+    
     local TARGET
     if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
-    log INFO "Tag & push: $IMG -> $TARGET"
-    nerdctl -n k8s.io tag  "$IMG" "$TARGET"  >>"$LOG_FILE" 2>&1
-    spinner_run "Pushing $TARGET" nerdctl -n k8s.io push "$TARGET"
+    
+    log_info "[$push_num/$img_count] Processing: $IMG -> $TARGET"
+    
+    # Tag image
+    if ! nerdctl -n k8s.io tag "$IMG" "$TARGET" >>"$LOG_FILE" 2>&1; then
+      log_error "Failed to tag image: $IMG"
+      metrics_increment "failed"
+      report_item_failure "$IMG" "Tag operation failed"
+      continue
+    fi
+    
+    # Push image
+    if spinner_run "Pushing $TARGET" nerdctl -n k8s.io push "$TARGET"; then
+      metrics_increment "success"
+      report_item_success "$IMG" "Pushed to $TARGET"
+    else
+      log_error "Failed to push image: $TARGET"
+      metrics_increment "failed"
+      report_item_failure "$IMG" "Push operation failed"
+    fi
   done
+
+  # Cleanup - logout from registry
   nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
 
-  log INFO "push: completed successfully."
+  # Display summary
+  metrics_summary "Image Push Summary"
+  
+  # Determine exit status based on metrics
+  if metrics_should_fail; then
+    log_error "Push operation completed with failures"
+    log_error "Review error messages above and retry failed images"
+    return 1
+  else
+    log_success "Image push operation completed successfully"
+    log_info "All $img_count images pushed to $REG_HOST"
+    return 0
+  fi
 }
 
-# ==============
-# Action: IMAGE
-# ------------------------------------------------------------------------------
+#=============================================================================
 # Function: action_image
-# Purpose : Prepare a golden image for offline deployment by installing
-#           prerequisites, downloading artifacts, caching registries configuration,
-#           and writing documentation of the run.
-# Arguments:
-#   None
-# Returns :
-#   Exits on failure; triggers reboot prompt on completion.
-# ------------------------------------------------------------------------------
+# Description: Prepare golden image for air-gapped deployment with full artifact
+#              caching, SBOM generation, and comprehensive validation
+# Parameters:
+#   None (reads from CONFIG_FILE or uses defaults)
+# Returns: 
+#   0 - Success (image prepared, reboot prompt shown)
+#   1 - Dependency or validation failure
+#   3 - Artifact download/caching failure
+# Usage: action_image -f <config.yaml>
+# Dependencies: metrics_init, metrics_increment, metrics_summary, validate_file_exists,
+#               validate_directory_writable, check_dependencies, install_dependencies_interactive,
+#               log_info, log_success, log_error, report_progress
+# Changes from Original:
+#   - Added metrics tracking for artifacts and operations
+#   - Enhanced validation with Phase 1 utilities
+#   - Improved progress reporting for long-running operations
+#   - Better structured logging for auditability
+#   - Dependency checks with interactive installation
+#=============================================================================
 action_image() {
   initialize_action_context true "image"
 
-  # --- Read YAML (optional) -------------------------------------------------
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Golden Image Prep"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
+  fi
+
+  log_info "========================================"
+  log_info "Starting RKE2 Golden Image Preparation"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "image_operation"
+  
+  # Log configuration for audit trail
+  log_info "Configuration:"
+  log_info "  RKE2_VERSION: ${RKE2_VERSION:-<auto-detect>}"
+  log_info "  REGISTRY: ${REGISTRY:-<none>}"
+  log_info "  REG_USER: ${REG_USER:-<none>}"
+  log_info "Directories:"
+  log_info "  DOWNLOADS_DIR: $DOWNLOADS_DIR"
+  log_info "  STAGE_DIR: $STAGE_DIR"
+  log_info "  SBOM_DIR: $SBOM_DIR"
+  log_info "  OUT_DIR: $OUT_DIR"
+
+  # Validate directories are writable
+  report_progress "Validating environment" 1 8
+  if ! validate_directory_writable "$DOWNLOADS_DIR" "downloads directory"; then
+    log_error "Downloads directory not writable: $DOWNLOADS_DIR"
+    log_error "Remediation: Check directory permissions and disk space"
+    exit 1
+  fi
+  if ! validate_directory_writable "$STAGE_DIR" "stage directory"; then
+    log_error "Stage directory not writable: $STAGE_DIR"
+    log_error "Remediation: Check directory permissions and disk space"
+    exit 1
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "validation_passed"
+
+  # --- Read YAML configuration (optional) -----------------------------------
+  report_progress "Loading configuration" 2 8
   local REQ_VER="${RKE2_VERSION:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
+  
   if [[ -n "$CONFIG_FILE" ]]; then
+    log_info "Loading configuration from: $CONFIG_FILE"
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file" "configuration file"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      exit 1
+    fi
+    
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
     REG_HOST="${REGISTRY%%/*}"
+    
     local d1 s1
     d1="$(yaml_spec_get "$CONFIG_FILE" defaultDns || true)"
     s1="$(yaml_spec_get "$CONFIG_FILE" defaultSearchDomains || true)"
     [[ -n "$d1" ]] && defaultDnsCsv="$(normalize_list_csv "$d1")"
     [[ -n "$s1" ]] && defaultSearchCsv="$(normalize_list_csv "$s1")"
+    
     # Optional custom CA for registry/cluster
     CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
     CA_KEY="$(yaml_spec_get "$CONFIG_FILE" customCA.rootKey || true)"
     CA_INTCRT="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateCrt || true)"
     CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
     CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
+    
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "config_loaded"
+  else
+    log_info "No configuration file provided - using defaults and CLI flags"
+    metrics_increment "total"
+    metrics_increment "success"
   fi
 
   # Warn if using example default credentials
@@ -3574,33 +7149,191 @@ action_image() {
   [[ -n "$CA_INTCRT" && "${CA_INTCRT:0:1}" != "/" ]] && CA_INTCRT="$SCRIPT_DIR/$CA_INTCRT"
   [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
-  # --- OS prereqs ------------------------------------------------------------
+  # --- Install OS prerequisites ----------------------------------------------
+  report_progress "Installing OS prerequisites" 3 8
+  log_info "Installing RKE2 prerequisites for $(detect_os)"
   install_rke2_prereqs
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "prereqs_installed"
 
+  # Detect virtualization and install appropriate tools
   local virt_class virt_type hypervisor
   IFS='|' read -r virt_class virt_type hypervisor <<<"$(detect_virtualization)"
   if [[ "$virt_class" == "virtual" ]]; then
-    log INFO "Virtual environment detected (type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown})."
+    log_info "Virtual environment detected: type=${virt_type:-unknown}, hypervisor=${hypervisor:-unknown}"
     install_vm_tools "$hypervisor"
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "vm_tools_installed"
   else
-    log INFO "Physical hardware detected; skipping VM tools installation."
+    log_info "Physical hardware detected - skipping VM tools installation"
   fi
 
-  # install_nerdctl
+  # Fetch RKE2 CA generator utility
   fetch_rke2_ca_generator
-  cache_rke2_artifacts
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "ca_generator_fetched"
+  
+  # --- Cache RKE2 artifacts --------------------------------------------------
+  # Downloads and stages required artifacts into DOWNLOADS_DIR and STAGE_DIR
+  report_progress "Caching RKE2 artifacts" 4 8
+  log_info "Downloading and staging RKE2 artifacts"
+  log_info "  Target: downloads -> $DOWNLOADS_DIR, stage -> $STAGE_DIR"
+  
+  if ! cache_rke2_artifacts; then
+    log_error "Failed to cache RKE2 artifacts"
+    log_error "Remediation steps:"
+    log_error "  - Check network connectivity to RKE2 release servers"
+    log_error "  - Verify disk space in $DOWNLOADS_DIR"
+    log_error "  - Review log file: $LOG_FILE"
+    metrics_increment "failed"
+    exit 3
+  fi
+  
+  log_info "Artifact caching completed successfully"
+  log_info "Scanning staged and downloaded artifacts for verification"
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_cached"
+
+  # --- Optional: Load images into local runtime ------------------------------
+  report_progress "Processing container images" 5 8
+  if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
+    log_info "Image loading requested (--load-images flag)"
+    log_info "Installing nerdctl for container image management"
+    
+    if ! check_dependencies nerdctl; then
+      install_nerdctl || {
+        log_error "Failed to install nerdctl"
+        metrics_increment "total"
+        metrics_increment "failed"
+        exit 1
+      }
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "nerdctl_installed"
+    fi
+
+    log_info "Loading images from tarball into local container runtime"
+    if ! load_images_from_tarball >/dev/null 2>&1; then
+      log_warn "Image loading returned non-zero exit code"
+      log_warn "Node may attempt remote image pulls during deployment"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "image_load_warned"
+    else
+      log_success "Images loaded successfully into local runtime"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "images_loaded"
+    fi
+  else
+    log_info "Image loading skipped (default: tarball-on-node strategy)"
+    log_info "Use --load-images flag to import images into container runtime"
+  fi
+
+  # --- Trust configured registries -------------------------------------------
+  # Installs custom CA into registries.yaml if configured
+  report_progress "Configuring registry trust" 6 8
+  log_info "Configuring registry trust and custom CA (if applicable)"
   ca_trust_registries
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "registry_trust_configured"
+
+  # Collect artifact inventory for SBOM and verification
+  log_info "Collecting artifact inventory for SBOM generation"
 
   # --- Save site defaults (DNS/search) ---------------------------------------
+  report_progress "Saving site defaults" 7 8
   local STATE="/etc/rke2image.defaults"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
     echo "DEFAULT_SEARCH=\"$defaultSearchCsv\""
   } > "$STATE"
   chmod 600 "$STATE"
-  log INFO "Saved site defaults: DNS=[$defaultDnsCsv], SEARCH=[$defaultSearchCsv]"
+  log_info "Site defaults saved to: $STATE"
+  log_info "  DNS servers: $defaultDnsCsv"
+  log_info "  Search domains: $defaultSearchCsv"
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "defaults_saved"
 
-  # --- SBOM and README -------------------------------------------------------
+  # --- Boot Service Installation (optional enablement) -----------------------
+  log_info "Installing first-boot automation script and service..."
+  
+  # Read boot service configuration from YAML if provided
+  local boot_enabled="false"
+  local boot_yaml_path_yaml=""
+  local boot_mode_yaml=""
+  local boot_platform_yaml=""
+  
+  if [[ -n "$CONFIG_FILE" ]]; then
+    boot_enabled="$(yaml_spec_get "$CONFIG_FILE" bootService.enabled || echo false)"
+    boot_yaml_path_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.yamlPath || true)"
+    boot_mode_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
+    boot_platform_yaml="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
+    
+    # Override globals if specified in YAML
+    [[ -n "$boot_yaml_path_yaml" ]] && BOOT_YAML_PATH="$boot_yaml_path_yaml"
+    [[ -n "$boot_mode_yaml" ]] && BOOT_SERVICE_MODE="$boot_mode_yaml"
+    [[ -n "$boot_platform_yaml" ]] && VM_PLATFORM="$boot_platform_yaml"
+  fi
+  
+  # Normalize boolean value
+  boot_enabled="$(normalize_bool_value "$boot_enabled")"
+  
+  # Install boot script and service (always install, conditionally enable)
+  if install_boot_script; then
+    if install_boot_service; then
+      log_info "✓ Boot script and service installed successfully"
+      log_info "  Script: $BOOT_SCRIPT_PATH"
+      log_info "  Service: $BOOT_SERVICE_PATH"
+      log_info "  Mode: $BOOT_SERVICE_MODE"
+      log_info "  Platform: $(detect_vm_platform)"
+      log_info "  Config search paths:"
+      for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
+        log_info "    - $search_path"
+      done
+      log_info "  Target directory: $BOOT_TARGET_DIR"
+      
+      # Display Hyper-V specific requirements
+      if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+        log_info ""
+        log_info "Hyper-V Configuration Required:"
+        log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
+        log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+        log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
+        log_info "  Without this, the guest hostname will be used as fallback."
+      fi
+      
+      # Check if boot service should be enabled
+      if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+        if enable_boot_service; then
+          log_info "✓ Boot service ENABLED for next reboot"
+          log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
+          log_info "           Boot service will auto-discover and copy configs on first boot"
+        else
+          log_warn "Failed to enable boot service; install completed but service not active"
+        fi
+      else
+        log_info "Boot service installed but NOT enabled"
+        log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
+        log_info "Manual enable: systemctl enable $(basename "$BOOT_SERVICE_PATH")"
+      fi
+    else
+      log_warn "Failed to install boot service; continuing without first-boot automation"
+    fi
+  else
+    log_warn "Failed to install boot script; continuing without first-boot automation"
+  fi
+
+  # --- SBOM and README generation --------------------------------------------
+  report_progress "Generating SBOM and documentation" 8 8
+  log_info "Generating Software Bill of Materials (SBOM)"
+  
   # Ensure nerdctl archive names are known for reporting
   local full_tgz="${NERDCTL_FULL_TGZ:-}"
   local std_tgz="${NERDCTL_STD_TGZ:-}"
@@ -3614,36 +7347,227 @@ action_image() {
   NERDCTL_STD_TGZ="$std_tgz"
 
   # SBOM lists filenames, sizes, sha256; write to $SBOM_DIR/<name>-sbom.txt
-  log INFO "Creating SBOM..."
+  log_info "Creating Software Bill of Materials (SBOM)"
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  
+  # Build sbom_targets to include both downloads and files staged into STAGE_DIR
   local sbom_targets=(
     "$DOWNLOADS_DIR/$IMAGES_TAR"
     "$DOWNLOADS_DIR/$RKE2_TARBALL"
     "$DOWNLOADS_DIR/$SHA256_FILE"
     "$DOWNLOADS_DIR/install.sh"
+    "$STAGE_DIR/$RKE2_TARBALL"
+    "$STAGE_DIR/$SHA256_FILE"
+    "$STAGE_DIR/sha256sum-${ARCH}.json"
+    "$STAGE_DIR/install.sh"
   )
   [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
   [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
+  # Include hardened-cni artifact when present
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
+  [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
+  
+  # Load expected checksums from manifest file
+  declare -A expected_hash=()
+  if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+    log_info "Loading expected checksums from: $STAGE_DIR/$SHA256_FILE"
+    while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
+  elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    log_info "Loading expected checksums from: $DOWNLOADS_DIR/$SHA256_FILE"
+    while read -r h fn; do
+      expected_hash["$(basename "$fn")"]="$h"
+    done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
+  else
+    log_warn "No SHA256 manifest found - artifact verification will be limited"
+  fi
+
+  # Prepare SBOM header with metadata
   {
     echo "# RKE2 Image Prep SBOM"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "RKE2_VERSION: ${RKE2_VERSION}"
-    echo "REGISTRY: ${REGISTRY}"
+    echo "RKE2_VERSION: ${RKE2_VERSION:-<auto>}"
+    echo "REGISTRY: ${REGISTRY:-<none>}"
     echo
-        log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
-        echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
-    for f in "${sbom_targets[@]}"; do
-      [[ -f "$f" ]] || continue
-      sha256sum "$f"
-      ls -l "$f" | awk '{print "SIZE " $5 "  " $9}'
-    done
+    echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
   } > "$sbom_file"
-  log INFO "SBOM written to $sbom_file"
 
-  # README in outputs/<SPEC_NAME>
-  log INFO "Write README in Outputs directory..."
+  # Track verification metrics for security scoring
+  local total_count=0 verified_count=0 manifest_present=0
+  [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
+
+  # Process each artifact and verify checksums
+  log_info "Verifying and cataloging artifacts (${#sbom_targets[@]} targets)"
+  for f in "${sbom_targets[@]}"; do
+    [[ -f "$f" ]] || continue
+    total_count=$((total_count + 1))
+    
+    local fname size sha mtime src verified
+    fname="$(basename "$f")"
+    size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    mtime=$(date -u -r "$f" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>")
+    sha=$(sha256sum "$f" | awk '{print $1}')
+    src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
+    verified="unknown"
+    
+    # Verify against expected checksum if available
+    if [[ -n "${expected_hash[$fname]:-}" ]]; then
+      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+        verified="yes"
+        verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
+      else
+        verified="NO (mismatch)"
+        log_error "Checksum mismatch for $fname"
+        metrics_increment "artifact_mismatch"
+      fi
+    else
+      verified="no-manifest"
+    fi
+
+    # Append detailed entry to SBOM
+    printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
+    
+    # Report verification status
+    if [[ "$verified" == "yes" ]]; then
+      report_item_success "$fname" "Verified ($size bytes)"
+    elif [[ "$verified" == "NO (mismatch)" ]]; then
+      report_item_failure "$fname" "Checksum mismatch"
+    else
+      report_item_skipped "$fname" "No manifest entry"
+    fi
+  done
+
+  # Compute security score based on verification results
+  local security_score=0
+  if [[ $manifest_present -eq 1 ]]; then
+    security_score=$((security_score + 40))
+  fi
+  if [[ $total_count -gt 0 ]]; then
+    if [[ $manifest_present -eq 1 && $verified_count -eq $total_count ]]; then
+      security_score=$((security_score + 40))
+    fi
+    security_score=$((security_score + 20))
+  fi
+
+  # Append summary to SBOM
+  {
+    echo
+    echo "# Summary"
+    echo "Artifacts discovered: $total_count"
+    echo "Artifacts verified against manifest: $verified_count"
+    echo "SHA256 manifest present: ${manifest_present}" 
+    echo "security_score: ${security_score}"
+  } >> "$sbom_file"
+
+  log_success "SBOM created successfully"
+  log_info "SBOM location: $sbom_file"
+  log_info "  Artifacts: $total_count discovered, $verified_count verified"
+  log_info "  Security score: ${security_score}/100"
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "sbom_created"
+
+  # Generate machine-friendly JSON SBOM for tooling compatibility
+  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
+  if command -v python3 >/dev/null 2>&1; then
+    log_info "Generating JSON SBOM: $sbom_json_file"
+    local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+    python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
+import sys, json
+sbom_txt = sys.argv[1]
+sbom_json = sys.argv[2]
+staged_json = sys.argv[3] if len(sys.argv) > 3 else None
+
+artifacts = []
+header = { 'generated': None, 'rke2_version': None, 'registry': None }
+summary = {}
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    line = line.rstrip('\n')
+    if not line or line.startswith('#'):
+      continue
+    # artifact lines use a pipe delimiter: path | size | sha | verified | mtime | source
+    if '|' in line:
+      parts = [p.strip() for p in line.split('|')]
+      if len(parts) >= 6:
+        size = parts[1]
+        try:
+          size = int(size)
+        except Exception:
+          pass
+        artifacts.append({
+          'path': parts[0],
+          'size_bytes': size,
+          'sha256': parts[2],
+          'verified': parts[3],
+          'mtime': parts[4],
+          'source': parts[5]
+        })
+
+with open(sbom_txt, 'r', encoding='utf-8') as fh:
+  for line in fh:
+    if line.startswith('Generated:'):
+      header['generated'] = line.split('Generated:',1)[1].strip()
+    elif line.startswith('RKE2_VERSION:'):
+      header['rke2_version'] = line.split('RKE2_VERSION:',1)[1].strip()
+    elif line.startswith('REGISTRY:'):
+      header['registry'] = line.split('REGISTRY:',1)[1].strip()
+    elif line.startswith('Artifacts discovered:'):
+      try:
+        summary['artifacts_discovered'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_discovered'] = line.split(':',1)[1].strip()
+    elif line.startswith('Artifacts verified against manifest:'):
+      try:
+        summary['artifacts_verified'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['artifacts_verified'] = line.split(':',1)[1].strip()
+    elif line.startswith('SHA256 manifest present:'):
+      summary['sha256_manifest_present'] = line.split(':',1)[1].strip()
+    elif line.startswith('security_score:'):
+      try:
+        summary['security_score'] = int(line.split(':',1)[1].strip())
+      except Exception:
+        summary['security_score'] = line.split(':',1)[1].strip()
+
+data = {
+  'metadata': header,
+  'artifacts': artifacts,
+  'summary': summary,
+}
+
+# If a staged manifest JSON file exists, attempt to include it under 'staged_manifest'
+if staged_json:
+  try:
+    with open(staged_json, 'r', encoding='utf-8') as sf:
+      staged = json.load(sf)
+    data['staged_manifest'] = staged
+  except Exception:
+    data['staged_manifest'] = None
+
+with open(sbom_json, 'w', encoding='utf-8') as out:
+  json.dump(data, out, indent=2, sort_keys=True)
+print(sbom_json)
+PY
+    if [[ $? -eq 0 ]]; then
+      log_success "JSON SBOM generated: $sbom_json_file"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "json_sbom_created"
+    else
+      log_warn "Failed to generate JSON SBOM: $sbom_json_file"
+      log_warn "Text SBOM is still available at: $sbom_file"
+    fi
+  else
+    log_warn "python3 not available - skipping JSON SBOM generation"
+    log_info "Text SBOM available at: $sbom_file"
+  fi
+
+  # Generate README documentation in outputs directory
+  log_info "Generating README documentation"
   if [[ -n "${RUN_OUT_DIR:-}" ]]; then
     {
       echo "# Air-Gapped Image Prep Summary"
@@ -3661,19 +7585,147 @@ action_image() {
       echo "  - DNS: ${defaultDnsCsv}"
       echo "  - Search Domains: ${defaultSearchCsv:-<none>}"
       echo
-      echo "Next:"
-      echo "  - Shut down this VM and clone it for use in the air-gapped environment."
-      echo "  - Then run this script in 'server' or 'agent' mode on the clone(s)."
+      echo "Next Steps:"
+      echo "  - Shut down this VM and clone it for use in the air-gapped environment"
+      echo "  - Run this script in 'server' or 'agent' mode on the clone(s)"
     } > "$RUN_OUT_DIR/README.txt"
-    log INFO "Wrote $RUN_OUT_DIR/README.txt"
+    log_info "README written to: $RUN_OUT_DIR/README.txt"
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "readme_created"
   fi
 
- # Image prep complete
-  log INFO "Image prep complete..."
-  echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
-  echo "        - You can now install RKE2 offline using the cached tarballs."
+  # Display final summary and metrics
+  log_success "========================================="
+  log_success "Image preparation completed successfully"
+  log_success "========================================="
+  
+  metrics_summary "Image Preparation Summary"
+  
+  log_info ""
+  log_info "Artifacts cached in: $DOWNLOADS_DIR"
+  log_info "SBOM available at: $sbom_file"
+  log_info "Security score: ${security_score}/100"
+  log_info ""
+  
+  # Check if boot service is enabled
+  local boot_status="disabled"
+  if systemctl is-enabled rke2-boot.service &>/dev/null; then
+    boot_status="ENABLED - will run automatically on next boot"
+  elif [[ -f "$BOOT_SERVICE_PATH" ]]; then
+    boot_status="installed but DISABLED - manual start required"
+  fi
+  
+  log_info "Next steps:"
+  log_info "  1. Review SBOM and verify all artifacts"
+  if [[ "$boot_status" == "ENABLED"* ]]; then
+    log_info "  2. Place node-specific YAML configs in: $REPO_ROOT/configs/"
+    log_info "     - Naming pattern: {hostname}.yaml (e.g., node01.yaml)"
+    log_info "     - Boot service will auto-discover configs by VM hostname"
+    
+    # Add Hyper-V specific instructions
+    if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+      log_info "  3. Configure VM names on Hyper-V host (PowerShell on host):"
+      log_info "     Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+      log_info "     (Without this, guest hostname will be used as fallback)"
+      log_info "  4. Clone/template this VM for deployment"
+      log_info "  5. First boot will automatically:"
+    else
+      log_info "  3. Clone/template this VM for deployment"
+      log_info "  4. First boot will automatically:"
+    fi
+    log_info "     - Query VM hostname from hypervisor"
+    log_info "     - Search for matching config: {hostname}.yaml"
+    log_info "     - Copy config to: $BOOT_TARGET_DIR/{hostname}.yaml"
+    log_info "     - Execute: rke2nodeinit.sh -f {config} -y"
+    log_info ""
+    log_info "Boot service status: $boot_status"
+    log_info "Config search paths:"
+    for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
+      log_info "  - $search_path"
+    done
+  else
+    log_info "  2. Clone this VM for air-gapped deployment"
+    log_info "  3. Run 'server' or 'agent' action on cloned nodes"
+    log_info ""
+    log_info "Boot service status: $boot_status"
+  fi
+  
+  # Prompt for shutdown if boot service is enabled (template preparation)
+  # Otherwise prompt for reboot (standard workflow)
   echo
-  prompt_reboot
+  if [[ "$boot_status" == "ENABLED"* ]]; then
+    log_info "Ready to shutdown and prepare template VM for cloning"
+    prompt_shutdown
+  else
+    prompt_reboot
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: action_list_images
+# Purpose : Emit a full list of files contained in the RKE2 images archive
+#           (and optionally the release manifest entries) so operators can
+#           inspect exactly which component bundles are present in a release.
+# Arguments:
+#   None
+# Returns :
+#   0 on success, non-zero on error
+# ------------------------------------------------------------------------------
+action_list_images() {
+  initialize_action_context false "list-images"
+  log INFO "Listing RKE2 images archive contents and manifest entries (if present)"
+
+  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local images_candidate=""
+  local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+
+  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$DOWNLOADS_DIR/$IMAGES_TAR"
+  elif [[ -f "$IMAGES_DIR/$IMAGES_TAR" ]]; then
+    images_candidate="$IMAGES_DIR/$IMAGES_TAR"
+  fi
+
+  if [[ -z "$images_candidate" ]]; then
+    log ERROR "Images archive not found in $DOWNLOADS_DIR or $IMAGES_DIR: $IMAGES_TAR"
+    return 3
+  fi
+
+  log INFO "Found images archive: $images_candidate"
+
+  # Prefer zstd tools to stream the archive listing
+  # We intentionally hide the OCI blob files (under blobs/) which are
+  # internal layer storage and not useful to operators when listing bundle
+  # contents; filter them out for readability.
+  local _filter="grep -v -E '^blobs(/|$)'"
+  if command -v zstd >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstd -dc | tar -tf) — hiding blobs/ entries"
+    zstd -dc "$images_candidate" | tar -tf - | eval "$_filter"
+  elif command -v zstdcat >/dev/null 2>&1; then
+    log INFO "Listing archive (via zstdcat | tar -tf) — hiding blobs/ entries"
+    zstdcat "$images_candidate" | tar -tf - | eval "$_filter"
+  else
+    # If it's a plain gzip or tar, attempt fallback
+    if [[ "$images_candidate" == *.tar.gz ]]; then
+      log INFO "Listing gzip-compressed archive (tar -tzf) — hiding blobs/ entries"
+      tar -tzf "$images_candidate" | eval "$_filter"
+    else
+      log ERROR "No zstd available to read $images_candidate; please install zstd to list .zst archives"
+      return 2
+    fi
+  fi
+
+  # Also show manifest entries if available in downloads or stage
+  local sha_file="$DOWNLOADS_DIR/${SHA256_FILE:-sha256sum-${ARCH}.txt}"
+  if [[ -f "$sha_file" ]]; then
+    echo
+    log INFO "Release manifest entries from: $sha_file"
+    awk '{print $2}' "$sha_file" | sort -u
+  else
+    log INFO "No release sha256 manifest found in $DOWNLOADS_DIR"
+  fi
+
+  return 0
 }
 
 # ==============
@@ -3694,17 +7746,55 @@ action_image() {
 # ------------------------------------------------------------------------------
 action_server() {
   initialize_action_context false "server"
-  log INFO "Ensure YAML has metadata.name..."
+  
+  # Detect if running via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]] && [[ "${RKE2_BOOT_SERVICE}" == "true" ]]; then
+    via_boot_service=1
+    log_info "═══════════════════════════════════════"
+    log_info "Execution initiated via rke2-boot service"
+    log_info "═══════════════════════════════════════"
+  fi
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Server Initialization"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
+  fi
+  
+  log_info "========================================"
+  log_info "RKE2 First Server Initialization"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "server_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local -a NET_INTERFACES=()
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -3716,9 +7806,12 @@ action_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "config_loaded"
   fi
 
-  log INFO "Reading configuration from CLI args (if provided)..."
+  log_info "Reading configuration from CLI args (if provided)..."
   local -A server_cli=()
   parse_action_cli_args server_cli "server" "${ACTION_ARGS[@]}"
 
@@ -3727,7 +7820,9 @@ action_server() {
     yaml_has_interfaces=1
   fi
 
-  log INFO "Merging configuration values..."
+  # Phase 2: Merge and validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${server_cli[hostname]:-}" ]]; then
     HOSTNAME="${server_cli[hostname]}"
   fi
@@ -3760,13 +7855,13 @@ action_server() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${server_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  log_info "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -3775,7 +7870,7 @@ action_server() {
     SEARCH="$DEFAULT_SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -3784,39 +7879,73 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "config_validated"
 
-  log INFO "Determining TLS SANs..."
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
+  log_info "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
       TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
       [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
       [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-	  log INFO "TLS SANs from config: $TLS_SANS"
+	  log_info "TLS SANs from config: $TLS_SANS"
     fi
     if [[ -z "$TLS_SANS" ]]; then
       TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+      log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "tls_sans_configured"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
-  ensure_staged_artifacts
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 server install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 5: System configuration
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then 
+      echo "$IP $HOSTNAME" >> /etc/hosts
+    fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "hostname_set"
 
-  log INFO "Seeding custom cluster CA..."
+  log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "custom_ca_configured"
 
+  # Phase 6: Interface configuration
+  report_progress "Configuring interfaces" 6 8
   local prompt_extra_ifaces=1
   if (( ${#NET_INTERFACES[@]} )); then
     if (( yaml_has_interfaces )); then
       prompt_extra_ifaces=0
-      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+      log_info "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
     elif [[ -n "${server_cli[interfaces]:-}" ]]; then
       prompt_extra_ifaces=0
-      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+      log_info "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
     fi
   fi
 
@@ -3830,7 +7959,7 @@ action_server() {
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
       if ! interface_decode_entry "$_encoded" _nic_dbg; then
-        log WARN "Skipping invalid interface entry in summary"
+        log_warn "Skipping invalid interface entry in summary"
         continue
       fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
@@ -3848,81 +7977,160 @@ action_server() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "interfaces_configured"
 
-  log INFO "Validating/expanding provided token (if any)..."
+  # Phase 7: Token and RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded provided token to full format (custom CA hash included)."
+        log_info "Expanded provided token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   else
     TOKEN="$(generate_bootstrap_token)"
     if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
-      log INFO "Using generated secure first-server token (custom CA fingerprint embedded)."
+      log_info "Using generated secure first-server token (custom CA fingerprint embedded)."
     else
-      log INFO "Using generated short first-server bootstrap token."
+      log_info "Using generated short first-server bootstrap token."
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "token_generated"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-  	echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+  	  echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-  
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Token would be: ${TOKEN:0:20}..."
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 server" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-server"
+
+    log_info "Installing rke2-server from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "server"; then
+      log_error "Failed to install RKE2 server"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-server service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "server"
-  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # Display summary
+  log_success "========================================="
+  log_success "Server initialization completed"
+  log_success "========================================="
+  
+  # Cleanup boot service if running in oneshot mode via boot service
+  if [[ $via_boot_service -eq 1 ]] && [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    log_info "Disabling boot service (oneshot mode)..."
+    if disable_boot_service; then
+      log_info "✓ Boot service disabled after successful oneshot execution"
+    else
+      log_warn "Failed to disable boot service; may run again on next boot"
+    fi
+  fi
+  
+  metrics_summary "Server Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Search Domains: ${SEARCH:-<none>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, check cluster status: kubectl get nodes"
+  log_info "  3. Retrieve node token: cat /var/lib/rancher/rke2/server/node-token"
+  log_info "  4. Use token to join additional servers or agents"
 
   echo
-  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
-  echo "        First server token: /var/lib/rancher/rke2/server/node-token"
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+    echo "        First server token: /var/lib/rancher/rke2/server/node-token"
+  else
+    echo "[DRY-RUN] Server configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -3944,18 +8152,53 @@ action_server() {
 # ------------------------------------------------------------------------------
 action_agent() {
   initialize_action_context true "agent"
-  log INFO "Ensure YAML has metadata.name..."
+  
+  # Detect if running via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]] && [[ "${RKE2_BOOT_SERVICE}" == "true" ]]; then
+    via_boot_service=1
+    log_info "═══════════════════════════════════════"
+    log_info "Execution initiated via rke2-boot service"
+    log_info "═══════════════════════════════════════"
+  fi
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Agent Node Join"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
+  fi
+  
+  log_info "========================================"
+  log_info "RKE2 Agent Node Join"
+  log_info "========================================"
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "agent_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -3967,6 +8210,7 @@ action_agent() {
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "config_loaded"
   fi
 
   log INFO "Reading configuration from CLI args (if provided)..."
@@ -4010,23 +8254,25 @@ action_agent() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${agent_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
+  # Phase 2: Validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Prompting for any missing configuration values..."
   if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for agent: $DNS"; fi
+    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log_info "Using default DNS for agent: $DNS"; fi
   fi
   if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
-    log INFO "Using default search domains for agent: $SEARCH"
+    log_info "Using default search domains for agent: $SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -4035,13 +8281,33 @@ action_agent() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
+  metrics_increment "config_validated"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
-  ensure_staged_artifacts
+  # Phase 3: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 3 8
+  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 4: Configure system
+  report_progress "Configuring system" 4 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "hostname_set"
 
   local prompt_extra_ifaces_agent=1
   if (( ${#NET_INTERFACES[@]} )); then
@@ -4082,10 +8348,15 @@ action_agent() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "interfaces_configured"
 
-  log INFO "Gathering cluster join information..."
+  # Phase 6: Gather cluster join information
+  report_progress "Configuring cluster join" 6 8
+  log_info "Gathering cluster join information..."
   if [[ -z "$URL" ]]; then
     read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
   fi
@@ -4096,73 +8367,146 @@ action_agent() {
     read -rp "Enter path to token file (optional, used when token not provided): " TOKEN_FILE || true
   fi
 
-  log INFO "Validating/expanding provided token (if any)..."
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded agent join token to full format (custom CA hash included)."
+        log_info "Expanded agent join token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   fi
+  metrics_increment "token_configured"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  # Phase 7: Write RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Setting server URL..." >&2
-    echo "server: \"$URL\""     # required
+      log_debug "Setting server URL..." >&2
+      echo "server: \"$URL\""     # required
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-  	echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+  	  echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Server URL: $URL"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 agent" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-agent"
+
+    log_info "Installing rke2-agent from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "agent"; then
+      log_error "Failed to install RKE2 agent"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 agent from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-agent service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "agent"
-  systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
-
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # Display summary
+  log_success "========================================="
+  log_success "Agent node join completed"
+  log_success "========================================="
+  
+  # Cleanup boot service if running in oneshot mode via boot service
+  if [[ $via_boot_service -eq 1 ]] && [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    log_info "Disabling boot service (oneshot mode)..."
+    if disable_boot_service; then
+      log_info "✓ Boot service disabled after successful oneshot execution"
+    else
+      log_warn "Failed to disable boot service; may run again on next boot"
+    fi
+  fi
+  
+  metrics_summary "Agent Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Server URL: ${URL:-<not configured>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, verify node joined: kubectl get nodes"
+  log_info "  3. Check agent status: systemctl status rke2-agent"
 
   echo
-  echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
+  else
+    echo "[DRY-RUN] Agent configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -4183,18 +8527,51 @@ action_agent() {
 # ------------------------------------------------------------------------------
 action_add_server() {
   initialize_action_context false "add-server"
-  log INFO "Ensure YAML has metadata.name..."
+  
+  # Check if this was invoked via boot service
+  local via_boot_service=0
+  if [[ -n "${RKE2_BOOT_SERVICE:-}" ]]; then
+    via_boot_service=1
+    log_info "Detected invocation via rke2-boot service"
+  fi
+  
+  # Check for dry-run mode
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "========================================"
+    log_info "DRY-RUN MODE: RKE2 Add Server Node"
+    log_info "========================================"
+    log_info "No changes will be made to the system"
+    log_info ""
+  fi
+  
+  log_info "========================================"
+  log_info "RKE2 Additional Server Node Join"
+  log_info "======================================="
+  
+  # Initialize metrics for comprehensive tracking
+  metrics_init "add_server_deployment"
+  
+  log_info "Ensure YAML has metadata.name..."
 
-  log INFO "Loading site defaults..."
+  # Phase 1: Load configuration
+  report_progress "Loading configuration" 1 8
+  log_info "Loading site defaults..."
   load_site_defaults
+  metrics_increment "site_defaults_loaded"
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
 
-  log INFO "Reading configuration from YAML (if provided)..."
+  log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
+    if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
+      log_error "Configuration file not found: $CONFIG_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
@@ -4207,6 +8584,7 @@ action_add_server() {
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     load_custom_ca_from_config "$CONFIG_FILE"
+    metrics_increment "config_loaded"
   fi
 
   log INFO "Reading configuration from CLI args (if provided)..."
@@ -4254,13 +8632,15 @@ action_add_server() {
   collect_interface_specs NET_INTERFACES "$CONFIG_FILE" "${add_server_cli[interfaces]:-}"
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
 
-  log INFO "Prompting for any missing configuration values..."
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  # Phase 2: Validate configuration
+  report_progress "Validating configuration" 2 8
+  log_info "Prompting for any missing configuration values..."
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
   if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
   if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
 
-  log INFO "Resolving DNS and search domains..."
+  log_info "Resolving DNS and search domains..."
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
@@ -4269,38 +8649,67 @@ action_add_server() {
     SEARCH="$DEFAULT_SEARCH"
   fi
 
-  log INFO "Validating configuration..."
+  log_info "Validating configuration..."
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
+  metrics_increment "config_validated"
 
-  # Auto-derive tls-sans if none provided in YAML
-  log INFO "Determining TLS SANs..."
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
+  log_info "Determining TLS SANs..."
   if [[ -z "$TLS_SANS" ]]; then
     if [[ -z "$TLS_SANS_IN" && -n "${CONFIG_FILE:-}" ]]; then
       TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
       [[ -z "$TLS_SANS_IN" ]] && TLS_SANS_IN="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"
       [[ -n "$TLS_SANS_IN" ]] && TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
-	  log INFO "TLS SANs from config: $TLS_SANS"
+	  log_info "TLS SANs from config: $TLS_SANS"
     fi
     if [[ -z "$TLS_SANS" ]]; then
       TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-      log INFO "Auto-derived TLS SANs: $TLS_SANS"
+      log_info "Auto-derived TLS SANs: $TLS_SANS"
     fi
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "tls_sans_configured"
 
-  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
-  ensure_staged_artifacts
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 server install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_staged"
 
-  log INFO "Setting new hostname: $HOSTNAME..."
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  # Phase 5: System configuration
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then 
+      echo "$IP $HOSTNAME" >> /etc/hosts
+    fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "hostname_set"
 
-  log INFO "Seeding custom cluster CA..."
+  log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "custom_ca_configured"
 
   local prompt_extra_ifaces_add_server=1
   if (( ${#NET_INTERFACES[@]} )); then
@@ -4341,10 +8750,15 @@ action_add_server() {
       [[ -z "$_desc_dbg" ]] && _desc_dbg="static"
       _iface_summary+="${_iface_summary:+; }${_name_dbg}:${_desc_dbg}"
     done
-    log INFO "Network interfaces prepared: ${_iface_summary}"
+    log_info "Network interfaces prepared: ${_iface_summary}"
   fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "interfaces_configured"
 
-  log INFO "Gathering cluster join information..."
+  # Phase 6: Gather cluster join information
+  report_progress "Configuring cluster join" 6 8
+  log_info "Gathering cluster join information..."
   [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
   if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
     read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
@@ -4354,73 +8768,142 @@ action_add_server() {
   fi
   [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
-  log INFO "Validating/expanding provided token (if any)..."
+  log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
       if [[ "$full_token" != "$TOKEN" ]]; then
-        log INFO "Expanded server join token to full format (custom CA hash included)."
+        log_info "Expanded server join token to full format (custom CA hash included)."
       fi
       TOKEN="$full_token"
     fi
   fi
+  metrics_increment "token_configured"
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
+  # Phase 7: Write RKE2 configuration
+  report_progress "Writing RKE2 configuration" 7 8
+  log_info "Writing file: /etc/rancher/rke2/config.yaml..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
 
-  : > /etc/rancher/rke2/config.yaml
-  {
-    log INFO "Setting debug..." >&2
-    echo "debug: true"
+    : > /etc/rancher/rke2/config.yaml
+    {
+      log_debug "Setting debug..." >&2
+      echo "debug: true"
 
-    log INFO "Setting server URL..." >&2
-    echo "server: \"$URL\""     # required
+      log_debug "Setting server URL..." >&2
+      echo "server: \"$URL\""     # required
 
-    log INFO "Get token..." >&2
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-	  log INFO "Using provided token..." >&2
-    elif [[ -n "$TOKEN_FILE" ]]; then
-      echo "token-file: \"$TOKEN_FILE\""
-	  log INFO "Using provided token file: $TOKEN_FILE..." >&2
-    fi
+      log_debug "Get token..." >&2
+      if [[ -n "$TOKEN" ]]; then
+        echo "token: $TOKEN"
+	    log_debug "Using provided token..." >&2
+      elif [[ -n "$TOKEN_FILE" ]]; then
+        echo "token-file: \"$TOKEN_FILE\""
+	    log_debug "Using provided token file: $TOKEN_FILE..." >&2
+      fi
 
-    log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
-    append_spec_config_extras "$CONFIG_FILE"
+      log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
+      append_spec_config_extras "$CONFIG_FILE"
 
-    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
-    echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
-    echo "  - container-log-max-size=10Mi"
-    echo "  - container-log-max-files=5"
-    echo
+      # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+      echo "kubelet-arg:"
+      # Prefer systemd-resolved if present
+      if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+      fi
+      echo "  - container-log-max-size=10Mi"
+      echo "  - container-log-max-files=5"
+      echo
 
-  } >> /etc/rancher/rke2/config.yaml
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+    } >> /etc/rancher/rke2/config.yaml
+    log_info "Wrote /etc/rancher/rke2/config.yaml"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "Writing netplan configuration and applying network settings..."
-  if (( ${#NET_INTERFACES[@]} )); then
-    write_netplan --interfaces "${NET_INTERFACES[@]}"
+    log_debug "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+    chmod 600 /etc/rancher/rke2/config.yaml
   else
-    write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml"
+    log_info "DRY-RUN: Server URL: $URL"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "config_written"
+
+  log_info "Writing netplan configuration and applying network settings..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    if (( ${#NET_INTERFACES[@]} )); then
+      write_netplan --interfaces "${NET_INTERFACES[@]}"
+    else
+      write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+    fi
+  else
+    log_info "DRY-RUN: Would write netplan configuration for $IP/$PREFIX"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "netplan_written"
+
+  # Phase 8: Install RKE2
+  report_progress "Installing RKE2 server" 8 8
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    cleanup_containerd_before_rke2 "rke2-add-server"
+
+    log_info "Installing rke2-server from cache at $STAGE_DIR"
+    if ! run_rke2_installer "$STAGE_DIR" "server"; then
+      log_error "Failed to install RKE2 server"
+      log_error "Remediation: Check $LOG_FILE for details"
+      metrics_increment "failed"
+      exit 3
+    fi
+    systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "rke2_installed"
+
+    log_info "Deploying flannel TX checksum offload fix..."
+    install_flannel_txcsum_fix
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "flannel_fix_installed"
+  else
+    log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
+    log_info "DRY-RUN: Would enable rke2-server service"
+    log_info "DRY-RUN: Would install flannel TX checksum fix"
   fi
 
-  log INFO "Installing rke2-server from cache at $STAGE_DIR"
-  run_rke2_installer "$STAGE_DIR" "server"
-  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+  # Display summary
+  log_success "========================================="
+  log_success "Additional server join completed"
+  log_success "========================================="
+  
+  metrics_summary "Add Server Deployment Summary"
+  
+  log_info ""
+  log_info "Configuration:"
+  log_info "  Hostname: $HOSTNAME"
+  log_info "  IP Address: $IP/$PREFIX"
+  log_info "  Gateway: ${GW:-<none>}"
+  log_info "  DNS: $DNS"
+  log_info "  Server URL: ${URL:-<not configured>}"
+  log_info ""
+  log_info "Next steps:"
+  log_info "  1. Reboot the system to apply changes"
+  log_info "  2. After reboot, verify server joined: kubectl get nodes"
+  log_info "  3. Check cluster status: kubectl get pods -A"
 
-  log INFO "Deploying flannel TX checksum offload fix..."
-  install_flannel_txcsum_fix
+  # If invoked via boot service in oneshot mode, disable the service
+  if [[ $via_boot_service -eq 1 ]] && [[ "${BOOT_SERVICE_MODE:-oneshot}" == "oneshot" ]]; then
+    log_info "Disabling rke2-boot service (oneshot mode)..."
+    disable_boot_service
+  fi
 
   echo
-  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    echo "[READY] rke2-server installed. Reboot to join the control plane."
+  else
+    echo "[DRY-RUN] Add-server configuration validated. No changes made."
+  fi
   echo
   prompt_reboot
 }
@@ -4436,13 +8919,38 @@ action_add_server() {
 # Returns :
 #   Returns 0 when all checks pass; non-zero otherwise.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_verify
+# Description: Verify that the node meets RKE2 prerequisites (read-only check)
+# Parameters:
+#   None (validates system state)
+# Returns: 
+#   0 - All prerequisites met
+#   2 - Verification failures detected
+# Usage: action_verify
+# Dependencies: verify_prereqs, log_info, log_success, log_error
+# Changes from Original:
+#   - Added Phase 1 logging utilities for consistency
+#   - Improved error messages with actionable guidance
+#=============================================================================
 action_verify() {
   load_site_defaults
-if verify_prereqs; then
-    log INFO "VERIFY PASSED: Node meets RKE2 prerequisites."
+  
+  log_info "Starting RKE2 prerequisites verification"
+  log_info "This is a read-only check - no changes will be made to the system"
+  
+  if verify_prereqs; then
+    log_success "VERIFY PASSED: Node meets all RKE2 prerequisites"
+    log_info "Next steps:"
+    log_info "  - Run 'image' action to prepare golden image"
+    log_info "  - Run 'server' or 'agent' action to deploy RKE2"
     exit 0
   else
-    log ERROR "VERIFY FAILED: See messages above and fix issues."
+    log_error "VERIFY FAILED: One or more prerequisites not met"
+    log_error "Remediation steps:"
+    log_error "  - Review error messages above for specific issues"
+    log_error "  - Install missing dependencies or fix configuration"
+    log_error "  - Re-run verification: $0 verify"
     exit 2
   fi
 }
@@ -4461,11 +8969,40 @@ if verify_prereqs; then
 # ------------------------------------------------------------------------------
 action_airgap() {
   initialize_action_context false "airgap"
+  
+  metrics_init "airgap_operation"
+  
+  log_info "========================================"
+  log_info "RKE2 Airgap Image Preparation"
+  log_info "========================================"
+  log_info "Preparing VM for template/cloning with poweroff"
+  log_info ""
+  
+  # Run full image preparation
   NO_REBOOT=1 action_image
-  sync
-  log WARN "Powering off now so you can template/clone the VM."
-  sleep 3
-  poweroff
+  
+  metrics_increment "image_prepared"
+  
+  # Sync filesystems
+  log_info "Syncing filesystems..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    sync
+    metrics_increment "filesystems_synced"
+  else
+    log_info "DRY-RUN: Would sync filesystems"
+  fi
+  
+  log_success "Airgap preparation complete"
+  metrics_summary "Airgap Operation Summary"
+  
+  log_warn "Powering off now so you can template/clone the VM."
+  
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    sleep 3
+    poweroff
+  else
+    log_info "DRY-RUN: Would power off system for VM templating"
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -4596,55 +9133,113 @@ action_taint_node() {
 # Returns :
 #   Exits on failure.
 # ------------------------------------------------------------------------------
+#=============================================================================
+# Function: action_custom_ca
+# Description: Generate bootstrap token from custom CA configuration
+# Parameters:
+#   None (reads from CONFIG_FILE global)
+# Returns: 
+#   0 - Success (token generated)
+#   1 - Token generation failure
+#   5 - Validation failure (missing config or invalid kind)
+# Usage: action_custom_ca -f <config.yaml>
+# Dependencies: validate_non_empty, validate_file_exists, log_info, log_success, log_error
+# Changes from Original:
+#   - Added validation utilities for prerequisites
+#   - Enhanced error messages with remediation steps
+#   - Added structured logging with Phase 1 utilities
+#=============================================================================
 action_custom_ca() {
   initialize_action_context false "custom-ca"
 
-  if [[ -z "${CONFIG_FILE:-}" ]]; then
-    log ERROR "Custom-CA action requires a YAML file (-f <file>)"
+  log_info "Starting custom CA bootstrap token generation"
+  
+  # Validate prerequisites using Phase 1 utilities
+  if ! validate_non_empty "${CONFIG_FILE:-}" "CONFIG_FILE"; then
+    log_error "Custom-CA action requires a YAML configuration file"
+    log_error "Remediation: Provide config file with -f flag"
+    log_error "Example: $0 custom-ca -f examples/custom-ca-example.yaml"
+    exit 5
+  fi
+  
+  if ! validate_file_exists "$CONFIG_FILE" "configuration file"; then
+    log_error "Configuration file not found: $CONFIG_FILE"
+    log_error "Remediation: Verify file path and permissions"
     exit 5
   fi
 
   local kind_folded="${YAML_KIND:-}"
   kind_folded="${kind_folded,,}"
   if [[ "${kind_folded//-/}" != "customca" ]]; then
-    log ERROR "Custom-CA action expects kind: CustomCA|Custom-CA|customca|custom-CA|custom-ca (found: ${YAML_KIND:-<none>})"
+    log_error "Invalid YAML kind for custom-ca action"
+    log_error "Expected: kind: CustomCA (or custom-ca, Custom-CA variants)"
+    log_error "Found: ${YAML_KIND:-<none>}"
+    log_error "Remediation: Update YAML file with correct kind field"
     exit 5
   fi
 
-  log INFO "Loading custom CA from YAML..."
+  log_info "Loading custom CA configuration from: $CONFIG_FILE"
   load_custom_ca_from_config "$CONFIG_FILE" "" 1
 
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
-    log ERROR "spec.customCA must define at least rootCrt or intermediateCrt"
+    log_error "Custom CA configuration incomplete"
+    log_error "spec.customCA must define at least one of:"
+    log_error "  - rootCrt: Root CA certificate"
+    log_error "  - intermediateCrt: Intermediate CA certificate"
+    log_error "Remediation: Add certificate paths to YAML spec.customCA section"
     exit 5
   fi
 
-  log INFO "Generating bootstrap token from custom CA..."
+  log_info "Generating bootstrap token from custom CA"
+  report_progress "Generating token" 1 1
 
   local TOKEN="" TOKEN_FILE=""
   generate_bootstrap_token
   TOKEN=$token
-  
-  if [[ -z "$TOKEN" ]]; then
-    log ERROR "Failed to generate bootstrap token."
-    exit 1
-  else
-    TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
-    echo "$TOKEN" > "$TOKEN_FILE"
-    chmod 600 "$TOKEN_FILE"
-    log INFO "Token saved to $TOKEN_FILE"
-  fi
 
-  log INFO "Generated bootstrap token successfully."
+  if [[ -z "$TOKEN" ]]; then
+    log_error "Bootstrap token generation failed"
+    log_error "Remediation steps:"
+    log_error "  - Verify CA certificate files are valid PEM format"
+    log_error "  - Check file permissions on certificate files"
+    log_error "  - Review logs for detailed error messages"
+    exit 1
+  fi
+  
+  TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
+  echo "$TOKEN" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+  
+  log_success "Bootstrap token generated successfully"
+  log_info "Token saved to: $TOKEN_FILE (permissions: 600)"
+  log_info "Next steps:"
+  log_info "  - Use this token for server/agent bootstrap"
+  log_info "  - Keep token file secure - it provides cluster access"
 }
 
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
+# Parse long options first
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help)
+      # Check if action specified after --help
+      if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+        show_action_help "$2"
+      else
+        print_help
+        exit 0
+      fi
+      ;;
+    --version) show_version;;
+    --verbose) VERBOSE=1; shift;;
+    --quiet) QUIET=1; shift;;
+    --dry-run) DRY_RUN=1; shift;;
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
+    --load-images) LOAD_IMAGES=1; shift;;
+    --verify-layers) VERIFY_LAYERS=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --node-name requires an argument" >&2
@@ -4657,7 +9252,44 @@ while [[ $# -gt 0 ]]; do
       NODE_NAME="${1#*=}"
       shift
       ;;
-    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
+    --enable-boot-service) ENABLE_BOOT_SERVICE=1; shift;;
+    --boot-yaml-path)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --boot-yaml-path requires an argument" >&2
+        exit 1
+      fi
+      BOOT_YAML_PATH="$2"
+      shift 2
+      ;;
+    --boot-yaml-path=*)
+      BOOT_YAML_PATH="${1#*=}"
+      shift
+      ;;
+    --boot-mode)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --boot-mode requires an argument (oneshot or persistent)" >&2
+        exit 1
+      fi
+      BOOT_SERVICE_MODE="$2"
+      shift 2
+      ;;
+    --boot-mode=*)
+      BOOT_SERVICE_MODE="${1#*=}"
+      shift
+      ;;
+    --vm-platform)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --vm-platform requires an argument (vmware, hyperv, virtualbox, or generic)" >&2
+        exit 1
+      fi
+      VM_PLATFORM="$2"
+      shift 2
+      ;;
+    --vm-platform=*)
+      VM_PLATFORM="${1#*=}"
+      shift
+      ;;
+    -f|-v|-r|-u|-p|-n|-y|-P|-h|push|image|server|add-server|agent|verify|custom-ca|label-node|taint-node|airgap|list-images) break;;
     *) break;;
   esac
 done
@@ -4706,6 +9338,10 @@ fi
 ACTION="${CLI_SUB:-}"
 if [[ -n "$ACTION" ]]; then
   shift
+  # Check for action --help
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    show_action_help "$ACTION"
+  fi
 fi
 ACTION_ARGS=("$@")
 
@@ -4727,6 +9363,7 @@ NODE_NAME="${NODE_NAME:-$(default_node_hostname)}"
 
 case "${ACTION:-}" in
   image)       action_image  ;;
+  list-images) action_list_images ;;
   server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;

@@ -1,0 +1,58 @@
+apiVersion: rkeprep/v1
+kind: Server
+metadata:
+  name: dc1manager-ctrl01
+spec:
+  hostname: dc1manager-ctrl01
+  # Bind to cluster communication interface
+  nodeIp: 172.16.15.101
+  bindAddress: 172.16.15.101
+  advertiseAddress: 172.16.15.101
+  cni:
+   - multus
+   - canal
+  interfaces:
+    # vlan118
+    - name: eth0
+      ip: 172.16.15.101
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan18
+    - name: eth1
+      ip: 172.16.69.60
+      prefix: 24
+      gateway:
+      dns: ["172.16.10.11", "172.16.10.12"]
+      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan9
+    - name: eth2
+      ip: 172.16.255.240
+      prefix: 24
+      gateway:
+      dns: ["10.0.69.41"]
+      searchDomains: ["cantrell.cloud"]
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=preprod"
+  tls-san:
+    - dc1manager-ctrl01
+    - dc1manager-ctrl01.cantrellcloud.net
+    - dc1manager-cluster
+    - dc1manager-cluster.cantrellcloud.net
+    - 172.16.15.101
+  service-cidr: 10.93.0.0/16
+  cluster-cidr: 10.243.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  disable:
+  - rke2-ingress-nginx
+#  customCA:
+#    rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
+#    rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
+#    installToOSTrust: true

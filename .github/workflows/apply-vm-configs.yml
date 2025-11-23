@@ -1,0 +1,215 @@
+name: Apply VM Configurations
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'vm-configs/**/*.yaml'
+      - 'vm-configs/**/*.yml'
+  
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: 'Path to specific VM config (optional, applies all if empty)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run mode (validate only, no changes)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  apply:
+    name: Apply VM Configurations
+    # IMPORTANT: Must run on self-hosted runner with access to hypervisors
+    # Comment out this line to use GitHub-hosted runners for testing
+    runs-on: self-hosted
+    # Uncomment for GitHub-hosted runners (limited network access):
+    # runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need previous commit for diff
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install jsonschema pyyaml pywinrm
+      
+      - name: Determine configs to apply
+        id: configs
+        run: |
+          if [ -n "${{ github.event.inputs.config_path }}" ]; then
+            # Manual workflow dispatch with specific config
+            echo "mode=manual" >> $GITHUB_OUTPUT
+            echo "configs=${{ github.event.inputs.config_path }}" >> $GITHUB_OUTPUT
+          else
+            # Auto-detect changed configs from git diff
+            echo "mode=auto" >> $GITHUB_OUTPUT
+            
+            # Get changed VM config files in last commit
+            changed_files=$(git diff --name-only HEAD^ HEAD | grep '^vm-configs/.*\.ya*ml$' | grep -v 'cluster-defaults' || true)
+            
+            if [ -z "$changed_files" ]; then
+              echo "No VM configuration files changed"
+              echo "configs=" >> $GITHUB_OUTPUT
+            else
+              echo "Changed VM configurations:"
+              echo "$changed_files" | sed 's/^/  - /'
+              
+              # Convert to space-separated list
+              configs=$(echo "$changed_files" | tr '\n' ' ')
+              echo "configs=$configs" >> $GITHUB_OUTPUT
+            fi
+          fi
+      
+      - name: Validate configurations
+        if: steps.configs.outputs.configs != ''
+        run: |
+          echo "Validating configurations before application..."
+          
+          for config in ${{ steps.configs.outputs.configs }}; do
+            if [ -f "$config" ]; then
+              echo "Validating: $config"
+              python3 scripts/vm-config/config_validator.py "$config" || exit 1
+            else
+              echo "ERROR: Config file not found: $config"
+              exit 1
+            fi
+          done
+          
+          echo "✓ All configurations validated successfully"
+      
+      - name: Apply VM configurations
+        if: steps.configs.outputs.configs != ''
+        env:
+          # Hyper-V credentials from GitHub secrets
+          HYPERV_CREDENTIALS_USER: ${{ secrets.HYPERV_CREDENTIALS_USER }}
+          HYPERV_CREDENTIALS_PASS: ${{ secrets.HYPERV_CREDENTIALS_PASS }}
+          
+          # VMware credentials (if needed)
+          VMWARE_CREDENTIALS_USER: ${{ secrets.VMWARE_CREDENTIALS_USER }}
+          VMWARE_CREDENTIALS_PASS: ${{ secrets.VMWARE_CREDENTIALS_PASS }}
+        run: |
+          echo "=================================="
+          echo "Applying VM Configurations"
+          echo "=================================="
+          
+          dry_run_flag=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "DRY-RUN MODE: No changes will be applied"
+            dry_run_flag="--dry-run"
+          fi
+          
+          success_count=0
+          failure_count=0
+          applied_configs=""
+          
+          for config in ${{ steps.configs.outputs.configs }}; do
+            if [ -f "$config" ]; then
+              echo ""
+              echo "Applying: $config"
+              echo "----------------------------------"
+              
+              if python3 scripts/vm-config/apply_vm_config.py "$config" $dry_run_flag; then
+                echo "✓ SUCCESS: $config"
+                success_count=$((success_count + 1))
+                applied_configs="$applied_configs\n- ✓ $config"
+              else
+                echo "✗ FAILED: $config"
+                failure_count=$((failure_count + 1))
+                applied_configs="$applied_configs\n- ✗ $config"
+              fi
+            fi
+          done
+          
+          echo ""
+          echo "=================================="
+          echo "Application Summary"
+          echo "=================================="
+          echo "Successful: $success_count"
+          echo "Failed: $failure_count"
+          echo ""
+          
+          # Save summary for later steps
+          echo "success_count=$success_count" >> $GITHUB_OUTPUT
+          echo "failure_count=$failure_count" >> $GITHUB_OUTPUT
+          echo -e "applied_configs=$applied_configs" >> $GITHUB_OUTPUT
+          
+          if [ $failure_count -gt 0 ]; then
+            echo "❌ Some configurations failed to apply"
+            exit 1
+          else
+            echo "✅ All configurations applied successfully"
+          fi
+        id: apply
+      
+      - name: Generate application report
+        if: always() && steps.configs.outputs.configs != ''
+        run: |
+          echo "# VM Configuration Application Report" > application-report.md
+          echo "" >> application-report.md
+          echo "**Workflow**: ${{ github.workflow }}" >> application-report.md
+          echo "**Run**: #${{ github.run_number }}" >> application-report.md
+          echo "**Commit**: ${{ github.sha }}" >> application-report.md
+          echo "**Triggered by**: ${{ github.actor }}" >> application-report.md
+          
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "**Mode**: DRY-RUN (validation only)" >> application-report.md
+          else
+            echo "**Mode**: PRODUCTION (changes applied)" >> application-report.md
+          fi
+          
+          echo "" >> application-report.md
+          echo "## Applied Configurations" >> application-report.md
+          echo "${{ steps.apply.outputs.applied_configs }}" >> application-report.md
+          
+          echo "" >> application-report.md
+          echo "## Summary" >> application-report.md
+          echo "- **Successful**: ${{ steps.apply.outputs.success_count || 0 }}" >> application-report.md
+          echo "- **Failed**: ${{ steps.apply.outputs.failure_count || 0 }}" >> application-report.md
+          
+          cat application-report.md
+      
+      - name: Upload application report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-config-application-report
+          path: application-report.md
+          retention-days: 30
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::VM configuration application failed. Check the logs above for details."
+          echo "::error::Some VMs may be in an inconsistent state. Manual intervention may be required."
+      
+      - name: Post-application verification
+        if: success() && github.event.inputs.dry_run != 'true'
+        env:
+          HYPERV_CREDENTIALS_USER: ${{ secrets.HYPERV_CREDENTIALS_USER }}
+          HYPERV_CREDENTIALS_PASS: ${{ secrets.HYPERV_CREDENTIALS_PASS }}
+        run: |
+          echo "Verifying applied configurations..."
+          
+          # TODO: Add verification logic here
+          # - Check VM power states
+          # - Verify KVP data was set correctly
+          # - Confirm network connectivity
+          # - Check RKE2 boot service status
+          
+          echo "✓ Post-application verification complete"
