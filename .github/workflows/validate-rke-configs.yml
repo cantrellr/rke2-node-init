@@ -9,7 +9,6 @@ on:
       - 'examples/config/**/*.yml'
       - 'vm-configs/**/rke2-configs/**/*.yaml'
       - 'vm-configs/**/rke2-configs/**/*.yml'
-      - '.github/workflows/validate-rke-configs.yml'
 
 jobs:
   validate:
