@@ -80,7 +80,11 @@ jobs:
           while IFS= read -r file; do
             if [ -n "$file" ] && [ -f "$file" ]; then
               echo "Checking syntax: $file"
-              if ! python3 -c "import yaml; yaml.safe_load(open('$file'))" 2>&1; then
+              if ! python3 -c "import yaml,sys
+try:
+  list(yaml.safe_load_all(open('$file')))
+except Exception as e:
+  print(e, file=sys.stderr); sys.exit(1)" 2>&1; then
                 echo "  ✗ YAML syntax error in $file"
                 exit_code=1
               else
@@ -110,9 +114,25 @@ jobs:
             if [ -n "$file" ] && [ -f "$file" ]; then
               echo "Validating: $file"
               
-              # Extract apiVersion and kind
-              api_version=$(python3 -c "import yaml; doc=yaml.safe_load(open('$file')); print(doc.get('apiVersion', ''))" 2>/dev/null || echo "")
-              kind=$(python3 -c "import yaml; doc=yaml.safe_load(open('$file')); print(doc.get('kind', ''))" 2>/dev/null || echo "")
+              # Extract apiVersion and kind from first document that contains them
+              api_version=$(python3 - <<PY
+import yaml,sys
+for d in yaml.safe_load_all(open("$file")):
+  if isinstance(d, dict) and d.get("apiVersion"):
+    print(d.get("apiVersion"))
+    sys.exit(0)
+print("")
+PY
+)
+              kind=$(python3 - <<PY
+import yaml,sys
+for d in yaml.safe_load_all(open("$file")):
+  if isinstance(d, dict) and d.get("kind"):
+    print(d.get("kind"))
+    sys.exit(0)
+print("")
+PY
+)
               
               # Validate apiVersion
               if [ "$api_version" != "rkeprep/v1" ]; then
@@ -162,7 +182,15 @@ jobs:
               warnings = []
               
               with open(file_path) as f:
-                  config = yaml.safe_load(f)
+                  docs = list(yaml.safe_load_all(f))
+                  # Pick the first non-empty mapping/document
+                  config = None
+                  for d in docs:
+                      if isinstance(d, dict) and d:
+                          config = d
+                          break
+                  if config is None:
+                      config = {}
               
               kind = config.get('kind', '').lower()
               metadata = config.get('metadata', {})
