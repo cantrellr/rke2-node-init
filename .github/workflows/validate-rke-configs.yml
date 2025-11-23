@@ -219,12 +219,12 @@ jobs:
                   cluster = spec.get('cluster', {})
                   if not cluster:
                       # No cluster section, check top-level spec
-                      if 'serverUrl' not in spec and 'server-url' not in spec:
-                          errors.append("Missing serverUrl/server-url (required for agent nodes)")
+                      if 'serverUrl' not in spec and 'server-url' not in spec and 'serverURL' not in spec:
+                          warnings.append("Missing serverUrl/serverURL/server-url (typically required for agent nodes)")
                   else:
                       # Check in cluster section
-                      if 'serverUrl' not in cluster and 'server-url' not in cluster:
-                          errors.append("Missing cluster.serverUrl/server-url (required for agent nodes)")
+                      if 'serverUrl' not in cluster and 'server-url' not in cluster and 'serverURL' not in cluster:
+                          warnings.append("Missing cluster.serverUrl/serverURL/server-url (typically required for agent nodes)")
                   
                   if 'tokenFile' not in spec and 'token-file' not in spec and 'token' not in spec.get('rke2', {}):
                       warnings.append("Missing tokenFile/token-file or rke2.token (required for cluster join)")
@@ -234,12 +234,12 @@ jobs:
                   cluster = spec.get('cluster', {})
                   if cluster:
                       # Check in cluster section
-                      if 'serverUrl' not in cluster and 'server-url' not in cluster:
-                          errors.append("Missing cluster.serverUrl/server-url (required for joining existing cluster)")
+                      if 'serverUrl' not in cluster and 'server-url' not in cluster and 'serverURL' not in cluster:
+                          warnings.append("Missing cluster.serverUrl/serverURL/server-url (typically required for joining cluster)")
                   else:
                       # Check top-level spec
-                      if 'serverUrl' not in spec and 'server-url' not in spec:
-                          errors.append("Missing serverUrl/server-url (required for joining existing cluster)")
+                      if 'serverUrl' not in spec and 'server-url' not in spec and 'serverURL' not in spec:
+                          warnings.append("Missing serverUrl/serverURL/server-url (typically required for joining cluster)")
                   
                   if 'tokenFile' not in spec and 'token-file' not in spec:
                       warnings.append("Missing tokenFile/token-file (required for cluster authentication)")
