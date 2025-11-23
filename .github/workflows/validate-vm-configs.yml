@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          pip3 install jsonschema pyyaml
+          pip3 install jsonschema pyyaml pywinrm
       
       - name: Validate all VM configurations
         run: |
@@ -115,9 +115,6 @@ jobs:
       - name: Dry-run configuration application
         run: |
           echo "Testing configuration application (dry-run)..."
-          
-          # Install additional dependencies for dry-run
-          pip3 install pywinrm
           
           # Find changed VM configs
           if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
