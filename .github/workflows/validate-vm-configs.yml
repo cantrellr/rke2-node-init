@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git diff
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,7 +37,14 @@ jobs:
           echo "=================================="
           
           # Find all changed YAML files in vm-configs/
-          changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' || true)
+          # Handle case where base branch doesn't exist in origin
+          if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
+            changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' || true)
+          else
+            # Fallback: check all vm-configs files
+            echo "Warning: Could not find origin/${{ github.base_ref }}, validating all vm-configs files"
+            changed_files=$(find vm-configs -name '*.yaml' -o -name '*.yml' | grep -v 'rke2-configs' || true)
+          fi
           
           if [ -z "$changed_files" ]; then
             echo "No VM config files changed in this PR"
@@ -76,17 +85,20 @@ jobs:
         run: |
           echo "Checking for VM name conflicts..."
           
+          # Create temporary Python script to extract VM names
+          cat > /tmp/extract_vm_names.py << 'PYEOF'
+          import yaml, sys
+          try:
+              with open(sys.argv[1]) as f:
+                  config = yaml.safe_load(f)
+                  if config and config.get('kind') == 'VirtualMachineConfig':
+                      print(config.get('metadata', {}).get('name', ''))
+          except: pass
+          PYEOF
+          
           # Extract all VM names from VirtualMachineConfig files
           vm_names=$(find vm-configs -name '*.yaml' -o -name '*.yml' | while read file; do
-            python3 -c "
-import yaml, sys
-try:
-    with open('$file') as f:
-        config = yaml.safe_load(f)
-        if config and config.get('kind') == 'VirtualMachineConfig':
-            print(config.get('metadata', {}).get('name', ''))
-except: pass
-" 2>/dev/null
+            python3 /tmp/extract_vm_names.py "$file" 2>/dev/null
           done | sort)
           
           # Check for duplicates
@@ -108,7 +120,12 @@ except: pass
           pip3 install pywinrm
           
           # Find changed VM configs
-          changed_configs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' | grep -v 'cluster-defaults' || true)
+          if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
+            changed_configs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/.*\.ya*ml$' | grep -v 'cluster-defaults' || true)
+          else
+            echo "Warning: Could not find origin/${{ github.base_ref }}, checking all VirtualMachineConfig files"
+            changed_configs=$(find vm-configs -name '*.yaml' -o -name '*.yml' | xargs grep -l "kind: VirtualMachineConfig" || true)
+          fi
           
           if [ -z "$changed_configs" ]; then
             echo "No VirtualMachineConfig files changed"
@@ -137,7 +154,11 @@ except: pass
           
           # List changed files
           echo "## Changed Files" >> validation-report.md
-          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/' | sed 's/^/- /' >> validation-report.md
+          if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
+            git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^vm-configs/' | sed 's/^/- /' >> validation-report.md || echo "- (no changes detected)" >> validation-report.md
+          else
+            find vm-configs -name '*.yaml' -o -name '*.yml' | sed 's/^/- /' >> validation-report.md
+          fi
           
           # Run validation with JSON output
           echo "" >> validation-report.md
@@ -145,15 +166,16 @@ except: pass
           python3 scripts/vm-config/config_validator.py vm-configs/ --all --json > validation-results.json 2>&1 || true
           
           # Parse and format results
-          python3 -c "
-import json
-with open('validation-results.json') as f:
-    results = json.load(f)
-    print(f\"- **Total files**: {results['total_files']}\")
-    print(f\"- **Errors**: {results['total_errors']}\")
-    print(f\"- **Warnings**: {results['total_warnings']}\")
-" >> validation-report.md
+          cat > /tmp/parse_results.py << 'PYEOF'
+          import json
+          with open('validation-results.json') as f:
+              results = json.load(f)
+              print(f"- **Total files**: {results['total_files']}")
+              print(f"- **Errors**: {results['total_errors']}")
+              print(f"- **Warnings**: {results['total_warnings']}")
+          PYEOF
           
+          python3 /tmp/parse_results.py >> validation-report.md
           cat validation-report.md
       
       - name: Comment PR with validation results
