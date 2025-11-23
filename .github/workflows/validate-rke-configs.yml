@@ -113,22 +113,24 @@ jobs:
           echo "API Version & Kind Validation"
           echo "=================================="
           
+          # Create helper script once
+          cat > /tmp/extract_field.py << 'EOF'
+          import yaml, sys
+          field = sys.argv[1]
+          file_path = sys.argv[2]
+          for d in yaml.safe_load_all(open(file_path)):
+            if isinstance(d, dict) and d.get(field):
+              print(d.get(field))
+              sys.exit(0)
+          print('')
+          EOF
+          
           exit_code=0
           while IFS= read -r file; do
             if [ -n "$file" ] && [ -f "$file" ]; then
               echo "Validating: $file"
               
               # Extract apiVersion and kind from first document that contains them
-              cat > /tmp/extract_field.py << 'PYEOF'
-              import yaml, sys
-              field = sys.argv[1]
-              file_path = sys.argv[2]
-              for d in yaml.safe_load_all(open(file_path)):
-                if isinstance(d, dict) and d.get(field):
-                  print(d.get(field))
-                  sys.exit(0)
-              print('')
-              PYEOF
               api_version=$(python3 /tmp/extract_field.py apiVersion "$file" 2>/dev/null || echo "")
               kind=$(python3 /tmp/extract_field.py kind "$file" 2>/dev/null || echo "")
               
