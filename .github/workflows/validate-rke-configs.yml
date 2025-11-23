@@ -46,8 +46,13 @@ jobs:
           fi
           
           # Filter for files that contain apiVersion: rkeprep/v1
+          # Exclude workflow files themselves (they contain the search string in grep patterns)
           changed_files=""
           for file in $all_changed; do
+            # Skip workflow files
+            if [[ "$file" == .github/workflows/*.yml ]] || [[ "$file" == .github/workflows/*.yaml ]]; then
+              continue
+            fi
             if [ -f "$file" ] && grep -q "apiVersion: rkeprep/v1" "$file" 2>/dev/null; then
               changed_files="${changed_files}${file}"$'\n'
             fi
