@@ -1,7 +1,7 @@
 apiVersion: rkeprep/v1
 kind: Image
 metadata:
-  name: cotpa-image
+  name: cotpa-hyperv-image
 spec:
   rke2Version: v1.34.1+rke2r1
   registry: kuberegistry.k8.cantrellcloud.net:8443
@@ -16,6 +16,6 @@ spec:
     installToOSTrust: true
   bootService:
     enabled: true
-    yamlPath: /root/server-config.yaml
+  #  yamlPath: /root/server-config.yaml
     mode: oneshot
     platform: hyperv
