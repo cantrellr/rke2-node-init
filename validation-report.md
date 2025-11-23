@@ -2,14 +2,13 @@
 
 **PR**: #66
 **Branch**: feature/gitops-vm-config-workflow
-**Commit**: 66ff8d2213923fdb63ac772a80449ac8952bda7c
+**Commit**: df265ebbcd526c91b17425b6aed55a3421d3e8be
 
 ## Validated Files
-- .github/workflows/validate-rke-configs.yml
 - configs/cotpa-cluster-ca.yaml
 - configs/cotpa-ctrl01.yaml
 - configs/cotpa-ctrl02.yaml
-- configs/cotpa-image.yaml
+- configs/cotpa-hyperv-image.yaml
 - configs/cotpa-work01.yaml
 - configs/devtesting/dc1manager-ca.yaml
 - configs/devtesting/dc1manager-ctrl01.yaml
