@@ -75,15 +75,20 @@ jobs:
           echo "YAML Syntax Validation"
           echo "=================================="
           
+          cat > /tmp/check_yaml.py << 'PYEOF'
+          import yaml, sys
+          try:
+            list(yaml.safe_load_all(open(sys.argv[1])))
+          except Exception as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
+          PYEOF
+          
           exit_code=0
           while IFS= read -r file; do
             if [ -n "$file" ] && [ -f "$file" ]; then
               echo "Checking syntax: $file"
-              if ! python3 -c "import yaml,sys
-try:
-  list(yaml.safe_load_all(open('$file')))
-except Exception as e:
-  print(e, file=sys.stderr); sys.exit(1)" 2>&1; then
+              if ! python3 /tmp/check_yaml.py "$file" 2>&1; then
                 echo "  ✗ YAML syntax error in $file"
                 exit_code=1
               else
@@ -114,24 +119,18 @@ except Exception as e:
               echo "Validating: $file"
               
               # Extract apiVersion and kind from first document that contains them
-              api_version=$(python3 - <<PY
-import yaml,sys
-for d in yaml.safe_load_all(open("$file")):
-  if isinstance(d, dict) and d.get("apiVersion"):
-    print(d.get("apiVersion"))
-    sys.exit(0)
-print("")
-PY
-)
-              kind=$(python3 - <<PY
-import yaml,sys
-for d in yaml.safe_load_all(open("$file")):
-  if isinstance(d, dict) and d.get("kind"):
-    print(d.get("kind"))
-    sys.exit(0)
-print("")
-PY
-)
+              cat > /tmp/extract_field.py << 'PYEOF'
+              import yaml, sys
+              field = sys.argv[1]
+              file_path = sys.argv[2]
+              for d in yaml.safe_load_all(open(file_path)):
+                if isinstance(d, dict) and d.get(field):
+                  print(d.get(field))
+                  sys.exit(0)
+              print('')
+              PYEOF
+              api_version=$(python3 /tmp/extract_field.py apiVersion "$file" 2>/dev/null || echo "")
+              kind=$(python3 /tmp/extract_field.py kind "$file" 2>/dev/null || echo "")
               
               # Validate apiVersion
               if [ "$api_version" != "rkeprep/v1" ]; then
