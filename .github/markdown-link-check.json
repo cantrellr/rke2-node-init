@@ -1,0 +1,30 @@
+{
+  "ignorePatterns": [
+    {
+      "pattern": "^http://localhost"
+    },
+    {
+      "pattern": "^https://localhost"
+    },
+    {
+      "pattern": "^http://127.0.0.1"
+    },
+    {
+      "pattern": "^https://kuberegistry"
+    },
+    {
+      "pattern": "^http://registry.local"
+    },
+    {
+      "pattern": "^https://registry.local"
+    },
+    {
+      "pattern": "^https://registry.example.com"
+    }
+  ],
+  "timeout": "5s",
+  "retryOn429": true,
+  "retryCount": 3,
+  "fallbackRetryDelay": "5s",
+  "aliveStatusCodes": [200, 206, 301, 302, 307, 308, 401, 403, 405, 429]
+}

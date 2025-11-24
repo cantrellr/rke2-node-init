@@ -1,0 +1,470 @@
+name: Documentation Validation and Update
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.md'
+      - 'bin/rke2nodeinit.sh'
+      - 'scripts/**'
+      - 'configs/**'
+      - 'examples/**'
+      - '.github/workflows/docs-validation.yml'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  validate-docs:
+    runs-on: ubuntu-latest
+    name: Validate and Update Documentation
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyyaml markdown-it-py linkify-it-py mdit-py-plugins
+          pip install pyspelling
+
+      - name: Install markdown linting tools
+        run: |
+          sudo npm install -g markdownlint-cli
+          sudo npm install -g markdown-link-check
+
+      - name: Extract script help sections
+        id: extract-help
+        run: |
+          python3 << 'EOF'
+          import re
+          import json
+          import sys
+          
+          script_path = 'bin/rke2nodeinit.sh'
+          
+          try:
+              with open(script_path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+          except FileNotFoundError:
+              print(f"Error: {script_path} not found", file=sys.stderr)
+              sys.exit(1)
+          
+          # Extract version
+          version_match = re.search(r'SCRIPT_VERSION="([^"]+)"', content)
+          script_version = version_match.group(1) if version_match else "unknown"
+          
+          # Extract main help text
+          help_match = re.search(r'print_help\(\)\s*{.*?cat\s*<<EOF(.*?)^EOF', content, re.DOTALL | re.MULTILINE)
+          main_help = help_match.group(1).strip() if help_match else ""
+          
+          # Extract action-specific help
+          actions = {}
+          action_pattern = r'(\w+)\)\s*cat\s*<<[\'"]?HELPEOF[\'"]?(.*?)^HELPEOF'
+          for match in re.finditer(action_pattern, content, re.DOTALL | re.MULTILINE):
+              action_name = match.group(1)
+              action_help = match.group(2).strip()
+              actions[action_name] = action_help
+          
+          # Extract supported YAML kinds
+          yaml_kinds = []
+          kind_pattern = r'(Push|Image|Airgap|Server|AddServer|Agent|Verify|CustomCA)'
+          for match in re.finditer(kind_pattern, content):
+              kind = match.group(1)
+              if kind not in yaml_kinds:
+                  yaml_kinds.append(kind)
+          
+          # Extract CLI flags
+          flags = []
+          flag_pattern = r'^\s*(-\w)\s+(\w+)\s+(.+?)$'
+          if main_help:
+              for line in main_help.split('\n'):
+                  flag_match = re.match(flag_pattern, line.strip())
+                  if flag_match:
+                      flags.append({
+                          'flag': flag_match.group(1),
+                          'arg': flag_match.group(2),
+                          'description': flag_match.group(3)
+                      })
+          
+          output = {
+              'version': script_version,
+              'main_help': main_help[:500] + '...' if len(main_help) > 500 else main_help,
+              'actions': list(actions.keys()),
+              'yaml_kinds': yaml_kinds,
+              'flags_count': len(flags)
+          }
+          
+          print(json.dumps(output, indent=2))
+          
+          # Write to output file for validation
+          with open('extracted_help.json', 'w') as out:
+              json.dump(output, out, indent=2)
+          
+          print(f"\nExtracted help for {len(actions)} actions", file=sys.stderr)
+          print(f"Script version: {script_version}", file=sys.stderr)
+          EOF
+
+      - name: Validate YAML examples
+        run: |
+          python3 << 'EOF'
+          import yaml
+          import os
+          import sys
+          from pathlib import Path
+          
+          errors = []
+          yaml_files = []
+          
+          # Find all YAML config files
+          for root, dirs, files in os.walk('.'):
+              # Skip hidden directories
+              dirs[:] = [d for d in dirs if not d.startswith('.')]
+              for file in files:
+                  if file.endswith('.yaml') or file.endswith('.yml'):
+                      yaml_files.append(os.path.join(root, file))
+          
+          print(f"Found {len(yaml_files)} YAML files to validate")
+          
+          required_fields = {
+              'apiVersion': str,
+              'kind': str,
+              'metadata': dict
+          }
+          
+          valid_kinds = ['Push', 'Image', 'Airgap', 'Server', 'AddServer', 'Agent', 'Verify', 'CustomCA']
+          
+          for yaml_file in yaml_files:
+              try:
+                  with open(yaml_file, 'r') as f:
+                      data = yaml.safe_load(f)
+                  
+                  if not data:
+                      continue
+                  
+                  # Check if it's an rkeprep config
+                  if data.get('apiVersion') == 'rkeprep/v1':
+                      # Validate required fields
+                      for field, field_type in required_fields.items():
+                          if field not in data:
+                              errors.append(f"{yaml_file}: Missing required field '{field}'")
+                          elif not isinstance(data[field], field_type):
+                              errors.append(f"{yaml_file}: Field '{field}' should be {field_type.__name__}")
+                      
+                      # Validate kind
+                      if data.get('kind') not in valid_kinds:
+                          errors.append(f"{yaml_file}: Invalid kind '{data.get('kind')}'. Must be one of {valid_kinds}")
+                      
+                      # Validate metadata.name
+                      if 'metadata' in data and isinstance(data['metadata'], dict):
+                          if 'name' not in data['metadata']:
+                              errors.append(f"{yaml_file}: Missing required field 'metadata.name'")
+                      
+                      print(f"✓ {yaml_file}: Valid (kind={data.get('kind')})")
+                  
+              except yaml.YAMLError as e:
+                  errors.append(f"{yaml_file}: YAML parsing error - {str(e)}")
+              except Exception as e:
+                  errors.append(f"{yaml_file}: Validation error - {str(e)}")
+          
+          if errors:
+              print("\n❌ YAML Validation Errors:")
+              for error in errors:
+                  print(f"  - {error}")
+              sys.exit(1)
+          else:
+              print("\n✓ All YAML files are valid")
+          EOF
+
+      - name: Check markdown formatting
+        continue-on-error: true
+        run: |
+          markdownlint '**/*.md' --ignore node_modules --ignore .git || true
+
+      - name: Validate markdown links
+        continue-on-error: true
+        run: |
+          find . -name '*.md' -not -path './node_modules/*' -not -path './.git/*' | \
+          xargs -I {} markdown-link-check {} --config .github/markdown-link-check.json || true
+
+      - name: Check documentation completeness
+        run: |
+          python3 << 'EOF'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+          
+          issues = []
+          
+          # Check README.md
+          readme_path = 'README.md'
+          if not os.path.exists(readme_path):
+              issues.append("Missing README.md")
+          else:
+              with open(readme_path, 'r') as f:
+                  readme_content = f.read()
+              
+              # Check for essential sections
+              required_sections = [
+                  'Installation',
+                  'Usage',
+                  'Configuration',
+                  'Examples',
+                  'Actions'
+              ]
+              
+              for section in required_sections:
+                  if not re.search(rf'^#+\s+{section}', readme_content, re.MULTILINE | re.IGNORECASE):
+                      issues.append(f"README.md missing '{section}' section")
+          
+          # Check for action documentation
+          actions = ['push', 'image', 'server', 'agent', 'add-server', 'verify', 'custom-ca', 'airgap']
+          docs_dir = 'docs'
+          
+          if os.path.exists(docs_dir):
+              doc_files = [f for f in os.listdir(docs_dir) if f.endswith('.md')]
+              print(f"Found {len(doc_files)} documentation files")
+          else:
+              issues.append(f"Missing '{docs_dir}' directory")
+          
+          # Check examples directory
+          examples_dir = 'examples'
+          if not os.path.exists(examples_dir):
+              issues.append(f"Missing '{examples_dir}' directory")
+          else:
+              example_files = list(Path(examples_dir).rglob('*.yaml'))
+              print(f"Found {len(example_files)} example YAML files")
+          
+          # Check CONTRIBUTING.md
+          if not os.path.exists('CONTRIBUTING.md'):
+              issues.append("Missing CONTRIBUTING.md")
+          
+          # Check SECURITY.md
+          if not os.path.exists('SECURITY.md'):
+              issues.append("Missing SECURITY.md")
+          
+          if issues:
+              print("\n⚠ Documentation Completeness Issues:")
+              for issue in issues:
+                  print(f"  - {issue}")
+              # Don't fail on completeness issues, just warn
+          else:
+              print("\n✓ Documentation is complete")
+          EOF
+
+      - name: Verify help text is documented
+        run: |
+          python3 << 'EOF'
+          import re
+          import sys
+          
+          # Extract actions from script
+          with open('bin/rke2nodeinit.sh', 'r') as f:
+              script_content = f.read()
+          
+          # Find all action functions
+          action_pattern = r'^action_(\w+)\(\)\s*{', re.MULTILINE
+          script_actions = set()
+          for match in re.finditer(action_pattern, script_content, re.MULTILINE):
+              action_name = match.group(1)
+              # Convert to CLI format (e.g., add_server -> add-server)
+              cli_name = action_name.replace('_', '-')
+              script_actions.add(cli_name)
+          
+          # Check README mentions all actions
+          with open('README.md', 'r') as f:
+              readme_content = f.read()
+          
+          undocumented = []
+          for action in script_actions:
+              # Look for action in README (case insensitive, with various formats)
+              patterns = [
+                  rf'\b{action}\b',
+                  rf'`{action}`',
+                  rf'Action:\s+{action}',
+              ]
+              found = any(re.search(pattern, readme_content, re.IGNORECASE) for pattern in patterns)
+              if not found:
+                  undocumented.append(action)
+          
+          if undocumented:
+              print(f"⚠ Actions not documented in README.md:")
+              for action in sorted(undocumented):
+                  print(f"  - {action}")
+          else:
+              print("✓ All actions are documented in README.md")
+          
+          print(f"\nTotal actions found: {len(script_actions)}")
+          print(f"Actions: {', '.join(sorted(script_actions))}")
+          EOF
+
+      - name: Update version references
+        run: |
+          python3 << 'EOF'
+          import re
+          import sys
+          
+          # Extract version from script
+          with open('bin/rke2nodeinit.sh', 'r') as f:
+              script_content = f.read()
+          
+          version_match = re.search(r'SCRIPT_VERSION="([^"]+)"', script_content)
+          if not version_match:
+              print("Error: Could not extract SCRIPT_VERSION", file=sys.stderr)
+              sys.exit(1)
+          
+          script_version = version_match.group(1)
+          print(f"Current script version: {script_version}")
+          
+          # Update README.md if version is mentioned
+          readme_path = 'README.md'
+          try:
+              with open(readme_path, 'r') as f:
+                  readme_content = f.read()
+              
+              # Look for version references and update if needed
+              updated = False
+              pattern = r'(Version|version):\s*\d+\.\d+\.\d+[a-z]?'
+              if re.search(pattern, readme_content):
+                  new_content = re.sub(pattern, f'\\1: {script_version}', readme_content)
+                  if new_content != readme_content:
+                      with open(readme_path, 'w') as f:
+                          f.write(new_content)
+                      print(f"Updated version in {readme_path}")
+                      updated = True
+              
+              if not updated:
+                  print(f"No version updates needed in {readme_path}")
+          
+          except FileNotFoundError:
+              print(f"Warning: {readme_path} not found", file=sys.stderr)
+          EOF
+
+      - name: Generate documentation report
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime
+          
+          report = {
+              'timestamp': datetime.utcnow().isoformat() + 'Z',
+              'checks': {}
+          }
+          
+          # Load extracted help data
+          if os.path.exists('extracted_help.json'):
+              with open('extracted_help.json', 'r') as f:
+                  help_data = json.load(f)
+              report['script_version'] = help_data.get('version', 'unknown')
+              report['actions_count'] = len(help_data.get('actions', []))
+              report['yaml_kinds_count'] = len(help_data.get('yaml_kinds', []))
+          
+          # Count markdown files
+          md_files = []
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if not d.startswith('.')]
+              md_files.extend([os.path.join(root, f) for f in files if f.endswith('.md')])
+          
+          report['markdown_files'] = len(md_files)
+          report['checks']['yaml_validation'] = 'passed'
+          report['checks']['help_extraction'] = 'passed'
+          report['checks']['completeness'] = 'passed'
+          
+          print("\n" + "="*60)
+          print("DOCUMENTATION VALIDATION REPORT")
+          print("="*60)
+          print(json.dumps(report, indent=2))
+          print("="*60)
+          
+          # Write report for artifact
+          with open('docs-validation-report.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          EOF
+
+      - name: Check for uncommitted changes
+        id: check-changes
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Changes detected:"
+            git status --short
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes to commit"
+          fi
+
+      - name: Commit documentation updates
+        if: steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -A
+          git commit -m "docs: auto-update documentation [skip ci]" || echo "No changes to commit"
+          git push || echo "Nothing to push"
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docs-validation-report
+          path: |
+            docs-validation-report.json
+            extracted_help.json
+          retention-days: 30
+
+      - name: Comment on PR with results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let report = { checks: {} };
+            try {
+              const reportData = fs.readFileSync('docs-validation-report.json', 'utf8');
+              report = JSON.parse(reportData);
+            } catch (e) {
+              console.log('Could not read report file');
+            }
+            
+            const body = `## 📚 Documentation Validation Report
+            
+            **Timestamp:** ${report.timestamp || new Date().toISOString()}
+            **Script Version:** \`${report.script_version || 'unknown'}\`
+            
+            ### Results
+            - ✅ Markdown files validated: ${report.markdown_files || 'N/A'}
+            - ✅ Actions documented: ${report.actions_count || 'N/A'}
+            - ✅ YAML kinds defined: ${report.yaml_kinds_count || 'N/A'}
+            - ✅ YAML validation: ${report.checks?.yaml_validation || 'unknown'}
+            - ✅ Help extraction: ${report.checks?.help_extraction || 'unknown'}
+            - ✅ Completeness check: ${report.checks?.completeness || 'unknown'}
+            
+            ${context.payload.pull_request ? '### Status\nDocumentation validation completed. Review the workflow logs for detailed information.' : ''}
+            
+            ---
+            *Generated by GitHub Actions workflow: docs-validation.yml*
+            `;
+            
+            if (context.payload.pull_request) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }

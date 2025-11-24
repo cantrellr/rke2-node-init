@@ -1,0 +1,269 @@
+name: Documentation Sync and Update
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'bin/rke2nodeinit.sh'
+      - 'scripts/**/*.sh'
+      - 'scripts/**/*.py'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-help-docs:
+    runs-on: ubuntu-latest
+    name: Sync Help Text to Documentation
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Extract and sync help documentation
+        run: |
+          python3 << 'EOF'
+          import re
+          import os
+          from datetime import datetime
+          
+          script_path = 'bin/rke2nodeinit.sh'
+          
+          print("Extracting help text from script...")
+          with open(script_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          # Extract script version
+          version_match = re.search(r'SCRIPT_VERSION="([^"]+)"', content)
+          script_version = version_match.group(1) if version_match else "unknown"
+          
+          # Extract main help function
+          help_match = re.search(r'print_help\(\)\s*{.*?cat\s*<<EOF(.*?)^EOF', content, re.DOTALL | re.MULTILINE)
+          main_help = help_match.group(1) if help_match else ""
+          
+          # Extract action-specific help
+          actions_help = {}
+          action_pattern = r'show_action_help\(\).*?case\s+"\$action"\s+in(.*?)esac'
+          action_section = re.search(action_pattern, content, re.DOTALL)
+          
+          if action_section:
+              # Extract individual action help blocks
+              action_blocks = re.finditer(
+                  r'(\w+)\)\s*cat\s*<<[\'"]?HELPEOF[\'"]?(.*?)^HELPEOF',
+                  action_section.group(1),
+                  re.DOTALL | re.MULTILINE
+              )
+              for match in action_blocks:
+                  action_name = match.group(1)
+                  action_help = match.group(2).strip()
+                  actions_help[action_name] = action_help
+          
+          # Create/update help documentation
+          help_doc_path = 'docs/CLI-HELP.md'
+          os.makedirs(os.path.dirname(help_doc_path), exist_ok=True)
+          
+          with open(help_doc_path, 'w', encoding='utf-8') as f:
+              f.write(f"""# RKE2 Node Init - CLI Help Documentation
+
+**Version:** {script_version}  
+**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC  
+**Auto-generated from:** `bin/rke2nodeinit.sh`
+
+> ⚠️ **Note:** This file is auto-generated. Do not edit manually.  
+> Changes should be made to the help text in `bin/rke2nodeinit.sh`.
+
+---
+
+## Main Help
+
+```
+{main_help.strip()}
+```
+
+---
+
+## Action-Specific Help
+
+""")
+              
+              for action, help_text in sorted(actions_help.items()):
+                  f.write(f"### {action}\n\n")
+                  f.write("```\n")
+                  f.write(help_text.strip())
+                  f.write("\n```\n\n---\n\n")
+          
+          print(f"✓ Created/updated {help_doc_path}")
+          print(f"  - Main help: {len(main_help)} characters")
+          print(f"  - Actions documented: {len(actions_help)}")
+          EOF
+
+      - name: Extract configuration schema
+        run: |
+          python3 << 'EOF'
+          import re
+          import os
+          import yaml
+          from collections import defaultdict
+          
+          script_path = 'bin/rke2nodeinit.sh'
+          
+          print("Extracting YAML schema information...")
+          with open(script_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          # Extract supported YAML kinds and their fields
+          kinds_info = {}
+          
+          # Find kind validation section
+          kind_section = re.search(
+              r'case\s+"\$YAML_KIND"\s+in(.*?)esac',
+              content,
+              re.DOTALL
+          )
+          
+          if kind_section:
+              kinds = re.findall(r'(\w+)\|', kind_section.group(1))
+              for kind in set(kinds):
+                  if kind and kind not in ['*', 'true', 'false']:
+                      kinds_info[kind] = {'action': kind.lower()}
+          
+          # Extract yaml_spec_get calls to find commonly used fields
+          spec_fields = defaultdict(set)
+          spec_pattern = r'yaml_spec_get\s+["\$][^"]*["]\s+["\']?([^"\')\s]+)["\']?'
+          for match in re.finditer(spec_pattern, content):
+              field = match.group(1)
+              # Try to determine which action uses this field (basic heuristic)
+              context_start = max(0, match.start() - 1000)
+              context = content[context_start:match.start()]
+              
+              for kind in kinds_info.keys():
+                  if f'action_{kind.lower()}' in context or f'ACTION="{kind.lower()}"' in context:
+                      spec_fields[kind].add(field)
+          
+          # Generate schema documentation
+          schema_doc_path = 'docs/YAML-SCHEMA.md'
+          os.makedirs(os.path.dirname(schema_doc_path), exist_ok=True)
+          
+          with open(schema_doc_path, 'w', encoding='utf-8') as f:
+              f.write("""# RKE2 Node Init - YAML Configuration Schema
+
+**Auto-generated from:** `bin/rke2nodeinit.sh`
+
+> ⚠️ **Note:** This file is auto-generated from script analysis.  
+> Refer to example YAML files in `configs/` and `examples/` for complete examples.
+
+---
+
+## API Version
+
+All configuration files must specify:
+
+```yaml
+apiVersion: rkeprep/v1
+```
+
+---
+
+## Supported Kinds
+
+""")
+              
+              for kind in sorted(kinds_info.keys()):
+                  f.write(f"### {kind}\n\n")
+                  f.write(f"**Action:** `{kinds_info[kind]['action']}`\n\n")
+                  
+                  if kind in spec_fields and spec_fields[kind]:
+                      f.write("**Common spec fields:**\n\n")
+                      for field in sorted(spec_fields[kind]):
+                          f.write(f"- `{field}`\n")
+                  
+                  f.write(f"\n**Example:**\n\n")
+                  f.write("```yaml\n")
+                  f.write("apiVersion: rkeprep/v1\n")
+                  f.write(f"kind: {kind}\n")
+                  f.write("metadata:\n")
+                  f.write(f"  name: my-{kind.lower()}-config\n")
+                  f.write("spec:\n")
+                  f.write("  # Configuration fields here\n")
+                  f.write("```\n\n")
+                  f.write("---\n\n")
+              
+              f.write("""
+## Required Fields
+
+All YAML configurations must include:
+
+1. `apiVersion: rkeprep/v1`
+2. `kind: <Kind>` (one of the supported kinds above)
+3. `metadata.name: <string>` (unique identifier for the configuration)
+
+---
+
+## Examples
+
+See the following directories for complete examples:
+
+- `configs/` - Production-ready configurations
+- `examples/config/` - Additional example configurations
+- `examples/certs/` - Custom CA examples
+
+---
+
+*This documentation is auto-generated. For the most up-to-date information,
+refer to the inline help in `bin/rke2nodeinit.sh` or run:*
+
+```bash
+sudo bin/rke2nodeinit.sh <action> --help
+```
+""")
+          
+          print(f"✓ Created/updated {schema_doc_path}")
+          print(f"  - Kinds documented: {len(kinds_info)}")
+          EOF
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            git status --short
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit documentation updates
+        if: steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add docs/CLI-HELP.md docs/YAML-SCHEMA.md
+          git commit -m "docs: sync help text and schema from script [skip ci]"
+          git push
+
+      - name: Comment on PR
+        if: steps.check-changes.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📝 Documentation Synchronized
+              
+              The following documentation files have been auto-updated from the script:
+              
+              - \`docs/CLI-HELP.md\` - CLI help text
+              - \`docs/YAML-SCHEMA.md\` - YAML configuration schema
+              
+              These changes reflect the current state of \`bin/rke2nodeinit.sh\`.`
+            });
