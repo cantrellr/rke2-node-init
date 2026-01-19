@@ -1,0 +1,40 @@
+#cloud-config
+write_files:
+  - path: /usr/local/bin/rke2-firstboot.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # This script assumes the following files are present in /opt/bootstrap:
+      # - dc1manager-subordinate-ca.crt
+      # - dc1manager-subordinate-ca-key.pem (optional, encrypted)
+      # - rke2-config.yaml  (config snippet with token and cluster-init)
+
+      BOOTDIR=/opt/bootstrap
+      RKE2_DIR=/etc/rancher/rke2
+      mkdir -p ${RKE2_DIR}
+
+      if [[ -f ${BOOTDIR}/dc1manager-subordinate-ca.crt ]]; then
+        install -m 0644 ${BOOTDIR}/dc1manager-subordinate-ca.crt ${RKE2_DIR}/server-ca.crt
+      fi
+      if [[ -f ${BOOTDIR}/dc1manager-subordinate-ca-key.pem ]]; then
+        install -m 0600 ${BOOTDIR}/dc1manager-subordinate-ca-key.pem ${RKE2_DIR}/server-ca.key
+      fi
+      if [[ -f ${BOOTDIR}/rke2-config.yaml ]]; then
+        install -m 0644 ${BOOTDIR}/rke2-config.yaml ${RKE2_DIR}/config.yaml
+      fi
+
+      # Load container images if provided
+      if [[ -f ${BOOTDIR}/images.tar ]]; then
+        echo "Loading images.tar into containerd"
+        ctr -n=k8s.io images import ${BOOTDIR}/images.tar || true
+      fi
+
+      # Enable and start rke2
+      systemctl enable rke2-server.service || true
+      systemctl start rke2-server.service
+
+runcmd:
+  - [ sh, -c, "/usr/local/bin/rke2-firstboot.sh" ]

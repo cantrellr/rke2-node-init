@@ -1,0 +1,18 @@
+# Python dependencies for VM configuration management
+#
+# Install with: pip3 install -r requirements.txt
+
+# Schema validation
+jsonschema>=4.19.0
+
+# YAML parsing
+PyYAML>=6.0
+
+# Hyper-V WinRM connection
+pywinrm>=0.4.3
+
+# Future: VMware vSphere support
+# pyvmomi>=8.0.0
+
+# Future: Proxmox support
+# proxmoxer>=2.0.0

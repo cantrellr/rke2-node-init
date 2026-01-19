@@ -1,0 +1,22 @@
+-----BEGIN CERTIFICATE-----
+EXAMPLE REGISTRY CA CERTIFICATE - DO NOT USE IN PRODUCTION
+This is a placeholder file for demonstration purposes only.
+
+TO GENERATE A REAL REGISTRY CA CERTIFICATE:
+
+Option 1: Use the same CA certificate
+  cp rke2ca-cert.crt rke2registry-ca.crt
+
+Option 2: Generate a separate registry CA
+  openssl genrsa -out registry-ca-key.pem 4096
+  openssl req -new -x509 -days 3650 \
+    -key registry-ca-key.pem \
+    -out rke2registry-ca.crt \
+    -subj "/CN=Your Organization Registry CA"
+
+Option 3: Extract from existing registry
+  openssl s_client -showcerts -connect registry.example.com:443 </dev/null 2>/dev/null \
+    | openssl x509 -outform PEM > rke2registry-ca.crt
+
+See certs/README.md for complete instructions.
+-----END CERTIFICATE-----
