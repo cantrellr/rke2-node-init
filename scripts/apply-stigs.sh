@@ -157,6 +157,7 @@ add_result() {
 }
 
 print_report() {
+  local context="${1:-}"
   local total=${#STIG_IDS[@]}
   local pass=0 fail=0 manual=0 notrun=0 notapp=0
   local i
@@ -172,7 +173,11 @@ print_report() {
 
   echo ""
   echo "============================================================"
-  echo "STIG COMPLIANCE REPORT"
+  if [[ -n "$context" ]]; then
+    echo "STIG COMPLIANCE REPORT - ${context}"
+  else
+    echo "STIG COMPLIANCE REPORT"
+  fi
   echo "Host: $(hostname)"
   echo "Date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "Totals: $total  PASS=$pass  FAIL=$fail  MANUAL=$manual  NOT-RUN=$notrun  N/A=$notapp"
@@ -188,7 +193,22 @@ print_report() {
   echo "============================================================"
 }
 
+reset_results() {
+  STIG_IDS=()
+  STIG_TITLES=()
+  STIG_STATUS=()
+  STIG_DETAILS=()
+}
+
 detect_rke2_role() {
+  if systemctl status rke2-server >/dev/null 2>&1; then
+    echo "server"
+    return
+  fi
+  if systemctl status rke2-agent >/dev/null 2>&1; then
+    echo "agent"
+    return
+  fi
   if systemctl list-unit-files | grep -q '^rke2-server\.service'; then
     echo "server"
     return
@@ -215,8 +235,8 @@ ensure_yaml_list_item() {
   local key="$2"
   local value="$3"
 
-  if [[ ! -f "$file" ]]; then
-    printf "%s:\n  - \"%s\"\n" "$key" "$value" | run_cmd $SUDO tee "$file" >/dev/null
+  if [[ ! -f "$file" || ! -s "$file" ]]; then
+    run_cmd $SUDO sh -c "printf '%s:\n  - \"%s\"\n' \"$key\" \"$value\" > \"$file\""
     return
   fi
 
@@ -225,12 +245,15 @@ ensure_yaml_list_item() {
   fi
 
   if grep -Eq "^${key}:" "$file"; then
+    local tmp
+    tmp="$(mktemp)"
     run_cmd $SUDO awk -v key="$key:" -v val="  - \"$value\"" '
       { print }
       $0 == key && !inserted { print val; inserted=1 }
-    ' "$file" | run_cmd $SUDO tee "$file" >/dev/null
+    ' "$file" > "$tmp"
+    run_cmd $SUDO mv "$tmp" "$file"
   else
-    printf "\n%s:\n  - \"%s\"\n" "$key" "$value" | run_cmd $SUDO tee -a "$file" >/dev/null
+    run_cmd $SUDO sh -c "printf '\n%s:\n  - \"%s\"\n' \"$key\" \"$value\" >> \"$file\""
   fi
 }
 
@@ -256,9 +279,8 @@ path_is_protected() {
   if [[ -z "$mode" ]]; then
     return 1
   fi
-  local group_write=$(( (mode / 10) % 10 ))
-  local other_write=$(( mode % 10 ))
-  if (( group_write >= 2 || other_write >= 2 )); then
+  local mode_dec=$((8#${mode}))
+  if (( (mode_dec & 0020) != 0 || (mode_dec & 0002) != 0 )); then
     return 1
   fi
   return 0
@@ -267,6 +289,30 @@ path_is_protected() {
 check_interface() {
   local iface="$1"
   ip link show "$iface" >/dev/null 2>&1
+}
+
+resolve_kubeconfig() {
+  if [[ -n "${KUBECONFIG:-}" ]] && [[ -f "${KUBECONFIG}" ]]; then
+    echo "${KUBECONFIG}"
+    return
+  fi
+  if [[ -f "/root/.kube/config" ]]; then
+    echo "/root/.kube/config"
+    return
+  fi
+  if [[ -f "/etc/rancher/rke2/rke2.yaml" ]]; then
+    echo "/etc/rancher/rke2/rke2.yaml"
+    return
+  fi
+  if [[ -n "${SUDO_USER:-}" ]] && [[ -f "/home/${SUDO_USER}/.kube/config" ]]; then
+    echo "/home/${SUDO_USER}/.kube/config"
+    return
+  fi
+  if [[ -f "${HOME}/.kube/config" ]]; then
+    echo "${HOME}/.kube/config"
+    return
+  fi
+  echo ""
 }
 
 ufw_is_active() {
@@ -286,6 +332,7 @@ firewall_report() {
 }
 
 apply_firewall() {
+  echo "Applying firewall STIG remediations..." >&2
   if ! check_command ufw; then
     echo "ufw not found. Installing ufw..." >&2
     install_ufw
@@ -350,9 +397,33 @@ apply_firewall() {
 }
 
 apply_rke2_config() {
+  echo "Applying RKE2 config STIG remediations..." >&2
   local file="/etc/rancher/rke2/config.yaml"
+  local audit_policy="/etc/rancher/rke2/audit-policy.yaml"
 
   if [[ "$RKE2_ROLE" == "server" ]]; then
+    if [[ ! -f "$audit_policy" ]]; then
+      run_cmd $SUDO sh -c "cat > '$audit_policy' <<'EOF'
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["pods", "services", "configmaps", "secrets"]
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+    resources:
+      - group: ""
+        resources: ["endpoints", "services", "services/status"]
+EOF"
+      run_cmd $SUDO chmod 640 "$audit_policy"
+      run_cmd $SUDO chown root:root "$audit_policy"
+    fi
+
     ensure_yaml_list_item "$file" "kube-controller-manager-arg" "tls-min-version=VersionTLS12"
     ensure_yaml_list_item "$file" "kube-controller-manager-arg" "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
     ensure_yaml_list_item "$file" "kube-controller-manager-arg" "use-service-account-credentials=true"
@@ -365,6 +436,8 @@ apply_rke2_config() {
     ensure_yaml_list_item "$file" "kube-apiserver-arg" "tls-min-version=VersionTLS12"
     ensure_yaml_list_item "$file" "kube-apiserver-arg" "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
     ensure_yaml_list_item "$file" "kube-apiserver-arg" "anonymous-auth=false"
+    ensure_yaml_list_item "$file" "kube-apiserver-arg" "audit-policy-file=${audit_policy}"
+    ensure_yaml_list_item "$file" "kube-apiserver-arg" "audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log"
   fi
 
   if [[ "$RKE2_ROLE" == "server" || "$RKE2_ROLE" == "agent" ]]; then
@@ -575,10 +648,19 @@ report_rke2_controls() {
 
   if [[ "$run_kubectl_checks" == "true" ]]; then
     if check_command kubectl; then
-      if kubectl version --short >/dev/null 2>&1; then
-        add_result "KUBECTL" "kubectl access" "PASS" "kubectl version OK"
+      KC_PATH="$(resolve_kubeconfig)"
+      if [[ -n "${KC_PATH}" ]]; then
+        if KUBECONFIG="${KC_PATH}" kubectl version >/dev/null 2>&1; then
+          add_result "KUBECTL" "kubectl access" "PASS" "kubectl version OK (KUBECONFIG=${KC_PATH})"
+        else
+          add_result "KUBECTL" "kubectl access" "FAIL" "kubectl unable to reach cluster (KUBECONFIG=${KC_PATH})"
+        fi
       else
-        add_result "KUBECTL" "kubectl access" "FAIL" "kubectl unable to reach cluster"
+        if kubectl version >/dev/null 2>&1; then
+          add_result "KUBECTL" "kubectl access" "PASS" "kubectl version OK"
+        else
+          add_result "KUBECTL" "kubectl access" "FAIL" "kubectl unable to reach cluster"
+        fi
       fi
     else
       add_result "KUBECTL" "kubectl access" "FAIL" "kubectl not found"
@@ -598,10 +680,7 @@ report_rke2_controls() {
   fi
 }
 
-STIG_IDS=()
-STIG_TITLES=()
-STIG_STATUS=()
-STIG_DETAILS=()
+reset_results
 
 RKE2_ROLE=$(detect_rke2_role)
 
@@ -625,6 +704,7 @@ if [[ "$apply_changes" == "false" ]]; then
   fi
 fi
 
+echo "Applying STIG remediations..." >&2
 apply_firewall
 if [[ "$RKE2_ROLE" != "none" || -f "/etc/rancher/rke2/config.yaml" || -d "/etc/rancher/rke2" ]]; then
   apply_rke2_config
@@ -647,10 +727,17 @@ if [[ "$RKE2_ROLE" != "none" || -f "/etc/rancher/rke2/config.yaml" || -d "/etc/r
   fi
 fi
 
+  if [[ "$dry_run" != "true" ]]; then
+    reset_results
+    report_firewall_controls
+    report_rke2_controls
+    print_report "POST-APPLY"
+  fi
+
 if [[ "$dry_run" == "true" ]]; then
   echo "Dry-run complete. No changes applied."
 else
-  echo "Changes applied."
+    echo "Changes applied."
 fi
 
 if firewall_report; then
