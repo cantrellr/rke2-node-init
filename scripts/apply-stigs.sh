@@ -11,8 +11,48 @@ run_kubectl_checks=false
 restart_rke2=false
 image_mode=false
 
+show_help() {
+  cat <<'EOF'
+apply-stigs.sh - Report-first STIG helper for firewall and RKE2 host settings.
+
+USAGE:
+  ./scripts/apply-stigs.sh [options]
+
+WORKFLOW:
+  1) Collects firewall and RKE2 STIG-relevant checks.
+  2) Prints a leadership-friendly compliance report.
+  3) Prompts to apply remediations unless --apply or --report-only is used.
+  4) Optionally prompts to run kubectl validations when RKE2 is running.
+
+OPTIONS:
+  --report-only        Report only; do not apply changes.
+  --apply              Apply remediations without prompting.
+  --dry-run, -n         Print commands without applying changes.
+  --restart-rke2        Restart rke2-server or rke2-agent after config changes.
+  --yes, -y             Auto-confirm prompts.
+  --non-interactive     Fail if a prompt would be required.
+  --image, -i           Golden image mode (apply + yes + non-interactive).
+  --help, -h            Show this help.
+
+EXAMPLES:
+  ./scripts/apply-stigs.sh --report-only
+  sudo ./scripts/apply-stigs.sh --apply
+  sudo ./scripts/apply-stigs.sh --apply --restart-rke2
+  sudo ./scripts/apply-stigs.sh --image
+
+NOTES:
+  - Run as root or with sudo available.
+  - Pre-run RKE2 settings are applied even if RKE2 is not running.
+  - Kubectl checks are optional and require cluster access.
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h)
+      show_help
+      exit 0
+      ;;
     -n|--dry-run)
       dry_run=true
       shift
@@ -37,7 +77,7 @@ while [[ $# -gt 0 ]]; do
       restart_rke2=true
       shift
       ;;
-    -image)
+    --image|-i)
       image_mode=true
       shift
       ;;
@@ -85,18 +125,18 @@ if [[ "${EUID:-0}" -ne 0 ]]; then
   fi
 fi
 
-install_firewalld() {
+install_ufw() {
   if command -v dnf >/dev/null 2>&1; then
-    run_cmd $SUDO dnf install -y firewalld
+    run_cmd $SUDO dnf install -y ufw
   elif command -v yum >/dev/null 2>&1; then
-    run_cmd $SUDO yum install -y firewalld
+    run_cmd $SUDO yum install -y ufw
   elif command -v apt-get >/dev/null 2>&1; then
     run_cmd $SUDO apt-get update
-    run_cmd $SUDO apt-get install -y firewalld
+    run_cmd $SUDO apt-get install -y ufw
   elif command -v zypper >/dev/null 2>&1; then
-    run_cmd $SUDO zypper --non-interactive install firewalld
+    run_cmd $SUDO zypper --non-interactive install ufw
   else
-    echo "No supported package manager found to install firewalld." >&2
+    echo "No supported package manager found to install ufw." >&2
     exit 1
   fi
 }
@@ -229,37 +269,30 @@ check_interface() {
   ip link show "$iface" >/dev/null 2>&1
 }
 
+ufw_is_active() {
+  ufw status | grep -q 'Status: active'
+}
+
 firewall_report() {
-  if ! check_command firewall-cmd; then
-    echo "firewall-cmd not found" >&2
+  if ! check_command ufw; then
+    echo "ufw not found" >&2
     return 1
   fi
-  if ! systemctl is-active --quiet firewalld; then
-    echo "firewalld not active" >&2
+  if ! ufw_is_active; then
+    echo "ufw not active" >&2
     return 1
   fi
   return 0
 }
 
 apply_firewall() {
-  if ! check_command firewall-cmd; then
-    echo "firewall-cmd not found. Installing firewalld..." >&2
-    install_firewalld
+  if ! check_command ufw; then
+    echo "ufw not found. Installing ufw..." >&2
+    install_ufw
   fi
 
   if ! check_command ip; then
     echo "ip not found. Install iproute2 first." >&2
-    exit 1
-  fi
-
-  if ! systemctl is-enabled --quiet firewalld; then
-    run_cmd $SUDO systemctl enable --now firewalld
-  fi
-  if ! systemctl is-active --quiet firewalld; then
-    run_cmd $SUDO systemctl start firewalld
-  fi
-  if ! systemctl is-active --quiet firewalld; then
-    echo "firewalld is not running after attempting to start it." >&2
     exit 1
   fi
 
@@ -281,29 +314,39 @@ apply_firewall() {
     exit 1
   fi
 
-  if ! firewall-cmd --get-zones | tr ' ' '\n' | grep -Fxq "DOMAIN"; then
-    run_cmd firewall-cmd --permanent --new-zone="DOMAIN"
+  run_cmd $SUDO ufw default deny incoming
+  run_cmd $SUDO ufw default deny outgoing
+  run_cmd $SUDO ufw allow out on ens33
+  run_cmd $SUDO ufw allow in on ens33 to any port 22 proto tcp
+  run_cmd $SUDO ufw allow in on ens33 to any port 443 proto tcp
+  run_cmd $SUDO ufw allow in on ens35 to any port 111 proto tcp
+  run_cmd $SUDO ufw allow in on ens35 to any port 111 proto udp
+  run_cmd $SUDO ufw allow in on ens35 to any port 2049 proto tcp
+  run_cmd $SUDO ufw allow in on ens35 to any port 2049 proto udp
+  run_cmd $SUDO ufw allow in on ens36 to any port 443 proto tcp
+
+  run_cmd $SUDO ufw route deny in on ens33 out on ens35
+  run_cmd $SUDO ufw route deny in on ens33 out on ens36
+  run_cmd $SUDO ufw route deny in on ens35 out on ens33
+  run_cmd $SUDO ufw route deny in on ens35 out on ens36
+  run_cmd $SUDO ufw route deny in on ens36 out on ens33
+  run_cmd $SUDO ufw route deny in on ens36 out on ens35
+
+  if ! ufw_is_active; then
+    run_cmd $SUDO ufw --force enable
   fi
-  if ! firewall-cmd --get-zones | tr ' ' '\n' | grep -Fxq "NFS"; then
-    run_cmd firewall-cmd --permanent --new-zone="NFS"
+
+  if is_rke2_running; then
+    if [[ "$RKE2_ROLE" == "server" ]]; then
+      run_cmd $SUDO ufw allow in on ens33 to any port 6443 proto tcp
+      run_cmd $SUDO ufw allow in on ens33 to any port 9345 proto tcp
+      run_cmd $SUDO ufw allow in on ens33 to any port 10250 proto tcp
+      run_cmd $SUDO ufw allow in on ens33 to any port 8472 proto udp
+    elif [[ "$RKE2_ROLE" == "agent" ]]; then
+      run_cmd $SUDO ufw allow in on ens33 to any port 10250 proto tcp
+      run_cmd $SUDO ufw allow in on ens33 to any port 8472 proto udp
+    fi
   fi
-  if ! firewall-cmd --get-zones | tr ' ' '\n' | grep -Fxq "SEGMENT1"; then
-    run_cmd firewall-cmd --permanent --new-zone="SEGMENT1"
-  fi
-
-  run_cmd firewall-cmd --permanent --zone=DOMAIN --add-interface=ens33
-  run_cmd firewall-cmd --permanent --zone=NFS --add-interface=ens35
-  run_cmd firewall-cmd --permanent --zone=SEGMENT1 --add-interface=ens36
-
-  run_cmd firewall-cmd --permanent --zone=DOMAIN --set-target=DROP
-  run_cmd firewall-cmd --permanent --zone=NFS --set-target=DROP
-  run_cmd firewall-cmd --permanent --zone=SEGMENT1 --set-target=DROP
-
-  run_cmd firewall-cmd --permanent --zone=DOMAIN --add-masquerade
-  run_cmd firewall-cmd --permanent --zone=NFS --remove-masquerade
-  run_cmd firewall-cmd --permanent --zone=SEGMENT1 --remove-masquerade
-
-  run_cmd firewall-cmd --reload
 }
 
 apply_rke2_config() {
@@ -335,23 +378,15 @@ apply_rke2_config() {
 }
 
 report_firewall_controls() {
-  if ! check_command firewall-cmd; then
-    add_result "HOST-FW" "Host firewall installed and active" "FAIL" "firewall-cmd not found"
+  if ! check_command ufw; then
+    add_result "HOST-FW" "Host firewall installed and active" "FAIL" "ufw not found"
     return
   fi
-  if ! systemctl is-active --quiet firewalld; then
-    add_result "HOST-FW" "Host firewall installed and active" "FAIL" "firewalld is not running"
+  if ! ufw_is_active; then
+    add_result "HOST-FW" "Host firewall installed and active" "FAIL" "ufw not active"
     return
   fi
-  add_result "HOST-FW" "Host firewall installed and active" "PASS" "firewalld running"
-
-  local zones
-  zones=$(firewall-cmd --get-active-zones || true)
-  if echo "$zones" | grep -q "DOMAIN" && echo "$zones" | grep -q "NFS" && echo "$zones" | grep -q "SEGMENT1"; then
-    add_result "HOST-FW-ZONES" "Firewall zones DOMAIN/NFS/SEGMENT1 active" "PASS" "active zones present"
-  else
-    add_result "HOST-FW-ZONES" "Firewall zones DOMAIN/NFS/SEGMENT1 active" "FAIL" "active zones missing"
-  fi
+  add_result "HOST-FW" "Host firewall installed and active" "PASS" "ufw active"
 }
 
 report_rke2_controls() {
@@ -621,14 +656,8 @@ fi
 if firewall_report; then
   echo ""
   echo "Firewall status:"
-  firewall-cmd --state
-  echo ""
-  echo "Active zones:"
-  firewall-cmd --get-active-zones
-  echo ""
-  echo "Zones detail:"
-  firewall-cmd --list-all-zones
+  ufw status verbose
 else
   echo ""
-  echo "warning: firewalld is not running; skipping report" >&2
+  echo "warning: ufw is not running; skipping report" >&2
 fi

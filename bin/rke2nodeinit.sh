@@ -4676,7 +4676,7 @@ install_rke2_prereqs() {
   log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq net-tools make skopeo
+    ebtables openssl tar gzip zstd jq net-tools make skopeo ufw
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
@@ -4684,7 +4684,7 @@ install_rke2_prereqs() {
  # check_swap
  # check_networkmanager
  # check_iptables
- # check_ufw
+  check_ufw
 
 }
 
