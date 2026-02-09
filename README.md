@@ -21,6 +21,7 @@
   - [Network Configuration Strategy](#network-configuration-strategy)
   - [Logging \& Observability](#logging--observability)
   - [Safety Controls \& Idempotency](#safety-controls--idempotency)
+  - [STIG Hardening Helper](#stig-hardening-helper)
   - [Generated Files \& Directory Layout](#generated-files--directory-layout)
   - [Verification \& Troubleshooting](#verification--troubleshooting)
   - [Maintenance \& Rollback Tips](#maintenance--rollback-tips)
@@ -152,6 +153,12 @@ flowchart TD
 | `airgap` | Offline template | Runs `image` but powers off instead of rebooting, ideal for VM templating |
 
 Each action honors both CLI flags and YAML values. When both are provided, YAML values take precedence and are logged accordingly.
+
+---
+
+## STIG Hardening Helper
+
+The repository includes a STIG helper script and guidance for firewall zoning and RKE2 host-side checks. See [docs/STIG-README.md](docs/STIG-README.md) for the workflow, report output, and example commands, including the `-image` golden template mode.
 
 ---
 
