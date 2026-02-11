@@ -198,6 +198,8 @@ SHA256_FILE="sha256sum-$ARCH.txt"
 # tarball of the hardened-cni image (for air-gapped staging). When empty,
 # the image will not be fetched automatically.
 HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
+# Optional override for the chart tag that should be pre-staged.
+HARDENED_CNI_EXPECTED_TAG="${HARDENED_CNI_EXPECTED_TAG:-}"
 # Basename used for saved artifact (operator can override by setting
 # HARDENED_CNI_BN in the environment if desired).
 HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
@@ -2050,13 +2052,14 @@ PY
   rm -f "$tmp_dest" || true
   local skopeo_log
   skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
+  local dest_ref="rancher/hardened-cni-plugins:${chosen}"
   log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
   # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
   if command -v timeout >/dev/null 2>&1; then
-    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
     rc=$?
   else
-    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$chosen" >>"$skopeo_log" 2>&1
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
     rc=$?
   fi
   if [[ $rc -ne 0 ]]; then
@@ -2070,7 +2073,7 @@ PY
     rm -f "$tmp_dest" || true
     return 1
   fi
-  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest"
+  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest ($dest_ref)"
   # Move into final location atomically (mv will overwrite existing file)
   mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
     log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
@@ -2111,6 +2114,125 @@ PY
   fi
 
   log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: resolve_hardened_cni_chart_tag
+# Purpose : Discover the hardened-cni-plugins tag referenced by installed charts.
+# Returns : Prints tag or returns 1 if not found.
+# ------------------------------------------------------------------------------
+resolve_hardened_cni_chart_tag() {
+  local -a dirs=(
+    "/var/lib/rancher/rke2/server/manifests"
+    "/var/lib/rancher/rke2/agent/manifests"
+  )
+  local dir match tag
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    match=$(grep -Rho --include '*.yaml' 'hardened-cni-plugins:[^"[:space:]]\+' "$dir" 2>/dev/null | head -n 1 || true)
+    if [[ -n "$match" ]]; then
+      tag="${match##*:}"
+      tag="${tag%%\"*}"
+      if [[ -n "$tag" && "$tag" != *"@"* ]]; then
+        printf '%s' "$tag"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: get_hardened_cni_tar_ref
+# Purpose : Read the RepoTag for hardened-cni-plugins from a tarball.
+# Returns : Prints full repo:tag when found.
+# ------------------------------------------------------------------------------
+get_hardened_cni_tar_ref() {
+  local tarball="$1"
+  [[ -f "$tarball" ]] || return 1
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$tarball" <<'PY'
+import json
+import sys
+import tarfile
+
+tarball = sys.argv[1]
+try:
+    with tarfile.open(tarball, "r") as tf:
+        fh = tf.extractfile("manifest.json")
+        if not fh:
+            raise SystemExit(1)
+        data = json.load(fh)
+    tags = []
+    for entry in data:
+        tags.extend(entry.get("RepoTags") or [])
+    for tag in tags:
+        if "hardened-cni-plugins" in tag:
+            print(tag)
+            raise SystemExit
+    if tags:
+        print(tags[0])
+except Exception:
+    pass
+PY
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_hardened_cni_chart_tag_ready
+# Purpose : Ensure the chart-referenced hardened-cni tag is available in the
+#           images directory tarball for offline bootstrap.
+# Returns : Always returns 0 (best-effort).
+# ------------------------------------------------------------------------------
+ensure_hardened_cni_chart_tag_ready() {
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local tarball="$images_dir/$HARDENED_CNI_BN"
+
+  local expected="${HARDENED_CNI_EXPECTED_TAG:-${HARDENED_CNI_TAG:-}}"
+  if [[ -z "$expected" ]]; then
+    expected="$(resolve_hardened_cni_chart_tag || true)"
+  fi
+  if [[ -z "$expected" ]]; then
+    log INFO "No hardened-cni chart tag detected; skipping tag normalization"
+    return 0
+  fi
+
+  if [[ ! -f "$tarball" ]]; then
+    log INFO "hardened-cni tarball not found in $images_dir; fetching chart tag $expected"
+    cache_hardened_cni_skopeo "$expected" || return 0
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+      local tmpc_img="$images_dir/.tmp-${HARDENED_CNI_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
+      mv -T "$tmpc_img" "$tarball"
+      log INFO "Staged $HARDENED_CNI_BN into $images_dir"
+    fi
+    return 0
+  fi
+
+  local current_ref
+  current_ref="$(get_hardened_cni_tar_ref "$tarball" || true)"
+  if [[ -z "$current_ref" ]]; then
+    log WARN "Unable to read hardened-cni tag from $tarball"
+    return 0
+  fi
+
+  local current_tag="${current_ref##*:}"
+  if [[ "$current_tag" == "$expected" ]]; then
+    log INFO "hardened-cni tarball already matches chart tag: $expected"
+    return 0
+  fi
+
+  log INFO "hardened-cni tag mismatch (have '$current_tag', need '$expected'); fetching correct tag"
+  cache_hardened_cni_skopeo "$expected" || return 0
+  if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+    local tmpc_img="$images_dir/.tmp-${HARDENED_CNI_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
+    mv -T "$tmpc_img" "$tarball"
+    log INFO "Updated hardened-cni tarball in $images_dir to tag $expected"
+  fi
   return 0
 }
 
@@ -6354,6 +6476,11 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
     mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
     log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
+
+    local tmpc_img="$IMAGES_DIR/.tmp-${HARDENED_CNI_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
+    mv -T "$tmpc_img" "$IMAGES_DIR/$HARDENED_CNI_BN"
+    log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
@@ -8087,6 +8214,8 @@ action_server() {
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
+
+    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-server service"
@@ -8465,6 +8594,8 @@ action_agent() {
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
+
+    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 agent from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-agent service"
@@ -8866,6 +8997,8 @@ action_add_server() {
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
+
+    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-server service"
