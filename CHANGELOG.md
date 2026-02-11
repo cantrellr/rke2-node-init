@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--enable-fips` flag to enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds during installation.
+- `PRO_TOKEN` environment variable support to attach Ubuntu Pro when FIPS enablement is requested.
+
+### Changed
+
+- Hardened CNI handling now fetches the exact chart tag and stages the archive into the RKE2 images directory to avoid mismatched pulls.
+
 ### Added - Phase 5: Advanced Error Handling & Metrics Dashboard (November 2025)
 
 - **Trap-Based Error Handling** (7 functions):

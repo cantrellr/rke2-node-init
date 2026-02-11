@@ -4,6 +4,7 @@ Hardened CNI HTTP Download
 The script supports staging an upstream `hardened-cni-plugins` tarball via HTTP(S) for air-gapped installs. To enable this, set the `HARDENED_CNI_URL` environment variable (or provide it in your YAML) to a direct downloadable tarball URL.
 
 - The downloaded artifact is saved to the repository `DOWNLOADS_DIR` and its SHA256 is appended to the canonical manifest `sha256sum-<arch>.txt` so it participates in the same `sha256sum -c` verification performed during staging.
+- During `image`, the script stages a chart-matched `hardened-cni-plugins` tarball into `/var/lib/rancher/rke2/agent/images/` so offline installs do not attempt to pull a mismatched tag.
 - Example usage:
 
 ```bash
@@ -21,6 +22,12 @@ Skopeo mirroring & automatic tag selection
 	- If you set `HARDENED_CNI_TAG` (or pass an explicit tag to the helper), the script will use that tag.
 	- Otherwise the script will try to infer a compatible hardened-cni tag for the RKE2 version being staged.
 	- If that inference fails, the script selects the highest semver-like hardened-cni tag available on Docker Hub.
+
+Staging behavior
+----------------
+
+- The script resolves the hardened-cni tag expected by the chart and ensures the tarball staged in `/var/lib/rancher/rke2/agent/images/` matches that tag exactly.
+- The tarball is written as a docker-archive with the `rancher/hardened-cni-plugins:<tag>` reference, so no retagging is required at runtime.
 
 Environment variables:
 

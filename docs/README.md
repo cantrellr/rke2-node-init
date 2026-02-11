@@ -1,6 +1,6 @@
 # RKE2 Node Init - Documentation Index
 
-**Last Updated:** November 16, 2025  
+**Last Updated:** Unreleased  
 **Project Status:** Phases 1-5 Complete ✅
 
 ---
@@ -207,6 +207,12 @@ sudo /rke2/rke2-node-init/examples/phase5-demo.sh
 ---
 
 ## 🆕 Recent Updates
+
+### Unreleased
+
+- ✅ Documented `--enable-fips` and `PRO_TOKEN` requirements for Ubuntu Pro FIPS enablement
+- ✅ Documented hardened-cni chart-tag staging behavior for offline installs
+- ✅ Updated README, CHANGELOG, and ROADMAP entries for the latest changes
 
 ### November 16, 2025
 

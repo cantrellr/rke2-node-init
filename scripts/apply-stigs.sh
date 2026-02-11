@@ -319,6 +319,20 @@ ufw_is_active() {
   ufw status | grep -q 'Status: active'
 }
 
+ensure_ufw_ipv6_disabled() {
+  local ufw_defaults="/etc/default/ufw"
+  if [[ ! -f "$ufw_defaults" ]]; then
+    run_cmd $SUDO sh -c "printf '%s\n' 'IPV6=no' > '$ufw_defaults'"
+    return
+  fi
+
+  if grep -Eq '^IPV6=' "$ufw_defaults"; then
+    run_cmd $SUDO sed -i 's/^IPV6=.*/IPV6=no/' "$ufw_defaults"
+  else
+    run_cmd $SUDO sh -c "printf '\nIPV6=no\n' >> '$ufw_defaults'"
+  fi
+}
+
 firewall_report() {
   if ! check_command ufw; then
     echo "ufw not found" >&2
@@ -361,6 +375,8 @@ apply_firewall() {
     exit 1
   fi
 
+  ensure_ufw_ipv6_disabled
+
   run_cmd $SUDO ufw default deny incoming
   run_cmd $SUDO ufw default deny outgoing
   run_cmd $SUDO ufw allow out on ens33
@@ -382,6 +398,8 @@ apply_firewall() {
   if ! ufw_is_active; then
     run_cmd $SUDO ufw --force enable
   fi
+
+  run_cmd $SUDO ufw reload
 
   if is_rke2_running; then
     if [[ "$RKE2_ROLE" == "server" ]]; then

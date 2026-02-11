@@ -177,6 +177,8 @@ BOOT_SCRIPT_PATH="/usr/local/bin/rke2-boot.sh"
 BOOT_SERVICE_PATH="/etc/systemd/system/rke2-boot.service"
 NODE_NAME=""
 ACTION_ARGS=()
+ENABLE_FIPS=0               # --enable-fips turns on OS FIPS (Ubuntu Pro) and uses FIPS RKE2 builds
+FIPS_REBOOT_REQUIRED=0
 
 # Custom CA context (populated from site defaults or YAML when provided)
 CUSTOM_CA_ROOT_CRT=""
@@ -848,6 +850,101 @@ install_dependencies_interactive() {
   echo "All dependencies installed successfully!"
   echo ""
   return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: is_fips_enabled
+# Purpose : Check whether the kernel is running in FIPS mode.
+# ------------------------------------------------------------------------------
+is_fips_enabled() {
+  [[ -f /proc/sys/crypto/fips_enabled ]] && [[ "$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)" == "1" ]]
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_fips_os_enabled
+# Purpose : Enable OS FIPS on Ubuntu using Ubuntu Pro (fips-updates).
+# Returns : 0 if already enabled or enabled successfully, 1 if reboot required,
+#           2 if FIPS could not be enabled.
+# ------------------------------------------------------------------------------
+ensure_fips_os_enabled() {
+  if is_fips_enabled; then
+    log_info "OS FIPS mode already enabled"
+    return 0
+  fi
+
+  local os_id
+  os_id=$(detect_os || true)
+  if [[ "$os_id" != "ubuntu" ]]; then
+    log_error "FIPS auto-enable is only supported on Ubuntu via Ubuntu Pro"
+    return 2
+  fi
+
+  if ! command -v pro >/dev/null 2>&1; then
+    log_error "Ubuntu Pro client not found; cannot enable FIPS"
+    log_error "Install ubuntu-pro-client and attach a subscription"
+    return 2
+  fi
+
+  if pro status 2>/dev/null | grep -qi "not attached"; then
+    if [[ -z "${PRO_TOKEN:-}" ]]; then
+      log_error "Ubuntu Pro token missing. Set PRO_TOKEN to enable FIPS."
+      return 2
+    fi
+    log_info "Attaching Ubuntu Pro subscription"
+    if ! pro attach "$PRO_TOKEN" >>"$LOG_FILE" 2>&1; then
+      log_error "Failed to attach Ubuntu Pro subscription"
+      return 2
+    fi
+  fi
+
+  log_info "Enabling FIPS (fips-updates) via Ubuntu Pro"
+  if ! pro enable fips-updates >>"$LOG_FILE" 2>&1; then
+    log_error "Failed to enable fips-updates"
+    return 2
+  fi
+
+  FIPS_REBOOT_REQUIRED=1
+  log_warn "FIPS enabled. Reboot required before continuing."
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: normalize_rke2_fips_version
+# Purpose : Ensure RKE2_VERSION points at a FIPS build when FIPS is enabled.
+# ------------------------------------------------------------------------------
+normalize_rke2_fips_version() {
+  if [[ "${ENABLE_FIPS:-0}" -ne 1 ]]; then
+    return 0
+  fi
+
+  if [[ -z "${RKE2_VERSION:-}" ]]; then
+    return 0
+  fi
+
+  if [[ "$RKE2_VERSION" != *"fips"* ]]; then
+    RKE2_VERSION="${RKE2_VERSION}-fips"
+    log_info "Adjusted RKE2 version for FIPS build: $RKE2_VERSION"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_fips_before_install
+# Purpose : Ensure OS FIPS is enabled before RKE2 install when requested.
+# ------------------------------------------------------------------------------
+ensure_fips_before_install() {
+  if [[ "${ENABLE_FIPS:-0}" -ne 1 ]]; then
+    return 0
+  fi
+
+  local rc
+  ensure_fips_os_enabled
+  rc=$?
+  if [[ "$rc" == "1" ]]; then
+    prompt_reboot
+    exit 0
+  elif [[ "$rc" != "0" ]]; then
+    exit 2
+  fi
 }
 
 # ==============================================================================
@@ -1784,6 +1881,9 @@ OPTIONS:
                oneshot: Run once on first boot, then disable service
                persistent: Run on every boot (useful for testing)
   --vm-platform PLATFORM
+  --enable-fips
+               Enable OS FIPS mode (Ubuntu Pro) and use FIPS RKE2 builds
+               Requires PRO_TOKEN for automatic Ubuntu Pro attachment
                VM platform for boot detection: vmware, hyperv, virtualbox, or generic
                (default: auto-detect based on available tools)
 
@@ -6337,6 +6437,8 @@ cache_rke2_artifacts() {
     detect_latest_rke2_version   # populates RKE2_VERSION
   fi
 
+  normalize_rke2_fips_version
+
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
   local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
   local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
@@ -7909,6 +8011,8 @@ action_server() {
   metrics_increment "success"
   metrics_increment "site_defaults_loaded"
 
+  ensure_fips_before_install
+
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local -a NET_INTERFACES=()
@@ -8315,6 +8419,8 @@ action_agent() {
   load_site_defaults
   metrics_increment "site_defaults_loaded"
 
+  ensure_fips_before_install
+
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
@@ -8689,6 +8795,8 @@ action_add_server() {
   log_info "Loading site defaults..."
   load_site_defaults
   metrics_increment "site_defaults_loaded"
+
+  ensure_fips_before_install
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
@@ -9410,6 +9518,7 @@ while [[ $# -gt 0 ]]; do
       BOOT_SERVICE_MODE="${1#*=}"
       shift
       ;;
+    --enable-fips) ENABLE_FIPS=1; shift;;
     --vm-platform)
       if [[ -z "${2:-}" ]]; then
         echo "ERROR: --vm-platform requires an argument (vmware, hyperv, virtualbox, or generic)" >&2

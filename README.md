@@ -32,6 +32,7 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
+- **Hardened CNI Alignment** – Fetches the chart-expected `hardened-cni-plugins` tag and stages it into the RKE2 images directory for offline pulls.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
@@ -186,6 +187,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-y` | Auto-confirm prompts (reboots, legacy runtime cleanup) |
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
 | `--dry-push` | Simulate `push` without contacting the registry |
+| `--enable-fips` | Enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
@@ -281,7 +283,7 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 System locations used during installation:
 
 - `/opt/rke2/stage/` – cached artifacts for offline installer
-- `/var/lib/rancher/rke2/agent/images/` – pre-loaded image archive
+- `/var/lib/rancher/rke2/agent/images/` – pre-loaded image archive including the chart-matched `hardened-cni-plugins` tar when staged
 - `/etc/rancher/rke2/` – generated configs, registries YAML, saved join info
 - `/usr/local/share/ca-certificates/` – custom registry certificates
 - `/etc/netplan/99-rke-static.yaml` – authoritative static network config
@@ -318,6 +320,7 @@ The script honors several environment variables that can be set prior to executi
 | `AUTO_YES` | Set to `1` to auto-confirm prompts (same as `-y`) |
 | `DRY_PUSH` | Set to `1` to simulate registry pushes |
 | `NO_REBOOT` | Used internally by `action_airgap` to skip rebooting |
+| `PRO_TOKEN` | Ubuntu Pro token required for `--enable-fips` on Ubuntu |
 
 ---
 

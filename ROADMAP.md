@@ -1,6 +1,6 @@
 # 🗺️ RKE2 Node Init - Project Roadmap
 
-**Last Updated:** November 16, 2025  
+**Last Updated:** Unreleased  
 **Status:** Active Development - **Phases 1-5 Complete!** 🎉  
 **GitHub Issues:** [View All Issues](https://github.com/cantrellr/rke2-node-init/issues)
 
@@ -39,6 +39,13 @@
 - **Completed:** 6/12 (50%) - *Including Phases 1-4*
 - **In Progress:** 0/12
 - **Not Started:** 6/12
+
+---
+
+## 🆕 Recent Updates (Unreleased)
+
+- Hardened CNI staging now aligns to the chart-required tag to avoid offline pull mismatches.
+- Added `--enable-fips` flow for Ubuntu Pro FIPS enablement and FIPS RKE2 builds.
 
 ---
 
