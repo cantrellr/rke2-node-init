@@ -187,6 +187,9 @@ CUSTOM_CA_INT_CRT=""
 CUSTOM_CA_INT_KEY=""
 CUSTOM_CA_INSTALL_TO_OS_TRUST=1
 
+# Optional bootstrap token file used to validate custom CA presence.
+BOOTSTRAP_TOKEN_FILE=""
+
 # Track the CA file used when deriving full tokens so runs can archive it.
 AGENT_CA_CERT=""
 
@@ -200,8 +203,6 @@ SHA256_FILE="sha256sum-$ARCH.txt"
 # tarball of the hardened-cni image (for air-gapped staging). When empty,
 # the image will not be fetched automatically.
 HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
-# Optional override for the chart tag that should be pre-staged.
-HARDENED_CNI_EXPECTED_TAG="${HARDENED_CNI_EXPECTED_TAG:-}"
 # Basename used for saved artifact (operator can override by setting
 # HARDENED_CNI_BN in the environment if desired).
 HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
@@ -2214,125 +2215,6 @@ PY
   fi
 
   log INFO "skopeo mirrored hardened-cni -> $dest"
-  return 0
-}
-
-# ------------------------------------------------------------------------------
-# Function: resolve_hardened_cni_chart_tag
-# Purpose : Discover the hardened-cni-plugins tag referenced by installed charts.
-# Returns : Prints tag or returns 1 if not found.
-# ------------------------------------------------------------------------------
-resolve_hardened_cni_chart_tag() {
-  local -a dirs=(
-    "/var/lib/rancher/rke2/server/manifests"
-    "/var/lib/rancher/rke2/agent/manifests"
-  )
-  local dir match tag
-  for dir in "${dirs[@]}"; do
-    [[ -d "$dir" ]] || continue
-    match=$(grep -Rho --include '*.yaml' 'hardened-cni-plugins:[^"[:space:]]\+' "$dir" 2>/dev/null | head -n 1 || true)
-    if [[ -n "$match" ]]; then
-      tag="${match##*:}"
-      tag="${tag%%\"*}"
-      if [[ -n "$tag" && "$tag" != *"@"* ]]; then
-        printf '%s' "$tag"
-        return 0
-      fi
-    fi
-  done
-  return 1
-}
-
-# ------------------------------------------------------------------------------
-# Function: get_hardened_cni_tar_ref
-# Purpose : Read the RepoTag for hardened-cni-plugins from a tarball.
-# Returns : Prints full repo:tag when found.
-# ------------------------------------------------------------------------------
-get_hardened_cni_tar_ref() {
-  local tarball="$1"
-  [[ -f "$tarball" ]] || return 1
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 1
-  fi
-
-  python3 - "$tarball" <<'PY'
-import json
-import sys
-import tarfile
-
-tarball = sys.argv[1]
-try:
-    with tarfile.open(tarball, "r") as tf:
-        fh = tf.extractfile("manifest.json")
-        if not fh:
-            raise SystemExit(1)
-        data = json.load(fh)
-    tags = []
-    for entry in data:
-        tags.extend(entry.get("RepoTags") or [])
-    for tag in tags:
-        if "hardened-cni-plugins" in tag:
-            print(tag)
-            raise SystemExit
-    if tags:
-        print(tags[0])
-except Exception:
-    pass
-PY
-}
-
-# ------------------------------------------------------------------------------
-# Function: ensure_hardened_cni_chart_tag_ready
-# Purpose : Ensure the chart-referenced hardened-cni tag is available in the
-#           images directory tarball for offline bootstrap.
-# Returns : Always returns 0 (best-effort).
-# ------------------------------------------------------------------------------
-ensure_hardened_cni_chart_tag_ready() {
-  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
-  local tarball="$images_dir/$HARDENED_CNI_BN"
-
-  local expected="${HARDENED_CNI_EXPECTED_TAG:-${HARDENED_CNI_TAG:-}}"
-  if [[ -z "$expected" ]]; then
-    expected="$(resolve_hardened_cni_chart_tag || true)"
-  fi
-  if [[ -z "$expected" ]]; then
-    log INFO "No hardened-cni chart tag detected; skipping tag normalization"
-    return 0
-  fi
-
-  if [[ ! -f "$tarball" ]]; then
-    log INFO "hardened-cni tarball not found in $images_dir; fetching chart tag $expected"
-    cache_hardened_cni_skopeo "$expected" || return 0
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-      local tmpc_img="$images_dir/.tmp-${HARDENED_CNI_BN}.$$"
-      cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
-      mv -T "$tmpc_img" "$tarball"
-      log INFO "Staged $HARDENED_CNI_BN into $images_dir"
-    fi
-    return 0
-  fi
-
-  local current_ref
-  current_ref="$(get_hardened_cni_tar_ref "$tarball" || true)"
-  if [[ -z "$current_ref" ]]; then
-    log WARN "Unable to read hardened-cni tag from $tarball"
-    return 0
-  fi
-
-  local current_tag="${current_ref##*:}"
-  if [[ "$current_tag" == "$expected" ]]; then
-    log INFO "hardened-cni tarball already matches chart tag: $expected"
-    return 0
-  fi
-
-  log INFO "hardened-cni tag mismatch (have '$current_tag', need '$expected'); fetching correct tag"
-  cache_hardened_cni_skopeo "$expected" || return 0
-  if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-    local tmpc_img="$images_dir/.tmp-${HARDENED_CNI_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
-    mv -T "$tmpc_img" "$tarball"
-    log INFO "Updated hardened-cni tarball in $images_dir to tag $expected"
-  fi
   return 0
 }
 
@@ -5202,6 +5084,50 @@ is_cert_trusted_by_system_store() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: find_ca_cert_by_hash
+# Purpose : Locate a certificate whose SHA256(der) matches the provided hash.
+# Arguments:
+#   $1 - Expected SHA256 hash (hex, without colons)
+# Returns :
+#   Prints the path to the matching cert when found.
+# ------------------------------------------------------------------------------
+find_ca_cert_by_hash() {
+  local target_hash="$1"
+  [[ -n "$target_hash" ]] || return 1
+
+  local target_lc="${target_hash,,}"
+  local -a search_dirs=(
+    "/usr/local/share/ca-certificates"
+    "/etc/ssl/certs"
+  )
+
+  if [[ -n "${STAGE_DIR:-}" ]]; then
+    search_dirs+=("$STAGE_DIR/certs")
+  fi
+  if [[ -n "${DOWNLOADS_DIR:-}" ]]; then
+    search_dirs+=("$DOWNLOADS_DIR/certs")
+  fi
+
+  local dir candidate hash
+  shopt -s nullglob
+  for dir in "${search_dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for candidate in "$dir"/*.crt "$dir"/*.pem; do
+      [[ -f "$candidate" ]] || continue
+      hash=$(openssl x509 -outform der -in "$candidate" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')
+      if [[ -n "$hash" && "${hash,,}" == "$target_lc" ]]; then
+        shopt -u nullglob
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  done
+  shopt -u nullglob
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
 # Function: find_trusted_cluster_ca_certificate
 # Purpose : Search known certificate locations for an existing RKE2 cluster CA
 #           so join tokens can reuse it.
@@ -5799,6 +5725,8 @@ setup_custom_cluster_ca() {
   local TLS_DIR="/var/lib/rancher/rke2/server/tls"
   local GEN1="$STAGE_DIR/generate-custom-ca-certs.sh"
   local GEN2="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
+  local token_file="${BOOTSTRAP_TOKEN_FILE:-}"
+  local root_ca_reason=""
 
   # Optionally ensure OS trust (clients/servers on the host trust the root CA)
   local _bn=""
@@ -5813,8 +5741,30 @@ setup_custom_cluster_ca() {
       fi
     fi
   else
-    log WARN "Root CA not found; custom cluster CA will not be used."
-    return 0
+    if [[ -n "$token_file" && -f "$token_file" ]]; then
+      local token_line token_hash matched_cert
+      token_line="$(head -n 1 "$token_file" | tr -d '\r\n')"
+      if [[ "$token_line" =~ ^K10([0-9a-fA-F]{64}):: ]]; then
+        token_hash="${BASH_REMATCH[1]}"
+        matched_cert="$(find_ca_cert_by_hash "$token_hash" || true)"
+        if [[ -n "$matched_cert" ]]; then
+          ROOT_CRT="$matched_cert"
+          log INFO "Custom CA indicated by bootstrap token; matched trusted certificate at $ROOT_CRT"
+        else
+          root_ca_reason="Bootstrap token indicates custom CA ($token_hash) but no matching certificate found"
+        fi
+      else
+        root_ca_reason="Bootstrap token file does not include a CA hash"
+      fi
+    fi
+    if [[ ! -f "$ROOT_CRT" ]]; then
+      if [[ -n "$root_ca_reason" ]]; then
+        log WARN "$root_ca_reason; custom cluster CA will not be used."
+      else
+        log WARN "Root CA not found; custom cluster CA will not be used."
+      fi
+      return 0
+    fi
   fi
 
   # If the cluster CA already exists, don't overwrite
@@ -6060,7 +6010,8 @@ ensure_staged_artifacts() {
         # to verify that explicitly. Otherwise, we'll verify mapped_lines below
         # and treat image-like missing entries as covered by the consolidated tar.
         if grep -Fq "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE"; then
-          if (grep "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+          # Map manifest entry to actual path so sha256sum can find the file.
+          if (grep "$IMAGES_TAR" "$STAGE_DIR/$SHA256_FILE" | awk -v p="$images_tar_candidate" '{print $1 "  " p}' | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
             images_consolidated_verified=1
             log INFO "Consolidated images archive verified: $images_tar_candidate"
           else
@@ -6070,7 +6021,7 @@ ensure_staged_artifacts() {
           # No manifest line for consolidated tar in stage manifest; attempt to verify
           # it against downloads manifest if available
           if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" && $(grep -F "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | wc -l) -gt 0 ]]; then
-            if (grep "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
+            if (grep "$IMAGES_TAR" "$DOWNLOADS_DIR/$SHA256_FILE" | awk -v p="$images_tar_candidate" '{print $1 "  " p}' | sha256sum -c -) >>"$LOG_FILE" 2>&1; then
               images_consolidated_verified=1
               log INFO "Consolidated images archive verified via downloads manifest: $images_tar_candidate"
             else
@@ -6203,9 +6154,19 @@ ensure_staged_artifacts() {
         log INFO "  - $clean_img"
       done
       
-      # Check for CNI plugins image as representative sample of tarball completeness
+      # Check for CNI plugins image as representative sample of tarball completeness.
+      # If the hardened CNI image is staged separately, don't warn on absence here.
+      local hardened_cni_tar=""
+      for p in "$STAGE_DIR/$HARDENED_CNI_BN" "$DOWNLOADS_DIR/$HARDENED_CNI_BN"; do
+        if [[ -f "$p" ]]; then
+          hardened_cni_tar="$p"
+          break
+        fi
+      done
       if echo "$manifest" | grep -q "hardened-cni-plugins"; then
         log INFO "  ✓ Tarball verification passed: 'hardened-cni-plugins' present in manifest"
+      elif [[ -n "$hardened_cni_tar" ]]; then
+        log INFO "  ✓ Tarball verification: hardened-cni-plugins provided via separate archive $(basename "$hardened_cni_tar")"
       else
         log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
         log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
@@ -8161,6 +8122,7 @@ action_server() {
   metrics_increment "success"
   metrics_increment "hostname_set"
 
+  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
   log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
   metrics_increment "total"
@@ -8319,7 +8281,6 @@ action_server() {
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
 
-    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-server service"
@@ -8701,7 +8662,6 @@ action_agent() {
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
 
-    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 agent from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-agent service"
@@ -8944,6 +8904,7 @@ action_add_server() {
   metrics_increment "success"
   metrics_increment "hostname_set"
 
+  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
   log_info "Seeding custom cluster CA..."
   setup_custom_cluster_ca || true
   metrics_increment "total"
@@ -9106,7 +9067,6 @@ action_add_server() {
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
 
-    ensure_hardened_cni_chart_tag_ready
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
     log_info "DRY-RUN: Would enable rke2-server service"
