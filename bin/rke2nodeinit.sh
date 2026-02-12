@@ -203,6 +203,9 @@ SHA256_FILE="sha256sum-$ARCH.txt"
 # tarball of the hardened-cni image (for air-gapped staging). When empty,
 # the image will not be fetched automatically.
 HARDENED_CNI_URL="${HARDENED_CNI_URL:-}"
+# Require hardened-cni-plugins to be present for airgap image prep by default.
+# Set HARDENED_CNI_REQUIRED=0 to allow skipping in special cases.
+HARDENED_CNI_REQUIRED="${HARDENED_CNI_REQUIRED:-1}"
 # Basename used for saved artifact (operator can override by setting
 # HARDENED_CNI_BN in the environment if desired).
 HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
@@ -6481,6 +6484,16 @@ cache_rke2_artifacts() {
           log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
         fi
       fi
+    fi
+  fi
+
+  # Enforce hardened-cni availability when required (ensures offline Multus/CNI dependencies).
+  if [[ "${HARDENED_CNI_REQUIRED:-0}" != "0" ]]; then
+    if [[ ! -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+      log ERROR "Required hardened-cni-plugins artifact missing: $DOWNLOADS_DIR/$HARDENED_CNI_BN"
+      log ERROR "Remediation: install 'skopeo' for auto-mirroring or set HARDENED_CNI_URL to a direct tarball"
+      popd >/dev/null || true
+      return 4
     fi
   fi
 
