@@ -6529,7 +6529,11 @@ cache_rke2_artifacts() {
     if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
       log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
     else
-      log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+      if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+        log INFO "Unable to derive HARDENED_CNI_TAG from images tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
+      else
+        log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+      fi
     fi
   fi
 

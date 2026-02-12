@@ -38,4 +38,6 @@ Environment variables:
 Logs
 ----
 
+Tag-derivation note: missing tag extraction is logged as `INFO` when a local hardened-cni tar already exists, and as `WARN` when no local hardened-cni artifact is present.
+
 The script writes raw skopeo output to `logs/skopeo-hardened-cni-plugins-*.log` and includes a short tail of that output in the main run log on error to simplify debugging.
