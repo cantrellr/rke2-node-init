@@ -683,9 +683,11 @@ log_success() {
 #=============================================================================
 detect_os() {
   if [[ -f /etc/os-release ]]; then
-    # Source the file to get ID variable
-    . /etc/os-release
-    echo "${ID}"
+    # Parse ID without relying on sourced shell variables.
+    local os_id
+    os_id="$(grep -E '^ID=' /etc/os-release | head -n1 | cut -d= -f2 | tr -d '"')"
+    [[ -z "$os_id" ]] && os_id="unknown"
+    echo "$os_id"
     return 0
   else
     echo "unknown"
@@ -2064,6 +2066,75 @@ cache_hardened_cni_http() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: extract_hardened_cni_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-cni-plugins`.
+#
+# Notes:
+# - The RKE2 images bundle is the authoritative source for the exact image tags
+#   used by the release (including hardened-cni-plugins used by Multus).
+# - This helper supports .tar, .tar.gz/.tgz, and .tar.zst.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_cni_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  # Extract manifest.json from the images tarball into a temp file.
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  # Parse manifest.json to find hardened-cni-plugins RepoTags.
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            # Accept with or without registry prefix
+            if re.search(r'(^|/)rancher/hardened-cni-plugins:', rt):
+                # split on first ':' from the right to preserve registry ports
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    # Fallback: very simple extraction (best-effort)
+    tag=$(grep -oE 'rancher/hardened-cni-plugins:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-cni-plugins:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: cache_hardened_cni_skopeo
 # Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
 #           docker-archive tarball using `skopeo` (no daemon required). The
@@ -2085,38 +2156,21 @@ cache_hardened_cni_skopeo() {
 
   mkdir -p "$DOWNLOADS_DIR"
 
-  # Determine desired tag: prefer explicit, then RKE2_VERSION, then try to
-  # infer from downloaded images manifest, otherwise fall back to 'latest'.
+  # Determine desired tag:
+  #   1) explicit_tag (HARDENED_CNI_TAG)
+  #   2) extract the exact tag from the downloaded RKE2 images tarball
+  #   3) RKE2_VERSION (last-resort heuristic)
+  #
+  # The images tarball is the authoritative source for chart-bundled images.
   local desired_tag=""
   if [[ -n "$explicit_tag" ]]; then
     desired_tag="$explicit_tag"
-  elif [[ -n "${RKE2_VERSION:-}" ]]; then
+  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    desired_tag=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+  fi
+
+  if [[ -z "$desired_tag" && -n "${RKE2_VERSION:-}" ]]; then
     desired_tag="${RKE2_VERSION}"
-  else
-    # Try to infer from the images tar (if present in downloads)
-    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" && -x "$(command -v zstd || true)" ]]; then
-      # Extract manifest.json from tar.zst and search for rke2-runtime tags
-      local _manifest
-      _manifest=$(mktemp)
-      if zstd -d -c "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null | tar -Ox manifest.json > "$_manifest" 2>/dev/null; then
-        if command -v python3 >/dev/null 2>&1; then
-          desired_tag=$(python3 - <<PY 2>/dev/null
-import json,sys
-try:
-    j=json.load(open('$_manifest'))
-    for e in j:
-        for t in e.get('RepoTags',[]):
-            if 'rke2-runtime' in t:
-                print(t.split(':',1)[1])
-                raise SystemExit
-except Exception:
-    pass
-PY
-) || true
-        fi
-      fi
-      rm -f "$_manifest" || true
-    fi
   fi
 
   # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
@@ -2140,7 +2194,11 @@ PY
     chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
     rm -f "$_tfile" "$_hfile" || true
   fi
-  if [[ -z "$chosen" ]]; then
+  # If we have an authoritative tag from the images tarball (or explicit
+  # operator override), use it directly and skip remote tag selection.
+  if [[ -n "$desired_tag" ]]; then
+    chosen="$desired_tag"
+  elif [[ -z "$chosen" ]]; then
     chosen="latest"
   fi
 
@@ -2880,7 +2938,7 @@ sanitize_yaml() {
 # ------------------------------------------------------------------------------
 normalize_list_csv() {
   local v="$1"
-  v="${v#[}"; v="${v%]}"
+  v="${v#\[}"; v="${v%\]}"
   v="${v//\"/}"; v="${v//\'/}"
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
 }
@@ -3017,12 +3075,13 @@ format_inline_list() {
   local _raw="$1"
   [[ -z "$_raw" ]] && return
   local _clean
-  _clean="${_raw#[}"; _clean="${_clean%]}"
+  _clean="${_raw#\[}"; _clean="${_clean%\]}"
   _clean="${_clean//;/,}"
   local -a _items=()
-  IFS=',' read -r -a _tmp <<<"$_clean"
+  local -a _tmp_items=()
+  IFS=',' read -r -a _tmp_items <<<"$_clean"
   local _item
-  for _item in "${_tmp[@]}"; do
+  for _item in "${_tmp_items[@]}"; do
     _item="$(trim_whitespace "$_item")"
     [[ -n "$_item" ]] && _items+=("$_item")
   done
@@ -4419,8 +4478,8 @@ write_netplan_multi() {
   disable_cloud_init_net
   purge_old_netplan
 
-  local _tmp="/etc/netplan/99-rke-static.yaml"
-  : > "$_tmp"
+  local _netplan_tmp="/etc/netplan/99-rke-static.yaml"
+  : > "$_netplan_tmp"
 
   # Write netplan header
   {
@@ -4428,7 +4487,7 @@ write_netplan_multi() {
     echo "  version: 2"
     echo "  renderer: networkd"
     echo "  ethernets:"
-  } >> "$_tmp"
+  } >> "$_netplan_tmp"
 
   local _idx=0 _primary_nic="" _summary=""; local -a _ifaces=()
   local _entry
@@ -4538,7 +4597,7 @@ write_netplan_multi() {
       # Disable IPv6 on all interfaces
       echo "      accept-ra: false"
       echo "      link-local: []"
-    } >> "$_tmp"
+    } >> "$_netplan_tmp"
 
     local _desc="${_nic[ip]:-}${_nic[cidr]:+ (${_nic[cidr]})}"
     if [[ "$_dhcp" == "true" ]]; then
@@ -4557,8 +4616,8 @@ write_netplan_multi() {
   done
 
   export NETPLAN_LAST_NIC="$_primary_nic"
-  chmod 600 "$_tmp"
-  log INFO "Netplan written to $_tmp (primary=$_primary_nic; interfaces=${_summary})"
+  chmod 600 "$_netplan_tmp"
+  log INFO "Netplan written to $_netplan_tmp (primary=$_primary_nic; interfaces=${_summary})"
 
   if (( APPLY_NETPLAN_NOW )); then
     log INFO "Applying netplan immediately (--apply-netplan-now flag set)..."
@@ -6460,6 +6519,19 @@ cache_rke2_artifacts() {
     fi
   fi
   chmod +x install.sh || true
+
+  # If operator didn't set HARDENED_CNI_TAG, attempt to extract the exact
+  # `rancher/hardened-cni-plugins` tag from the downloaded RKE2 images tarball.
+  # This makes hardened-cni staging deterministic and aligned with the RKE2
+  # release (no "latest" drift).
+  if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
+      log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
+    else
+      log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+    fi
+  fi
 
   # Optionally download hardened-cni-plugins when configured. Prefer skopeo
   # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
