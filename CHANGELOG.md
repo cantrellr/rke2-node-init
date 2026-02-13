@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced default CNI permissions remediation timer cadence for faster Multus/Canal bootstrap convergence: `OnBootSec=10s`, `OnUnitActiveSec=15s`, `AccuracySec=5s` in `scripts/systemd/rke2-cni-perms.timer`.
+
 ## [1.2.0] - 2026-02-13
 
 ### Added
