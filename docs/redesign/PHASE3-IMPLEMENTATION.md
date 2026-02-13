@@ -38,7 +38,7 @@ Phase 3 Components (bin/rke2nodeinit.sh):
 │   ├── DRY_RUN=0
 │   ├── VERBOSE=0
 │   ├── QUIET=0
-│   └── SCRIPT_VERSION="1.0.0"
+│   └── SCRIPT_VERSION="0.9a"
 │
 ├── Help System (lines 206-558)
 │   ├── show_version()

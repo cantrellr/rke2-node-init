@@ -90,7 +90,7 @@ This directory contains example YAML configuration files for all `rke2nodeinit.s
 All configurations share these common fields:
 
 ```yaml
-apiVersion: rkeprep/v1      # Required: API version
+apiVersion: rkeprep/v2      # Required: API version
 kind: <ActionKind>           # Required: One of the supported kinds
 metadata:
   name: <unique-name>        # Required: Unique identifier

@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: preprod-vmware-image
@@ -7,6 +7,7 @@ spec:
   cni:
    - multus
    - canal
+  fixCNIPermissions: true
   rke2CNIVersion: v1.9.0-build20260116
   rke2MultusVersion: v4.2.3-build20260120
   registry: altregistry.dev.kube:8443

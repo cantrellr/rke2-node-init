@@ -86,6 +86,7 @@ Domain-specific guides:
 |----------|-------------|
 | **[CONFIG-YAML-TRANSFER-ANALYSIS.md](CONFIG-YAML-TRANSFER-ANALYSIS.md)** | YAML configuration migration analysis |
 | **[HARDENED_CNI.md](HARDENED_CNI.md)** | Hardened CNI plugin configuration |
+| **[STIG-README.md](STIG-README.md)** | STIG helper workflow and persistent Multus/Canal CNI permission remediation |
 | **[PR-0001-integrate-vuln-scanner.md](PR-0001-integrate-vuln-scanner.md)** | Vulnerability scanner integration |
 | **[README_STANDARDIZATION.md](README_STANDARDIZATION.md)** | Documentation standardization plan |
 
@@ -213,6 +214,7 @@ sudo /rke2/rke2-node-init/examples/phase5-demo.sh
 - ✅ Documented `--enable-fips` and `PRO_TOKEN` requirements for Ubuntu Pro FIPS enablement
 - ✅ Documented hardened-cni chart-tag staging behavior for offline installs
 - ✅ Updated README, CHANGELOG, and ROADMAP entries for the latest changes
+- ✅ Added persistent Multus/Canal CNI permission remediation guidance (service + timer)
 
 ### November 16, 2025
 

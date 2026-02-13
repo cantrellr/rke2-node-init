@@ -1,5 +1,5 @@
 ---
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: AgentConfig
 
 metadata:

@@ -12,7 +12,7 @@ on:
 
 jobs:
   validate:
-    name: Validate RKE2 Configs (rkeprep/v1)
+    name: Validate RKE2 Configs (rkeprep/v2)
     runs-on: ubuntu-latest
     
     steps:
@@ -34,7 +34,7 @@ jobs:
       - name: Find changed RKE2 config files
         id: find-files
         run: |
-          echo "Finding changed rkeprep/v1 configuration files..."
+          echo "Finding changed rkeprep/v2 configuration files..."
           
           # Find all changed YAML files that might be RKE2 configs
           if git rev-parse --verify origin/${{ github.base_ref }} >/dev/null 2>&1; then
@@ -44,7 +44,7 @@ jobs:
             all_changed=$(find . -name '*.yaml' -o -name '*.yml' | sed 's|^\./||' || true)
           fi
           
-          # Filter for files that contain apiVersion: rkeprep/v1
+          # Filter for files that contain apiVersion: rkeprep/v2
           # Exclude workflow files themselves (they contain the search string in grep patterns)
           changed_files=""
           for file in $all_changed; do
@@ -52,16 +52,16 @@ jobs:
             if [[ "$file" == .github/workflows/*.yml ]] || [[ "$file" == .github/workflows/*.yaml ]]; then
               continue
             fi
-            if [ -f "$file" ] && grep -q "apiVersion: rkeprep/v1" "$file" 2>/dev/null; then
+            if [ -f "$file" ] && grep -q "apiVersion: rkeprep/v2" "$file" 2>/dev/null; then
               changed_files="${changed_files}${file}"$'\n'
             fi
           done
           
           if [ -z "$changed_files" ]; then
-            echo "No rkeprep/v1 config files changed in this PR"
+            echo "No rkeprep/v2 config files changed in this PR"
             echo "has_files=false" >> $GITHUB_OUTPUT
           else
-            echo "Changed rkeprep/v1 configuration files:"
+            echo "Changed rkeprep/v2 configuration files:"
             echo "$changed_files" | sed 's/^/  - /'
             echo "has_files=true" >> $GITHUB_OUTPUT
             # Save to file for next step
@@ -135,8 +135,8 @@ jobs:
               kind=$(python3 /tmp/extract_field.py kind "$file" 2>/dev/null || echo "")
               
               # Validate apiVersion
-              if [ "$api_version" != "rkeprep/v1" ]; then
-                echo "  ✗ ERROR: Invalid apiVersion '$api_version' (expected: rkeprep/v1)"
+              if [ "$api_version" != "rkeprep/v2" ]; then
+                echo "  ✗ ERROR: Invalid apiVersion '$api_version' (expected: rkeprep/v2)"
                 exit_code=1
                 continue
               fi
@@ -354,7 +354,7 @@ jobs:
           echo "" >> validation-report.md
           echo "## Validation Steps" >> validation-report.md
           echo "- ✓ YAML syntax validation" >> validation-report.md
-          echo "- ✓ apiVersion: rkeprep/v1 validation" >> validation-report.md
+          echo "- ✓ apiVersion: rkeprep/v2 validation" >> validation-report.md
           echo "- ✓ kind field validation" >> validation-report.md
           echo "- ✓ Required fields check" >> validation-report.md
           echo "- ✓ Sensitive data scan" >> validation-report.md
@@ -376,5 +376,5 @@ jobs:
           echo "Validation Complete"
           echo "=================================="
           echo ""
-          echo "All rkeprep/v1 configuration files have been validated."
+          echo "All rkeprep/v2 configuration files have been validated."
           echo "Report artifact: rke2-config-validation-report"

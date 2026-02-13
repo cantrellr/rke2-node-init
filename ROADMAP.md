@@ -46,6 +46,8 @@
 
 - Hardened CNI staging now aligns to the chart-required tag to avoid offline pull mismatches.
 - Added `--enable-fips` flow for Ubuntu Pro FIPS enablement and FIPS RKE2 builds.
+- Added persistent Multus/Canal CNI permissions remediation assets (`fix-cni-perms.sh` + `rke2-cni-perms.service` + `rke2-cni-perms.timer`).
+- STIG remediation guidance now standardizes on timer-based CNI permissions enforcement for stable operation.
 
 ---
 
@@ -113,7 +115,7 @@
 - **Labels:** `P2`, `feature`
 - **Link:** [#43](https://github.com/cantrellr/rke2-node-init/issues/43)
 - **Deliverables:**
-  - JSON Schema for `apiVersion: rkeprep/v1`
+  - JSON Schema for `apiVersion: rkeprep/v2`
   - Validation function
   - IDE autocomplete support
 

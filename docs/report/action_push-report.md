@@ -32,7 +32,7 @@ This report provides a comprehensive technical analysis of the `action_push()` f
 ### YAML Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: registry-push-operation

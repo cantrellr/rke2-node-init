@@ -26,7 +26,7 @@ This report provides a comprehensive technical analysis of what the `rke2nodeini
 ### YAML Configuration: cotpa-image.yaml
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 rke2Version: v1.34.1+rke2r1
 registry: kuberegistry.k8.cantrellcloud.net:8443
@@ -1046,7 +1046,7 @@ sudo ./rke2nodeinit.sh -f test-server.yaml
 
 **First control plane node (init):**
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 clusterToken: <generated-token>
 clusterInit: true
@@ -1054,7 +1054,7 @@ clusterInit: true
 
 **Additional control plane nodes:**
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: AddServer
 clusterToken: <same-token>
 serverURL: https://first-control-plane:9345
@@ -1062,7 +1062,7 @@ serverURL: https://first-control-plane:9345
 
 **Worker nodes:**
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 clusterToken: <same-token>
 serverURL: https://control-plane:9345

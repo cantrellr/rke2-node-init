@@ -29,7 +29,7 @@
 
 ## Validation Steps
 - ✓ YAML syntax validation
-- ✓ apiVersion: rkeprep/v1 validation
+- ✓ apiVersion: rkeprep/v2 validation
 - ✓ kind field validation
 - ✓ Required fields check
 - ✓ Sensitive data scan

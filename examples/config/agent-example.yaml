@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: rke2-worker-01
@@ -64,7 +64,7 @@ spec:
 
 ---
 # Multi-interface worker node
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: rke2-worker-multi-01
@@ -115,7 +115,7 @@ spec:
 
 ---
 # GPU worker node
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: rke2-gpu-worker-01
@@ -158,7 +158,7 @@ spec:
 
 ---
 # Storage-focused worker node
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: rke2-storage-worker-01
@@ -195,7 +195,7 @@ spec:
 
 ---
 # Edge location worker
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: rke2-edge-worker-01
@@ -232,7 +232,7 @@ spec:
 
 ---
 # Minimal worker configuration
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: simple-worker

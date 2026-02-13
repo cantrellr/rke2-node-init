@@ -52,7 +52,7 @@
 | Connectivity | `image` requires Internet access for artifact acquisition. `push`, `server`, `agent`, `verify`, and `airgap` must run without Internet access |
 | Disk space | Several GB for RKE2 tarballs, images, SBOM data, and logs |
 | Optional tooling | [`syft`](https://github.com/anchore/syft) for SPDX SBOMs. Without it, nerdctl inspect metadata is produced |
-| External dependencies | Private registry endpoint, optional custom CA, and YAML configuration matching `apiVersion: rkeprep/v1` |
+| External dependencies | Private registry endpoint, optional custom CA, and YAML configuration matching `apiVersion: rkeprep/v2` |
 
 ---
 
@@ -64,7 +64,7 @@
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
-Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v1`) that centralizes inputs and secrets.
+Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v2`) that centralizes inputs and secrets.
 
 For strict offline clusters, provide complete image bundles for the selected CNI stack (for example `rke2-images-*.linux-amd64.tar.*` flavor archives in addition to the base `rke2-images.linux-amd64.tar.zst`). Staging only `hardened-cni-plugins` is not sufficient for Multus/Canal.
 
@@ -191,6 +191,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--enable-fips` | Enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds |
+| `--fix-cni-permissions` | During `image`, install/enable timer-based CNI permission remediation |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
@@ -203,10 +204,10 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 
 ## YAML Configuration Reference
 
-All manifests must set `apiVersion: rkeprep/v1` and `metadata.name`. The `kind` selects the action. Only relevant fields for each action are consumed; extra keys are ignored safely.
+All manifests must set `apiVersion: rkeprep/v2` and `metadata.name`. The `kind` selects the action. Only relevant fields for each action are consumed; extra keys are ignored safely.
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: prod-image
@@ -230,6 +231,7 @@ spec:
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
 - **Image prep:** `rke2Version`, `rke2CNIVersion`
+- **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
@@ -302,6 +304,7 @@ System locations used during installation:
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
 - When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.
+- If Multus fails with `cannot find valid master CNI config` while Canal is present, apply the persistent CNI permissions remediation documented in [docs/STIG-README.md](docs/STIG-README.md#persistent-cni-permissions-remediation-canal--multus).
 
 ---
 

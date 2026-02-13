@@ -717,7 +717,7 @@ sudo bin/rke2nodeinit.sh custom-ca -f custom-ca-config.yaml
 ### Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
   name: dc1manager-custom-ca

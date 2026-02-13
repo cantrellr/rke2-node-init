@@ -240,7 +240,7 @@ openssl x509 -in rke2registry-ca.crt -text -noout
 Create a YAML file (e.g., `rke2clusterCA.yaml`) to reference your CA:
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
   name: production-cluster-ca

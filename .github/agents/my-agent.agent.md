@@ -15,14 +15,14 @@ Key Features
 - **Certificate Management**: Comprehensive CA generation workflow with encrypted root keys, subordinate CA signing, and OpenSSL v3_ca extensions.
 - **Registry Mirroring**: Automatic image retagging, SBOM generation with syft, and push to private registries with authentication.
 - **Security Hardened**: set -Eeuo pipefail, root privilege enforcement, credential masking, input validation, and CRLF detection.
-- **YAML-Driven Configuration**: apiVersion: rkeprep/v1 with comprehensive spec options for all actions.
+- **YAML-Driven Configuration**: apiVersion: rkeprep/v2 with comprehensive spec options for all actions.
 - **Node Management**: Built-in kubectl integration for labeling and tainting nodes.
 - **Operational Transparency**: Timestamped logs, CLI spinners for long operations, and detailed error reporting with line numbers.
 
 Repository Structure
 --------------------
 ```
-bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v1.0.0)
+bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v0.9a)
 certs/                       - CA generation scripts and examples
   scripts/
     generate-root-ca.sh      - Encrypted root CA generation
@@ -161,7 +161,7 @@ This agent assists with the rke2-node-init automation framework, which prepares 
 ## Capabilities
 
 ### Configuration & Planning
-- Parse and validate `apiVersion: rkeprep/v1` YAML configurations
+- Parse and validate `apiVersion: rkeprep/v2` YAML configurations
 - Generate node-specific YAML templates for server, agent, and add-server actions
 - Design multi-interface networking configurations (static IP, DHCP, DNS, MTU, metrics)
 - Recommend secure configurations for air-gapped and offline deployments
@@ -212,7 +212,7 @@ This agent assists with the rke2-node-init automation framework, which prepares 
 
 The repository is organized for modular offline operations:
 
-**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v1.0.0)
+**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v0.9a)
 - 10 actions: image, push, server, add-server, agent, verify, airgap, label-node, taint-node, custom-ca
 - Multi-interface networking via spec.interfaces[] in YAML
 - 40+ reliability functions across 5 completed implementation phases

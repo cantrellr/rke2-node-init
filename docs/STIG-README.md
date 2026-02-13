@@ -138,3 +138,41 @@ Kubectl-dependent checks (optional):
 - RKE2 changes apply only when an rke2-server or rke2-agent service is detected.
 - kubectl validation checks are optional and depend on kubeconfig access.
 - On agent nodes, server-only controls are reported as NOT-APPLICABLE.
+
+## Persistent CNI Permissions Remediation (Canal + Multus)
+
+If Multus fails with `cannot find valid master CNI config` and `/etc/cni/net.d` was hardened to restrictive modes, install the persistent remediation below.
+
+For golden image workflows, this can also be enabled during `image` action by setting `spec.fixCNIPermissions: true` in YAML or using `--fix-cni-permissions` on the CLI.
+
+1) Install the remediation script:
+
+```bash
+sudo install -m 0755 scripts/fix-cni-perms.sh /usr/local/sbin/fix-cni-perms.sh
+```
+
+2) Install and enable the systemd units:
+
+```bash
+sudo install -m 0644 scripts/systemd/rke2-cni-perms.service /etc/systemd/system/rke2-cni-perms.service
+sudo install -m 0644 scripts/systemd/rke2-cni-perms.timer /etc/systemd/system/rke2-cni-perms.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now rke2-cni-perms.service rke2-cni-perms.timer
+```
+
+3) Verify:
+
+```bash
+sudo ls -ld /etc/cni/net.d
+sudo ls -l /etc/cni/net.d/10-canal.conflist /etc/cni/net.d/00-multus.conf
+kubectl -n kube-system get pods -l k8s-app=canal -o wide
+kubectl -n kube-system get pods -l app=rke2-multus -o wide
+```
+
+Expected permissions:
+
+- `/etc/cni/net.d` => `0755`
+- `10-canal.conflist` => `0644`
+- `00-multus.conf` => `0644`
+
+Security note: this remediation does not relax `calico-kubeconfig` to world-readable mode.

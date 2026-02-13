@@ -33,7 +33,7 @@ This analysis compares the architectural patterns, code organization, and design
 - **Primary Dependencies:** bash, python3 (optional), curl, apt-get, nerdctl/containerd
 
 **Architecture Strengths:**
-- ✅ Comprehensive YAML configuration support (`apiVersion: rkeprep/v1`)
+- ✅ Comprehensive YAML configuration support (`apiVersion: rkeprep/v2`)
 - ✅ Multi-interface networking with complex netplan generation
 - ✅ Custom CA integration with certificate chain management
 - ✅ Extensive validation and prerequisite checking
@@ -495,8 +495,8 @@ validate_yaml_schema() {
     # Check apiVersion
     local api
     api=$(yaml_get_api "$file")
-    [[ "$api" == "rkeprep/v1" ]] || {
-        log_error "Invalid apiVersion: $api (expected: rkeprep/v1)"
+    [[ "$api" == "rkeprep/v2" ]] || {
+        log_error "Invalid apiVersion: $api (expected: rkeprep/v2)"
         return 1
     }
     

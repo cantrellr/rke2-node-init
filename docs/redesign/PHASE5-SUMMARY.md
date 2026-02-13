@@ -362,7 +362,7 @@ metrics_dashboard_display "Deployment Complete"
     "degraded_operations": 2
   },
   "hostname": "server01",
-  "script_version": "1.0.0-phase5"
+  "script_version": "0.9a-phase5"
 }
 ```
 

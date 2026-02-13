@@ -56,7 +56,7 @@ esac
 #   - Node management: Label and taint nodes via kubectl integration
 #   - Offline-first design: All artifacts cached locally for air-gapped deployments
 #   - Progress indicators: Spinner feedback for long-running operations
-#   - YAML-driven configuration: apiVersion rkeprep/v1 with comprehensive spec options
+#   - YAML-driven configuration: apiVersion rkeprep/v2 with comprehensive spec options
 #
 # Major architectural improvements:
 #   - Multi-interface support via YAML spec.interfaces[] or --interface CLI args
@@ -77,7 +77,7 @@ esac
 #   - Credential masking in sanitized YAML output
 #   - Warning for default/example credentials
 #
-# YAML configuration (apiVersion: rkeprep/v1):
+# YAML configuration (apiVersion: rkeprep/v2):
 #   Supported kinds: Push, Image, Server, AddServer, Agent, Verify, Airgap, CustomCA
 #   Required: metadata.name for all configurations
 #   Multi-interface syntax:
@@ -92,7 +92,7 @@ esac
 #         dhcp4: true
 #
 # CLI flags:
-#   -f FILE               YAML config file (apiVersion: rkeprep/v1)
+#   -f FILE               YAML config file (apiVersion: rkeprep/v2)
 #   -v VERSION            RKE2 version tag (e.g., v1.34.1+rke2r1)
 #   -r REGISTRY           Private registry (host[/namespace])
 #   -u USER               Registry username
@@ -163,11 +163,12 @@ DRY_PUSH=0                  # --dry-push skips actual registry push
 DRY_RUN=0                   # --dry-run simulates write operations without making changes
 VERBOSE=0                   # --verbose enables detailed output
 QUIET=0                     # --quiet suppresses informational messages
-SCRIPT_VERSION="1.0.0"      # Script version
+SCRIPT_VERSION="0.9a"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
+FIX_CNI_PERMISSIONS=0       # --fix-cni-permissions installs/enables CNI permission remediation (image)
 BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
 BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
 BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
@@ -441,6 +442,8 @@ Optional Flags:
   -u USER       Registry username
   -p PASS       Registry password
   --load-images Load images into container runtime
+  --fix-cni-permissions
+               Install/enable CNI permission remediation (service + timer)
   --dry-run     Simulate preparation without making changes
   --verbose     Show detailed operation progress
   --quiet       Suppress detailed progress (show summary only)
@@ -452,6 +455,7 @@ YAML Structure:
     name: golden-image
   spec:
     rke2Version: v1.28.1+rke2r1
+    fixCNIPermissions: true
     rke2CNIVersion: v1.9.0-build20260116
     registry: registry.example.com/rke2
     registryUsername: admin
@@ -1827,7 +1831,7 @@ USAGE:
   sudo ./rke2nodeinit.sh [options] <action>
   sudo ./rke2nodeinit.sh <action> --help
 
-YAML KINDS (apiVersion: rkeprep/v1):
+YAML KINDS (apiVersion: rkeprep/v2):
   Push        - Push RKE2 images to private registry
   Image       - Prepare air-gapped base image (full prep + reboot)
   Airgap      - Same as Image but powers off instead of reboot (for VM templating)
@@ -1850,7 +1854,7 @@ ACTIONS (CLI):
   taint-node   - Apply Kubernetes taints to node (requires -n or --node-name)
 
 OPTIONS:
-  -f FILE      YAML config file (apiVersion: rkeprep/v1; kind selects action)
+  -f FILE      YAML config file (apiVersion: rkeprep/v2; kind selects action)
   -v VER       RKE2 version tag (e.g., v1.34.1+rke2r1). Auto-detects latest if omitted
   -r REG       Private registry (host[/namespace]), e.g., registry.example.com/rke2
   -u USER      Registry username for authentication
@@ -1877,6 +1881,10 @@ OPTIONS:
                container runtime (nerdctl/ctr). This is opt-in; by default
                images are left staged as a tarball on the node for air-gapped
                template workflows.
+  --fix-cni-permissions
+               Install and enable timer-based CNI permission remediation
+               (service + timer) during image preparation. Also supported via
+               YAML: spec.fixCNIPermissions: true
   --verify-layers
                Perform deep layer checksum verification of staged images
                tarball. Verifies individual layer SHA256 digests against
@@ -1901,7 +1909,7 @@ OPTIONS:
                (default: auto-detect based on available tools)
 
 MULTI-INTERFACE YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: Server
   metadata:
     name: ctrl01-server
@@ -1925,7 +1933,7 @@ MULTI-INTERFACE YAML EXAMPLE:
         dhcp4: true
 
 CUSTOM CA YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: CustomCA
   metadata:
     name: enterprise-ca
@@ -1937,7 +1945,7 @@ CUSTOM CA YAML EXAMPLE:
     installToOSTrust: true                    # default: true
 
 BOOT SERVICE YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: Image
   metadata:
     name: base-image
@@ -4290,6 +4298,72 @@ normalize_bool_value() {
   else
     printf '"%s"\n' "$lowered"
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: bool_value_is_true
+# Purpose : Interpret boolean-like values from CLI/YAML safely.
+# Arguments:
+#   $1 - Raw value
+# Returns :
+#   0 when value is true/1/yes/on, non-zero otherwise.
+# ------------------------------------------------------------------------------
+bool_value_is_true() {
+  local raw="${1:-}"
+  local v
+  v="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ ${v:0:1} == '"' && ${v: -1} == '"' ]]; then
+      v="${v:1:-1}"
+    elif [[ ${v:0:1} == "'" && ${v: -1} == "'" ]]; then
+      v="${v:1:-1}"
+    fi
+  fi
+
+  case "${v,,}" in
+    true|1|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_cni_permission_remediation
+# Purpose : Install and enable timer-based CNI permissions remediation used to
+#           prevent Multus startup failures when host CNI paths are hardened.
+# Arguments:
+#   None (uses REPO_ROOT and DRY_RUN globals)
+# Returns :
+#   0 on success, non-zero on failure.
+# ------------------------------------------------------------------------------
+install_cni_permission_remediation() {
+  local script_src="$REPO_ROOT/scripts/fix-cni-perms.sh"
+  local svc_src="$REPO_ROOT/scripts/systemd/rke2-cni-perms.service"
+  local timer_src="$REPO_ROOT/scripts/systemd/rke2-cni-perms.timer"
+
+  if [[ ! -f "$script_src" || ! -f "$svc_src" || ! -f "$timer_src" ]]; then
+    log_error "CNI remediation assets missing in repository"
+    log_error "Expected: $script_src, $svc_src, $timer_src"
+    return 1
+  fi
+
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "DRY-RUN: Would install /usr/local/sbin/fix-cni-perms.sh"
+    log_info "DRY-RUN: Would install systemd units rke2-cni-perms.service and rke2-cni-perms.timer"
+    log_info "DRY-RUN: Would run systemctl daemon-reload and enable --now service+timer"
+    return 0
+  fi
+
+  install -m 0755 "$script_src" /usr/local/sbin/fix-cni-perms.sh || return 1
+  install -m 0644 "$svc_src" /etc/systemd/system/rke2-cni-perms.service || return 1
+  install -m 0644 "$timer_src" /etc/systemd/system/rke2-cni-perms.timer || return 1
+
+  systemctl daemon-reload >>"$LOG_FILE" 2>&1 || return 1
+  systemctl disable --now rke2-cni-perms.path >>"$LOG_FILE" 2>&1 || true
+  systemctl reset-failed rke2-cni-perms.service rke2-cni-perms.timer >>"$LOG_FILE" 2>&1 || true
+  systemctl enable --now rke2-cni-perms.service rke2-cni-perms.timer >>"$LOG_FILE" 2>&1 || return 1
+
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -8348,6 +8422,7 @@ action_image() {
   local REQ_VER="${RKE2_VERSION:-}"
   local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
   local REQ_MULTUS_VER="${HARDENED_MULTUS_TAG:-}"
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
   local REG_HOST="${REGISTRY%%/*}"
@@ -8363,6 +8438,11 @@ action_image() {
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
     REQ_MULTUS_VER="${REQ_MULTUS_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2MultusVersion rke2MultusCniVersion rke2MultusCNIVersion || true)}"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if bool_value_is_true "$fix_cni_permissions_yaml"; then
+      fix_cni_permissions_enabled=1
+    fi
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
@@ -8402,6 +8482,7 @@ action_image() {
   log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
   log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
   log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
+  log_info "  FIX_CNI_PERMISSIONS: ${fix_cni_permissions_enabled}"
   log_info "  REGISTRY: ${REGISTRY:-<none>}"
   log_info "  REG_USER: ${REG_USER:-<none>}"
 
@@ -8600,6 +8681,25 @@ action_image() {
     fi
   else
     log_warn "Failed to install boot script; continuing without first-boot automation"
+  fi
+
+  # --- Optional: Enable CNI permission remediation ----------------------------
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Enabling CNI permission remediation (requested by YAML/CLI)"
+    if install_cni_permission_remediation; then
+      log_info "✓ CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_error "Failed to install/enable CNI permission remediation"
+      log_error "Remediation: verify scripts/fix-cni-perms.sh and scripts/systemd/* are present"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+  else
+    log_info "CNI permission remediation not requested (set spec.fixCNIPermissions: true or --fix-cni-permissions)"
   fi
 
   # --- SBOM and README generation --------------------------------------------
@@ -10822,6 +10922,7 @@ while [[ $# -gt 0 ]]; do
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
     --load-images) LOAD_IMAGES=1; shift;;
+    --fix-cni-permissions) FIX_CNI_PERMISSIONS=1; shift;;
     --verify-layers) VERIFY_LAYERS=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
@@ -10909,8 +11010,8 @@ if [[ -n "$CONFIG_FILE" ]]; then
   fi
   API="$(yaml_get_api "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  if [[ "$API" != "rkeprep/v1" ]]; then
-    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"; exit 5
+  if [[ "$API" != "rkeprep/v2" ]]; then
+    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v2)"; exit 5
   fi
   if [[ "$PRINT_CONFIG" -eq 1 ]]; then
     echo "----- Sanitized YAML -----"
