@@ -5064,6 +5064,48 @@ disable_boot_service() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: uninstall_boot_service_artifacts
+# Purpose : Remove boot automation systemd unit and script from the host.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SCRIPT_PATH)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+uninstall_boot_service_artifacts() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+
+  if systemctl list-unit-files "$service_name" >/dev/null 2>&1 || [[ -f "$BOOT_SERVICE_PATH" ]]; then
+    systemctl disable "$service_name" >>"$LOG_FILE" 2>&1 || true
+    systemctl stop "$service_name" >>"$LOG_FILE" 2>&1 || true
+    systemctl unmask "$service_name" >>"$LOG_FILE" 2>&1 || true
+  fi
+
+  if [[ -f "$BOOT_SERVICE_PATH" ]]; then
+    rm -f "$BOOT_SERVICE_PATH" || {
+      log ERROR "Failed to remove boot service unit: $BOOT_SERVICE_PATH"
+      return 1
+    }
+  fi
+
+  if [[ -f "$BOOT_SCRIPT_PATH" ]]; then
+    rm -f "$BOOT_SCRIPT_PATH" || {
+      log ERROR "Failed to remove boot script: $BOOT_SCRIPT_PATH"
+      return 1
+    }
+  fi
+
+  rm -f /var/lib/rke2-boot-complete || true
+
+  if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
+    log WARN "systemctl daemon-reload failed after boot artifact removal"
+  fi
+
+  log INFO "Boot service/script artifacts removed (if present)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: detect_latest_rke2_version
 # Purpose : Query GitHub for the most recent RKE2 release tag when the operator
 #           does not supply an explicit version. The result populates the global
@@ -8597,6 +8639,12 @@ action_image() {
   local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
+  local cni_plugins_csv=""
+  local system_default_registry=""
+  local boot_enabled_cfg="false"
+  local boot_yaml_path_cfg=""
+  local boot_mode_cfg=""
+  local boot_platform_cfg=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
   
@@ -8618,13 +8666,28 @@ action_image() {
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
+    system_default_registry="$(yaml_spec_get_any "$CONFIG_FILE" system-default-registry systemDefaultRegistry || true)"
     REG_HOST="${REGISTRY%%/*}"
+
+    local -a _cni_plugins=()
+    local _cni
+    while IFS= read -r _cni; do
+      [[ -n "$_cni" ]] && _cni_plugins+=("$_cni")
+    done < <(collect_requested_cni_plugins "$CONFIG_FILE")
+    if [[ ${#_cni_plugins[@]} -gt 0 ]]; then
+      cni_plugins_csv="$(IFS=','; echo "${_cni_plugins[*]}")"
+    fi
     
     local d1 s1
     d1="$(yaml_spec_get "$CONFIG_FILE" defaultDns || true)"
     s1="$(yaml_spec_get "$CONFIG_FILE" defaultSearchDomains || true)"
     [[ -n "$d1" ]] && defaultDnsCsv="$(normalize_list_csv "$d1")"
     [[ -n "$s1" ]] && defaultSearchCsv="$(normalize_list_csv "$s1")"
+
+    boot_enabled_cfg="$(normalize_bool_value "$(yaml_spec_get "$CONFIG_FILE" bootService.enabled || echo false)")"
+    boot_yaml_path_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.yamlPath || true)"
+    boot_mode_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
+    boot_platform_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
     
     # Optional custom CA for registry/cluster
     CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
@@ -8654,9 +8717,17 @@ action_image() {
   log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
   log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
   log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
+  log_info "  CNI_PLUGINS: ${cni_plugins_csv:-<unset>}"
   log_info "  FIX_CNI_PERMISSIONS: ${fix_cni_permissions_enabled}"
   log_info "  REGISTRY: ${REGISTRY:-<none>}"
+  log_info "  SYSTEM_DEFAULT_REGISTRY: ${system_default_registry:-<unset>}"
   log_info "  REG_USER: ${REG_USER:-<none>}"
+  log_info "  DEFAULT_DNS: ${defaultDnsCsv:-<unset>}"
+  log_info "  DEFAULT_SEARCH_DOMAINS: ${defaultSearchCsv:-<unset>}"
+  log_info "  BOOT_SERVICE_ENABLED: ${boot_enabled_cfg}"
+  log_info "  BOOT_SERVICE_MODE: ${boot_mode_cfg:-<unset>}"
+  log_info "  BOOT_SERVICE_PLATFORM: ${boot_platform_cfg:-<unset>}"
+  log_info "  BOOT_SERVICE_YAML_PATH: ${boot_yaml_path_cfg:-<unset>}"
 
   # Resolve cert paths relative to script dir if not absolute
   [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
@@ -8797,7 +8868,7 @@ action_image() {
   metrics_increment "defaults_saved"
 
   # --- Boot Service Installation (optional enablement) -----------------------
-  log_info "Installing first-boot automation script and service..."
+  log_info "Reconciling first-boot automation script and service..."
   
   # Read boot service configuration from YAML if provided
   local boot_enabled="false"
@@ -8820,32 +8891,31 @@ action_image() {
   # Normalize boolean value
   boot_enabled="$(normalize_bool_value "$boot_enabled")"
   
-  # Install boot script and service (always install, conditionally enable)
-  if install_boot_script; then
-    if install_boot_service; then
-      log_info "✓ Boot script and service installed successfully"
-      log_info "  Script: $BOOT_SCRIPT_PATH"
-      log_info "  Service: $BOOT_SERVICE_PATH"
-      log_info "  Mode: $BOOT_SERVICE_MODE"
-      log_info "  Platform: $(detect_vm_platform)"
-      log_info "  Config search paths:"
-      for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-        log_info "    - $search_path"
-      done
-      log_info "  Target directory: $BOOT_TARGET_DIR"
-      
-      # Display Hyper-V specific requirements
-      if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-        log_info ""
-        log_info "Hyper-V Configuration Required:"
-        log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
-        log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-        log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
-        log_info "  Without this, the guest hostname will be used as fallback."
-      fi
-      
-      # Check if boot service should be enabled
-      if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+  # Install and enable boot service only when explicitly requested.
+  if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+    if install_boot_script; then
+      if install_boot_service; then
+        log_info "✓ Boot script and service installed successfully"
+        log_info "  Script: $BOOT_SCRIPT_PATH"
+        log_info "  Service: $BOOT_SERVICE_PATH"
+        log_info "  Mode: $BOOT_SERVICE_MODE"
+        log_info "  Platform: $(detect_vm_platform)"
+        log_info "  Config search paths:"
+        for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
+          log_info "    - $search_path"
+        done
+        log_info "  Target directory: $BOOT_TARGET_DIR"
+        
+        # Display Hyper-V specific requirements
+        if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+          log_info ""
+          log_info "Hyper-V Configuration Required:"
+          log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
+          log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+          log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
+          log_info "  Without this, the guest hostname will be used as fallback."
+        fi
+
         if enable_boot_service; then
           log_info "✓ Boot service ENABLED for next reboot"
           log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
@@ -8854,15 +8924,18 @@ action_image() {
           log_warn "Failed to enable boot service; install completed but service not active"
         fi
       else
-        log_info "Boot service installed but NOT enabled"
-        log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
-        log_info "Manual enable: systemctl enable $(basename "$BOOT_SERVICE_PATH")"
+        log_warn "Failed to install boot service; continuing without first-boot automation"
       fi
     else
-      log_warn "Failed to install boot service; continuing without first-boot automation"
+      log_warn "Failed to install boot script; continuing without first-boot automation"
     fi
   else
-    log_warn "Failed to install boot script; continuing without first-boot automation"
+    if ! uninstall_boot_service_artifacts; then
+      log_error "Boot service is disabled by configuration, but existing artifacts could not be removed"
+      exit 1
+    fi
+    log_info "Boot service not requested; boot script/service not installed"
+    log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
   fi
 
   # --- Optional: Enable CNI permission remediation ----------------------------
@@ -9433,7 +9506,7 @@ PY
   log_info ""
   
   # Check if boot service is enabled
-  local boot_status="disabled"
+  local boot_status="NOT INSTALLED"
   if systemctl is-enabled rke2-boot.service &>/dev/null; then
     boot_status="ENABLED - will run automatically on next boot"
   elif [[ -f "$BOOT_SERVICE_PATH" ]]; then
@@ -11189,6 +11262,9 @@ YAML_KIND=""
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
     log ERROR "YAML file not found: $CONFIG_FILE"; exit 5
+  fi
+  if [[ "$CONFIG_FILE" != /* ]]; then
+    CONFIG_FILE="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd -P)/$(basename -- "$CONFIG_FILE")"
   fi
   API="$(yaml_get_api "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
