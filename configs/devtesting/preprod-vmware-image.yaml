@@ -4,6 +4,9 @@ metadata:
   name: preprod-vmware-image
 spec:
   rke2Version: v1.35.0+rke2r3
+  cni:
+   - multus
+   - canal
   rke2CNIVersion: v1.9.0-build20260116
   registry: altregistry.dev.kube:8443
   system-default-registry: altregistry.dev.kube:8443

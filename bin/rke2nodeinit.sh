@@ -211,6 +211,12 @@ HARDENED_CNI_REQUIRED="${HARDENED_CNI_REQUIRED:-1}"
 HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
 HARDENED_CNI_FILE="$DOWNLOADS_DIR/$HARDENED_CNI_BN"
 
+# Optional explicit tag for rancher/hardened-multus-cni when Multus is used.
+HARDENED_MULTUS_TAG="${HARDENED_MULTUS_TAG:-}"
+# Basename used for saved hardened-multus-cni archive.
+HARDENED_MULTUS_BN="hardened-multus-cni-${ARCH}.tar"
+HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+
 # Logging - LOG_FILE will be set by initialize_action_context or defaults to timestamped name
 LOG_FILE=""
 
@@ -2137,6 +2143,65 @@ PY
 }
 
 # ------------------------------------------------------------------------------
+# Function: extract_hardened_multus_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-multus-cni`.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_multus_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            if re.search(r'(^|/)rancher/hardened-multus-cni:', rt):
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    tag=$(grep -oE 'rancher/hardened-multus-cni:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-multus-cni:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: normalize_image_reference
 # Purpose : Canonicalize container image references so comparisons are stable
 #           across equivalent forms (for example docker.io prefixes).
@@ -2715,6 +2780,124 @@ cache_hardened_cni_skopeo() {
   fi
 
   log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_multus_skopeo
+# Purpose : Mirror `rancher/hardened-multus-cni` into a local docker-archive
+#           tarball for offline Multus deployments.
+# Arguments:
+#   $1 - Optional explicit tag to use
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+cache_hardened_multus_skopeo() {
+  local explicit_tag="${1:-}"
+  local bn="${HARDENED_MULTUS_BN:-hardened-multus-cni-${ARCH}.tar}"
+  local repo="docker://rancher/hardened-multus-cni"
+
+  if ! command -v skopeo >/dev/null 2>&1; then
+    log WARN "skopeo not available; cannot mirror hardened-multus-cni"
+    return 2
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+
+  local desired_tag=""
+  local desired_tag_source=""
+  if [[ -n "$explicit_tag" ]]; then
+    desired_tag="$explicit_tag"
+    desired_tag_source="explicit"
+  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    desired_tag=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
+  fi
+
+  local chosen=""
+  if [[ -n "$desired_tag" ]]; then
+    chosen="$desired_tag"
+  else
+    local tags_json
+    tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+    if command -v python3 >/dev/null 2>&1; then
+      chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
+import json,re,sys
+raw=sys.argv[1]
+tags=[]
+try:
+    doc=json.loads(raw) if raw else {}
+    tags=doc.get("Tags") or []
+except Exception:
+    tags=[]
+
+def score(tag):
+    m=re.search(r'build(\d{8})$', tag)
+    b=int(m.group(1)) if m else -1
+    sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
+    if sv:
+        major,minor,patch=map(int,sv.groups())
+    else:
+        major=minor=patch=-1
+    return (b,major,minor,patch,tag)
+
+if not tags:
+    print("latest")
+else:
+    print(sorted(tags, key=score, reverse=True)[0])
+PY
+)
+    fi
+    [[ -n "$chosen" ]] || chosen="latest"
+  fi
+
+  log INFO "skopeo: chosen hardened-multus tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
+
+  local dest="$DOWNLOADS_DIR/$bn"
+  local tmp_dest
+  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+  rm -f "$tmp_dest" || true
+
+  local dest_ref="rancher/hardened-multus-cni:${chosen}"
+  local rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+  else
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+  fi
+
+  if [[ $rc -ne 0 ]]; then
+    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
+    rm -f "$tmp_dest" || true
+    return 1
+  fi
+
+  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+    log ERROR "Failed to move mirrored hardened-multus into place: $tmp_dest -> $dest"
+    rm -f "$tmp_dest" || true
+    return 1
+  }
+  chmod 0644 "$dest" || true
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      if [[ -f "$manifest" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-multus checksum to manifest: $manifest"
+    fi
+  fi
+
+  log INFO "skopeo mirrored hardened-multus -> $dest"
   return 0
 }
 
@@ -6095,6 +6278,7 @@ verify_required_cni_images_staged() {
       multus)
         required["rancher/hardened-multus-cni:"]=1
         labels["rancher/hardened-multus-cni:"]="Multus daemon image"
+        allow_separate["rancher/hardened-multus-cni:"]=1
         required["rancher/hardened-cni-plugins:"]=1
         labels["rancher/hardened-cni-plugins:"]="Multus hardened-cni plugins image"
         allow_separate["rancher/hardened-cni-plugins:"]=1
@@ -6133,8 +6317,17 @@ verify_required_cni_images_staged() {
     done
 
     if [[ $found -eq 0 && -n "${allow_separate[$pattern]:-}" ]]; then
-      if [[ -f "$images_dir/$HARDENED_CNI_BN" || -f "$STAGE_DIR/$HARDENED_CNI_BN" || -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $HARDENED_CNI_BN"
+      local separate_bn=""
+      case "$pattern" in
+        rancher/hardened-cni-plugins:)
+          separate_bn="$HARDENED_CNI_BN"
+          ;;
+        rancher/hardened-multus-cni:)
+          separate_bn="$HARDENED_MULTUS_BN"
+          ;;
+      esac
+      if [[ -n "$separate_bn" ]] && [[ -f "$images_dir/$separate_bn" || -f "$STAGE_DIR/$separate_bn" || -f "$DOWNLOADS_DIR/$separate_bn" ]]; then
+        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $separate_bn"
         found=1
       fi
     fi
@@ -7108,6 +7301,7 @@ fetch_rke2_ca_generator() {
 # ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
+  local requires_multus=0
 
   # If operator provided a local artifact path, prefer it and stage from there
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
@@ -7186,6 +7380,13 @@ cache_rke2_artifacts() {
   fi
   chmod +x install.sh || true
 
+  if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+    local _cni
+    while IFS= read -r _cni; do
+      [[ "$_cni" == "multus" ]] && requires_multus=1
+    done < <(collect_requested_cni_plugins "$CONFIG_FILE")
+  fi
+
   # If operator didn't set HARDENED_CNI_TAG, attempt to extract the exact
   # `rancher/hardened-cni-plugins` tag from the downloaded RKE2 images tarball.
   # This makes hardened-cni staging deterministic and aligned with the RKE2
@@ -7199,6 +7400,19 @@ cache_rke2_artifacts() {
         log INFO "Unable to derive HARDENED_CNI_TAG from images tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
       else
         log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+      fi
+    fi
+  fi
+
+  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
+      log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
+    else
+      if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+        log INFO "Unable to derive HARDENED_MULTUS_TAG from images tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+      else
+        log WARN "Unable to derive HARDENED_MULTUS_TAG from images tarball; hardened-multus mirroring will auto-select a tag"
       fi
     fi
   fi
@@ -7236,6 +7450,26 @@ cache_rke2_artifacts() {
       log ERROR "Remediation: install 'skopeo' for auto-mirroring or set HARDENED_CNI_URL to a direct tarball"
       popd >/dev/null || true
       return 4
+    fi
+  fi
+
+  if [[ $requires_multus -eq 1 ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_MULTUS_BN; skipping hardened-multus acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "Multus requested; attempting to mirror hardened-multus from Docker Hub"
+        if ! cache_hardened_multus_skopeo "${HARDENED_MULTUS_TAG:-}"; then
+          log ERROR "Failed to mirror hardened-multus-cni required for spec.cni=multus"
+          popd >/dev/null || true
+          return 6
+        fi
+      else
+        log ERROR "Multus requested but skopeo is not available to mirror hardened-multus-cni"
+        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_MULTUS_BN in $DOWNLOADS_DIR"
+        popd >/dev/null || true
+        return 6
+      fi
     fi
   fi
 
@@ -7332,6 +7566,18 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
     mv -T "$tmpc_img" "$IMAGES_DIR/$HARDENED_CNI_BN"
     log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
+  fi
+
+  if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+    local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
+    mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
+    log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
+
+    local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
+    mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
+    log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
@@ -8101,6 +8347,7 @@ action_image() {
   report_progress "Loading configuration" 2 8
   local REQ_VER="${RKE2_VERSION:-}"
   local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
+  local REQ_MULTUS_VER="${HARDENED_MULTUS_TAG:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
   local REG_HOST="${REGISTRY%%/*}"
@@ -8115,6 +8362,7 @@ action_image() {
     
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
+    REQ_MULTUS_VER="${REQ_MULTUS_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2MultusVersion rke2MultusCniVersion rke2MultusCNIVersion || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
@@ -8147,11 +8395,13 @@ action_image() {
 
   # Honor explicit hardened-cni tag from env/YAML for artifact mirroring.
   [[ -n "$REQ_CNI_VER" ]] && HARDENED_CNI_TAG="$REQ_CNI_VER"
+  [[ -n "$REQ_MULTUS_VER" ]] && HARDENED_MULTUS_TAG="$REQ_MULTUS_VER"
 
   # Log effective configuration after YAML/CLI/env resolution.
   log_info "Configuration:"
   log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
   log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
+  log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
   log_info "  REGISTRY: ${REGISTRY:-<none>}"
   log_info "  REG_USER: ${REG_USER:-<none>}"
 
