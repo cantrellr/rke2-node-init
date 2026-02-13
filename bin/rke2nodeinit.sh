@@ -8625,22 +8625,69 @@ action_image() {
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
   local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
   
-  # Build sbom_targets to include both downloads and files staged into STAGE_DIR
-  local sbom_targets=(
-    "$DOWNLOADS_DIR/$IMAGES_TAR"
-    "$DOWNLOADS_DIR/$RKE2_TARBALL"
-    "$DOWNLOADS_DIR/$SHA256_FILE"
-    "$DOWNLOADS_DIR/install.sh"
-    "$STAGE_DIR/$RKE2_TARBALL"
-    "$STAGE_DIR/$SHA256_FILE"
-    "$STAGE_DIR/sha256sum-${ARCH}.json"
-    "$STAGE_DIR/install.sh"
-  )
-  [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
-  [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
-  # Include hardened-cni artifact when present
-  [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
-  [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
+  # Build sbom_targets to include baseline artifacts plus any downloaded/staged
+  # image archives discovered at runtime.
+  local -a sbom_targets=()
+  local -A sbom_seen=()
+  add_sbom_target() {
+    local target="${1:-}"
+    [[ -n "$target" && -f "$target" ]] || return 0
+    [[ -n "${sbom_seen[$target]:-}" ]] && return 0
+    sbom_seen["$target"]=1
+    sbom_targets+=("$target")
+  }
+  archive_looks_like_image_bundle() {
+    local archive="${1:-}"
+    local manifest=""
+    local oci_refs=""
+
+    [[ -f "$archive" ]] || return 1
+
+    if [[ "$archive" == *.zst ]]; then
+      command -v zstd >/dev/null 2>&1 || return 1
+      manifest="$(zstd -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+    elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+      command -v gzip >/dev/null 2>&1 || return 1
+      manifest="$(gzip -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+    else
+      manifest="$(tar -xOf "$archive" manifest.json 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$manifest" ]] && echo "$manifest" | grep -q '"RepoTags"'; then
+      return 0
+    fi
+
+    oci_refs="$(parse_oci_image_index "$archive" 2>/dev/null || true)"
+    if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]]; then
+      return 0
+    fi
+
+    return 1
+  }
+
+  add_sbom_target "$DOWNLOADS_DIR/$IMAGES_TAR"
+  add_sbom_target "$DOWNLOADS_DIR/$RKE2_TARBALL"
+  add_sbom_target "$DOWNLOADS_DIR/$SHA256_FILE"
+  add_sbom_target "$DOWNLOADS_DIR/install.sh"
+  add_sbom_target "$STAGE_DIR/$RKE2_TARBALL"
+  add_sbom_target "$STAGE_DIR/$SHA256_FILE"
+  add_sbom_target "$STAGE_DIR/sha256sum-${ARCH}.json"
+  add_sbom_target "$STAGE_DIR/install.sh"
+  [[ -n "$full_tgz" ]] && add_sbom_target "$DOWNLOADS_DIR/$full_tgz"
+  [[ -n "$std_tgz"  ]] && add_sbom_target "$DOWNLOADS_DIR/$std_tgz"
+
+  # Include any downloaded/staged image archives (docker-archive or OCI-layout)
+  # so SBOM coverage stays current as image acquisition evolves.
+  local agent_images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local dir archive
+  for dir in "$DOWNLOADS_DIR" "$STAGE_DIR" "$agent_images_dir"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r archive; do
+      [[ -n "$archive" ]] || continue
+      archive_looks_like_image_bundle "$archive" || continue
+      add_sbom_target "$archive"
+    done < <(find "$dir" -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.zst' -o -name '*.tzst' -o -name '*.zst' \) | sort)
+  done
   
   # Load expected checksums from manifest file
   declare -A expected_hash=()

@@ -40,6 +40,17 @@ Environment variables:
 - `HARDENED_CNI_TAG`: explicit tag to use when mirroring with skopeo.
 - `HARDENED_CNI_REQUIRED`: set to `0` to allow skipping hardened-cni acquisition (default: required).
 
+List effective image tags
+-------------------------
+
+To enumerate the effective image:tag set for a host (base RKE2 list + chart-required list + staged archive RepoTags), run:
+
+```bash
+./scripts/list-effective-rke2-images.sh
+```
+
+This is useful when troubleshooting why an optional image (for example `hardened-multus-cni`) was selected via auto-fallback instead of derived from the base `rke2-images` bundle.
+
 Logs
 ----
 
