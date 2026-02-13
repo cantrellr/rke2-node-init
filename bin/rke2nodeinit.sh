@@ -2137,6 +2137,429 @@ PY
 }
 
 # ------------------------------------------------------------------------------
+# Function: normalize_image_reference
+# Purpose : Canonicalize container image references so comparisons are stable
+#           across equivalent forms (for example docker.io prefixes).
+# Arguments:
+#   $1 - Image reference
+# Returns:
+#   Prints normalized image reference (best-effort).
+# ------------------------------------------------------------------------------
+normalize_image_reference() {
+  local ref="${1:-}"
+  ref="${ref#docker://}"
+  ref="${ref#oci://}"
+  ref="${ref%\"}"
+  ref="${ref#\"}"
+  ref="${ref%\'}"
+  ref="${ref#\'}"
+  ref="${ref%%[[:space:]]*}"
+
+  # Normalize common registry aliases
+  ref="${ref#docker.io/}"
+  ref="${ref#index.docker.io/}"
+
+  printf '%s' "$ref"
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_chart_images_from_rke2_tarball
+# Purpose : Inspect the downloaded RKE2 tarball for chart/manifests content and
+#           extract image:tag references from Helm chart YAML files.
+# Arguments:
+#   $1 - Path to rke2.<suffix>.tar.gz
+#   $2 - Output file path for required image references
+# Returns:
+#   0 on success (including empty result), non-zero on extraction errors.
+# ------------------------------------------------------------------------------
+extract_chart_images_from_rke2_tarball() {
+  local rke2_tar="$1"
+  local out_file="$2"
+
+  [[ -f "$rke2_tar" ]] || return 1
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not available; cannot extract chart image references from $rke2_tar"
+    return 2
+  fi
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if ! python3 - "$rke2_tar" >"$tmp" <<'PY'; then
+import io
+import re
+import sys
+import tarfile
+
+tar_path = sys.argv[1]
+
+# image refs with explicit tag, with or without registry prefix
+img_re = re.compile(
+    r'(?<![A-Za-z0-9._/-])'
+    r'((?:[A-Za-z0-9.-]+(?::[0-9]+)?/)?'
+    r'[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+'
+    r':[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})'
+)
+
+refs = set()
+
+def scan_text(text: str) -> None:
+    for m in img_re.findall(text or ""):
+        ref = m.strip().strip('"\'')
+        if ref:
+            refs.add(ref)
+
+def is_chartish(name: str) -> bool:
+    n = name.lower()
+    return ("/charts/" in n) or ("/chart/" in n) or ("/manifests/" in n)
+
+def is_yaml(name: str) -> bool:
+    n = name.lower()
+    return n.endswith(".yaml") or n.endswith(".yml")
+
+try:
+    with tarfile.open(tar_path, mode="r:*") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name
+            if not is_chartish(name):
+                continue
+
+            low = name.lower()
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            payload = extracted.read()
+
+            if low.endswith(".tgz") or low.endswith(".tar.gz"):
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as nested:
+                        for nmember in nested.getmembers():
+                            if nmember.isfile() and is_yaml(nmember.name):
+                                nf = nested.extractfile(nmember)
+                                if nf is None:
+                                    continue
+                                ntext = nf.read().decode("utf-8", errors="ignore")
+                                scan_text(ntext)
+                except Exception:
+                    pass
+            elif is_yaml(low):
+                text = payload.decode("utf-8", errors="ignore")
+                scan_text(text)
+except Exception:
+    raise
+
+for ref in sorted(refs):
+    print(ref)
+PY
+    rm -f "$tmp" || true
+    return 4
+  fi
+
+  # normalize and deduplicate
+  : > "$out_file"
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    normalize_image_reference "$ref" >> "$out_file"
+    printf '\n' >> "$out_file"
+  done < "$tmp"
+  sort -u -o "$out_file" "$out_file"
+  rm -f "$tmp" || true
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_required_images_from_release_txt
+# Purpose : Use release-provided image list files as authoritative required
+#           image references when chart files are not discoverable in the
+#           downloaded RKE2 tarball.
+# Arguments:
+#   $1 - Base release URL (e.g. https://github.com/.../<version>)
+#   $2 - Checksum manifest filename (e.g. sha256sum-amd64.txt)
+#   $3 - Output file path for required image references
+# Returns:
+#   0 when at least one required image is written, non-zero otherwise.
+# ------------------------------------------------------------------------------
+extract_required_images_from_release_txt() {
+  local base_url="$1"
+  local sha_file="$2"
+  local out_file="$3"
+
+  local -a candidates=(
+    "rke2-images.linux-${ARCH}.txt"
+    "rke2-images-all.linux-${ARCH}.txt"
+  )
+
+  : > "$out_file"
+
+  local bn path
+  for bn in "${candidates[@]}"; do
+    path="$DOWNLOADS_DIR/$bn"
+
+    if [[ ! -f "$path" && -n "$base_url" && -f "$DOWNLOADS_DIR/$sha_file" ]]; then
+      if grep -qE "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" 2>/dev/null; then
+        log INFO "Downloading release image list: $bn"
+        if curl -Lf "$base_url/$bn" -o "$path" >>"$LOG_FILE" 2>&1; then
+          chmod 0644 "$path" || true
+        else
+          rm -f "$path" || true
+        fi
+      fi
+    fi
+
+    [[ -f "$path" ]] || continue
+
+    if command -v sha256sum >/dev/null 2>&1 && [[ -f "$DOWNLOADS_DIR/$sha_file" ]]; then
+      if grep -qE "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" 2>/dev/null; then
+        if ! (grep -E "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+          log WARN "Checksum verification failed for $bn; skipping this required-image source"
+          continue
+        fi
+      fi
+    fi
+
+    # Normalize and keep only explicit repo:tag references
+    local tmp
+    tmp=$(mktemp) || return 2
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$path"
+
+    if [[ -s "$tmp" ]]; then
+      sort -u "$tmp" > "$out_file"
+      rm -f "$tmp" || true
+      log INFO "Using release image list source: $bn"
+      return 0
+    fi
+    rm -f "$tmp" || true
+  done
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: list_images_in_archive
+# Purpose : Extract image references (RepoTags) from a docker-archive style
+#           images tarball for comparison against required chart images.
+# Arguments:
+#   $1 - Path to images tarball
+#   $2 - Output file path for image references
+# Returns:
+#   0 on success, non-zero on parse/extraction errors.
+# ------------------------------------------------------------------------------
+list_images_in_archive() {
+  local images_tar="$1"
+  local out_file="$2"
+  [[ -f "$images_tar" ]] || return 1
+
+  local manifest_tmp
+  manifest_tmp=$(mktemp) || return 2
+  local rc=0
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$manifest_tmp" || true
+      return 3
+    fi
+    zstd -dc "$images_tar" 2>/dev/null | tar -xO manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  elif [[ "$images_tar" == *.tar.gz || "$images_tar" == *.tgz || "$images_tar" == *.gz ]]; then
+    gzip -dc "$images_tar" 2>/dev/null | tar -xO manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  else
+    tar -xOf "$images_tar" manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  fi
+
+  : > "$out_file"
+  if [[ $rc -eq 0 && -s "$manifest_tmp" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$manifest_tmp" <<'PY' > "$out_file" 2>/dev/null || true
+import json, sys
+data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+refs = set()
+for entry in data:
+    for tag in (entry.get('RepoTags') or []):
+        if tag:
+            refs.add(tag)
+for ref in sorted(refs):
+    print(ref)
+PY
+    else
+      grep -oE '[A-Za-z0-9./_-]+:[A-Za-z0-9_.-]+' "$manifest_tmp" | sort -u > "$out_file" || true
+    fi
+  fi
+
+  # OCI layout fallback when manifest.json was not present
+  if [[ ! -s "$out_file" ]]; then
+    local oci_refs
+    oci_refs=$(parse_oci_image_index "$images_tar" 2>/dev/null || true)
+    if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]] && command -v python3 >/dev/null 2>&1; then
+      python3 - <<'PY' "$oci_refs" > "$out_file" 2>/dev/null || true
+import json, sys
+refs = json.loads(sys.argv[1])
+for ref in sorted(set(refs)):
+    if ref:
+        print(ref)
+PY
+    fi
+  fi
+
+  local norm_tmp
+  norm_tmp=$(mktemp) || { rm -f "$manifest_tmp" || true; return 4; }
+  : > "$norm_tmp"
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    normalize_image_reference "$ref" >> "$norm_tmp"
+    printf '\n' >> "$norm_tmp"
+  done < "$out_file"
+  sort -u "$norm_tmp" > "$out_file"
+
+  rm -f "$manifest_tmp" "$norm_tmp" || true
+  [[ -s "$out_file" ]] || return 5
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_missing_images_from_list
+# Purpose : Download missing images into supplemental docker-archive tar files.
+#           Prefers skopeo (daemonless), falls back to nerdctl/docker.
+# Arguments:
+#   $1 - File containing one image reference per line
+# Returns:
+#   0 on success, non-zero if any image could not be downloaded.
+# ------------------------------------------------------------------------------
+cache_missing_images_from_list() {
+  local list_file="$1"
+  [[ -f "$list_file" ]] || return 1
+
+  local cache_dir="$DOWNLOADS_DIR"
+  mkdir -p "$cache_dir"
+
+  local img safe bn dest failed=0 pulled=0
+  while IFS= read -r img; do
+    [[ -z "$img" ]] && continue
+    safe=$(echo "$img" | sed -E 's#[/:@]#_#g')
+    bn="rke2-images-missing-${safe}.tar"
+    dest="$cache_dir/$bn"
+
+    if [[ -f "$dest" ]]; then
+      log INFO "Missing image already cached: $bn"
+      continue
+    fi
+
+    if command -v skopeo >/dev/null 2>&1; then
+      if skopeo copy --all --dest-tls-verify=false "docker://$img" "docker-archive:${dest}:$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with skopeo: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with skopeo: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    if command -v nerdctl >/dev/null 2>&1; then
+      if nerdctl -n k8s.io pull "$img" >>"$LOG_FILE" 2>&1 && nerdctl -n k8s.io save -o "$dest" "$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with nerdctl: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with nerdctl: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+      if docker pull "$img" >>"$LOG_FILE" 2>&1 && docker save -o "$dest" "$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with docker: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with docker: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    log ERROR "No supported image client available to fetch missing image: $img (need skopeo, nerdctl, or docker)"
+    ((failed++))
+  done < "$list_file"
+
+  log INFO "Missing image cache summary: pulled=$pulled failed=$failed"
+  (( failed == 0 ))
+}
+
+# ------------------------------------------------------------------------------
+# Function: reconcile_chart_images_against_downloaded_bundle
+# Purpose : Derive chart-required images from RKE2 tarball, compare with image
+#           bundle contents, and download/cache any missing image references.
+# Arguments:
+#   None (uses DOWNLOADS_DIR globals)
+# Returns:
+#   0 when requirements are satisfied, non-zero on extraction/repair failure.
+# ------------------------------------------------------------------------------
+reconcile_chart_images_against_downloaded_bundle() {
+  local base_url="${1:-}"
+  local sha_file="${2:-$SHA256_FILE}"
+  local rke2_tar="$DOWNLOADS_DIR/$RKE2_TARBALL"
+  local images_tar="$DOWNLOADS_DIR/$IMAGES_TAR"
+  [[ -f "$rke2_tar" && -f "$images_tar" ]] || return 0
+
+  local required_file="$DOWNLOADS_DIR/chart-images-required.linux-${ARCH}.txt"
+  local present_file="$DOWNLOADS_DIR/chart-images-present.linux-${ARCH}.txt"
+  local missing_file="$DOWNLOADS_DIR/chart-images-missing.linux-${ARCH}.txt"
+
+  # Recompute reconciliation artifacts every run (avoid stale carry-over).
+  : > "$required_file"
+  : > "$missing_file"
+
+  extract_chart_images_from_rke2_tarball "$rke2_tar" "$required_file" || true
+
+  if [[ ! -s "$required_file" ]]; then
+    if ! extract_required_images_from_release_txt "$base_url" "$sha_file" "$required_file"; then
+      log WARN "No chart or release-list image references found; skipping chart-image reconciliation"
+      : > "$missing_file"
+      return 0
+    fi
+  fi
+
+  if ! list_images_in_archive "$images_tar" "$present_file"; then
+    log ERROR "Failed to inventory bundled images from $images_tar"
+    return 2
+  fi
+
+  comm -23 "$required_file" "$present_file" > "$missing_file" || true
+
+  local required_count present_count missing_count
+  required_count=$(wc -l < "$required_file" | awk '{print $1}')
+  present_count=$(wc -l < "$present_file" | awk '{print $1}')
+  missing_count=$(wc -l < "$missing_file" | awk '{print $1}')
+
+  log INFO "Chart image reconciliation: required=$required_count present=$present_count missing=$missing_count"
+
+  if (( missing_count == 0 )); then
+    log INFO "All chart-referenced images are present in $IMAGES_TAR"
+    return 0
+  fi
+
+  log WARN "Detected $missing_count chart-referenced image(s) absent from $IMAGES_TAR; caching supplemental archives"
+  if ! cache_missing_images_from_list "$missing_file"; then
+    log ERROR "Failed to cache one or more missing chart-referenced images"
+    return 3
+  fi
+
+  log INFO "Cached supplemental images for missing chart references. Manifest: $missing_file"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: cache_hardened_cni_skopeo
 # Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
 #           docker-archive tarball using `skopeo` (no daemon required). The
@@ -6841,6 +7264,15 @@ cache_rke2_artifacts() {
     fi
   fi
 
+  # Reconcile chart-referenced images from the RKE2 tarball against the
+  # downloaded images bundle and cache supplemental archives for anything
+  # missing from the base bundle.
+  if ! reconcile_chart_images_against_downloaded_bundle "$BASE_URL" "$SHA256_FILE"; then
+    log ERROR "Chart image reconciliation failed"
+    popd >/dev/null || true
+    return 5
+  fi
+
   popd >/dev/null
 
   # --- Stage artifacts for offline install -----------------------------------
@@ -6851,6 +7283,30 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
     mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
     log INFO "Staged ${IMAGES_TAR} into $IMAGES_DIR/"
+  fi
+
+  # Stage any supplemental chart-image archives downloaded during
+  # reconciliation for the current run only (based on current missing list).
+  local missing_manifest="$DOWNLOADS_DIR/chart-images-missing.linux-${ARCH}.txt"
+  if [[ -s "$missing_manifest" ]]; then
+    while IFS= read -r missing_ref; do
+      [[ -z "$missing_ref" ]] && continue
+      local safe supplemental_bn supplemental
+      safe=$(echo "$missing_ref" | sed -E 's#[/:@]#_#g')
+      supplemental_bn="rke2-images-missing-${safe}.tar"
+      supplemental="$DOWNLOADS_DIR/$supplemental_bn"
+      [[ -f "$supplemental" ]] || continue
+
+      local tmp_sup_img="$IMAGES_DIR/.tmp-${supplemental_bn}.$$"
+      cp -f "$supplemental" "$tmp_sup_img"
+      mv -T "$tmp_sup_img" "$IMAGES_DIR/$supplemental_bn"
+      log INFO "Staged supplemental image archive $supplemental_bn into $IMAGES_DIR"
+
+      local tmp_sup_stage="$STAGE_DIR/.tmp-${supplemental_bn}.$$"
+      cp -f "$supplemental" "$tmp_sup_stage"
+      mv -T "$tmp_sup_stage" "$STAGE_DIR/$supplemental_bn"
+      log INFO "Staged supplemental image archive $supplemental_bn into $STAGE_DIR"
+    done < "$missing_manifest"
   fi
 
   mkdir -p "$STAGE_DIR"
