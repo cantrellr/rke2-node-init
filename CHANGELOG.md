@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-02-13
+
 ### Added
 
 - `--enable-fips` flag to enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds during installation.
@@ -424,7 +426,7 @@ This symlink will be removed in a future release. Please update your scripts.
   flag is intentionally opt-in because it performs an exhaustive hash check
   of every image layer.
 
-## [0.9a] - TBD
+## [1.2.0] - TBD
 
 ### Initial Release
 - Full air-gapped RKE2 cluster deployment automation
@@ -435,6 +437,6 @@ This symlink will be removed in a future release. Please update your scripts.
 - Comprehensive logging and error handling
 - YAML-based configuration with CLI override support
 
-[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v0.9a...HEAD
+[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v1.2.0...HEAD
 [0.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.2.0
-[0.9a]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.9a
+[1.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v1.2.0

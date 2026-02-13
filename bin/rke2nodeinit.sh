@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.8b (multi-interface support)
+#       Version: 1.2.0 (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -163,7 +163,7 @@ DRY_PUSH=0                  # --dry-push skips actual registry push
 DRY_RUN=0                   # --dry-run simulates write operations without making changes
 VERBOSE=0                   # --verbose enables detailed output
 QUIET=0                     # --quiet suppresses informational messages
-SCRIPT_VERSION="0.9a"      # Script version
+SCRIPT_VERSION="1.2.0"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
@@ -245,7 +245,7 @@ RKE2 Node Initialization Script
 Version: ${SCRIPT_VERSION}
 Compatible with: RKE2 v1.24+
 Bash version: ${BASH_VERSION}
-Last updated: November 16, 2025
+Last updated: February 13, 2026
 
 Phase 1: Core utilities (19 functions)
 Phase 2: Action refactoring (4 actions)  

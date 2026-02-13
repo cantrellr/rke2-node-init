@@ -38,7 +38,7 @@ Phase 3 Components (bin/rke2nodeinit.sh):
 │   ├── DRY_RUN=0
 │   ├── VERBOSE=0
 │   ├── QUIET=0
-│   └── SCRIPT_VERSION="0.9a"
+│   └── SCRIPT_VERSION="1.2.0"
 │
 ├── Help System (lines 206-558)
 │   ├── show_version()
@@ -175,7 +175,7 @@ fi
 #### Output Example
 ```
 RKE2 Node Initialization Script
-Version: 1.0.0
+Version: 1.2.0
 Compatible with: RKE2 v1.24+
 
 Implementation Status:

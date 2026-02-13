@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
-**Script Version:** rke2nodeinit.sh v0.8b  
+**Script Version:** rke2nodeinit.sh v1.2.0  
 **Action Function:** action_push()  
 **Lines:** 6325-6516
 

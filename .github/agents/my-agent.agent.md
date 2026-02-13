@@ -22,7 +22,7 @@ Key Features
 Repository Structure
 --------------------
 ```
-bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v0.9a)
+bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v1.2.0)
 certs/                       - CA generation scripts and examples
   scripts/
     generate-root-ca.sh      - Encrypted root CA generation
@@ -212,7 +212,7 @@ This agent assists with the rke2-node-init automation framework, which prepares 
 
 The repository is organized for modular offline operations:
 
-**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v0.9a)
+**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v1.2.0)
 - 10 actions: image, push, server, add-server, agent, verify, airgap, label-node, taint-node, custom-ca
 - Multi-interface networking via spec.interfaces[] in YAML
 - 40+ reliability functions across 5 completed implementation phases
@@ -404,4 +404,4 @@ Repository: [rke2-node-init](https://github.com/cantrellr/rke2-node-init)
 
 **Last Updated**: November 21, 2025  
 **Agent Version**: 1.0.0  
-**Script Version**: 1.0.0 (Phases 1-5 complete, 9116 lines)
+**Script Version**: 1.2.0 (Phases 1-5 complete, 9116 lines)

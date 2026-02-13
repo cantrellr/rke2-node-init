@@ -5,7 +5,7 @@
 This document analyzes how the `rke2nodeinit.sh` script transfers configuration options from the input YAML file to the RKE2 `config.yaml` file, validates against official RKE2 documentation, and identifies gaps or issues.
 
 **Analysis Date:** November 11, 2025  
-**Script Version:** 0.8b  
+**Script Version:** 1.2.0  
 **RKE2 Documentation:** https://docs.rke2.io/reference/server_config and https://docs.rke2.io/reference/linux_agent_config
 
 ---

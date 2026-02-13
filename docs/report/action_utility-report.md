@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
-**Script Version:** rke2nodeinit.sh v0.8b  
+**Script Version:** rke2nodeinit.sh v1.2.0  
 **Actions Covered:** `verify`, `airgap`, `label-node`, `taint-node`, `custom-ca`, `list-images`  
 **Lines:** 8143-8549
 
