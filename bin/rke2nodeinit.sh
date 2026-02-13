@@ -446,6 +446,7 @@ YAML Structure:
     name: golden-image
   spec:
     rke2Version: v1.28.1+rke2r1
+    rke2CNIVersion: v1.9.0-build20260116
     registry: registry.example.com/rke2
     registryUsername: admin
     registryPassword: password
@@ -472,7 +473,7 @@ Exit Codes:
 
 Output Files:
   outputs/sbom/<name>-sbom.txt      - Text SBOM with verification
-  outputs/sbom/<name>-sbom.json     - JSON SBOM for tooling
+  outputs/sbom/<name>-sbom.json     - SPDX 2.3 JSON SBOM for tooling
   outputs/<name>/README.txt         - Human-readable summary
   /etc/rke2image.defaults           - Site defaults
 
@@ -1936,6 +1937,7 @@ BOOT SERVICE YAML EXAMPLE:
     name: base-image
   spec:
     rke2Version: v1.34.1+rke2r1
+    rke2CNIVersion: v1.9.0-build20260116
     bootService:
       enabled: true
       yamlPath: /root/server-config.yaml  # Config to run on first boot
@@ -2163,14 +2165,18 @@ cache_hardened_cni_skopeo() {
   #
   # The images tarball is the authoritative source for chart-bundled images.
   local desired_tag=""
+  local desired_tag_source=""
   if [[ -n "$explicit_tag" ]]; then
     desired_tag="$explicit_tag"
+    desired_tag_source="explicit"
   elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
     desired_tag=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
   fi
 
   if [[ -z "$desired_tag" && -n "${RKE2_VERSION:-}" ]]; then
     desired_tag="${RKE2_VERSION}"
+    desired_tag_source="rke2-version"
   fi
 
   # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
@@ -2196,13 +2202,23 @@ cache_hardened_cni_skopeo() {
   fi
   # If we have an authoritative tag from the images tarball (or explicit
   # operator override), use it directly and skip remote tag selection.
+  # For RKE2_VERSION fallback, only force direct override when the value is a
+  # valid OCI image tag (RKE2 release tags can include '+' which is invalid).
   if [[ -n "$desired_tag" ]]; then
-    chosen="$desired_tag"
+    if [[ "$desired_tag_source" == "rke2-version" ]]; then
+      if [[ "$desired_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        chosen="$desired_tag"
+      else
+        log WARN "RKE2 version '$desired_tag' is not OCI-tag-safe; using discovered hardened-cni tag '${chosen:-latest}'"
+      fi
+    else
+      chosen="$desired_tag"
+    fi
   elif [[ -z "$chosen" ]]; then
     chosen="latest"
   fi
 
-  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag')"
+  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag'; source='${desired_tag_source:-none}')"
 
   local dest="$DOWNLOADS_DIR/$bn"
   # Use docker-archive format (creates tar with manifest.json compatible with tooling)
@@ -5523,6 +5539,200 @@ except Exception as e:
 }
 
 # ------------------------------------------------------------------------------
+# Function: collect_requested_cni_plugins
+# Purpose : Resolve requested CNI plugins from YAML spec.cni as normalized
+#           lowercase values (supports list and scalar forms).
+# Arguments:
+#   $1 - Path to YAML config file
+# Returns :
+#   Prints one CNI name per line (unique). Returns 0 even when none are found.
+# ------------------------------------------------------------------------------
+collect_requested_cni_plugins() {
+  local file="$1"
+  local -a raw=()
+
+  [[ -n "$file" && -f "$file" ]] || return 0
+
+  while IFS= read -r item; do
+    [[ -n "$item" ]] && raw+=("$item")
+  done < <(yaml_spec_list_items "$file" "cni" 2>/dev/null || true)
+
+  if [[ ${#raw[@]} -eq 0 ]]; then
+    local scalar
+    scalar="$(yaml_spec_get "$file" cni 2>/dev/null || true)"
+    [[ -n "$scalar" ]] && raw+=("$scalar")
+  fi
+
+  local item norm token
+  local -A seen=()
+  for item in "${raw[@]}"; do
+    norm="$(echo "$item" | tr '[:upper:]' '[:lower:]' | tr -d '[]"' | tr -d '\r\n' | sed 's/[[:space:]]//g')"
+    [[ -z "$norm" ]] && continue
+    IFS=',' read -r -a _tokens <<< "$norm"
+    for token in "${_tokens[@]}"; do
+      [[ -z "$token" ]] && continue
+      if [[ -z "${seen[$token]:-}" ]]; then
+        seen[$token]=1
+        printf '%s\n' "$token"
+      fi
+    done
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Function: archive_contains_image_pattern
+# Purpose : Determine whether an image reference pattern exists in a staged
+#           images archive (Docker manifest, OCI index, or raw fallback scan).
+# Arguments:
+#   $1 - Archive path
+#   $2 - Pattern to search for (e.g., rancher/hardened-multus-cni:)
+# Returns : 0 if pattern found, 1 otherwise
+# ------------------------------------------------------------------------------
+archive_contains_image_pattern() {
+  local archive="$1"
+  local pattern="$2"
+  local manifest=""
+  local oci_refs=""
+
+  [[ -f "$archive" ]] || return 1
+
+  if [[ "$archive" == *.zst ]]; then
+    command -v zstd >/dev/null 2>&1 || return 1
+    manifest="$(zstd -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+  elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+    command -v gzip >/dev/null 2>&1 || return 1
+    manifest="$(gzip -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+  else
+    manifest="$(tar -xOf "$archive" manifest.json 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$manifest" ]] && echo "$manifest" | grep -q "$pattern"; then
+    return 0
+  fi
+
+  oci_refs="$(parse_oci_image_index "$archive" 2>/dev/null || true)"
+  if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]] && echo "$oci_refs" | grep -q "$pattern"; then
+    return 0
+  fi
+
+  if [[ "$archive" == *.zst ]]; then
+    zstd -dc "$archive" 2>/dev/null | grep -a -q "$pattern" && return 0 || true
+  elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+    gzip -dc "$archive" 2>/dev/null | grep -a -q "$pattern" && return 0 || true
+  else
+    grep -a -q "$pattern" "$archive" && return 0 || true
+  fi
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_required_cni_images_staged
+# Purpose : Ensure the staged image archives contain required images for the
+#           configured spec.cni plugins so offline nodes do not pull remotely.
+# Arguments:
+#   $1 - Optional YAML config path (defaults to CONFIG_FILE)
+# Returns : 0 on success, non-zero when required CNI images are missing
+# ------------------------------------------------------------------------------
+verify_required_cni_images_staged() {
+  local cfg="${1:-$CONFIG_FILE}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local -a cni_plugins=()
+  local -a bundles=()
+  local -A required=()
+  local -A labels=()
+  local -A allow_separate=()
+
+  if [[ -z "$cfg" || ! -f "$cfg" ]]; then
+    log_info "CNI image preflight skipped (no YAML config file provided)."
+    return 0
+  fi
+
+  while IFS= read -r cni; do
+    [[ -n "$cni" ]] && cni_plugins+=("$cni")
+  done < <(collect_requested_cni_plugins "$cfg")
+
+  if [[ ${#cni_plugins[@]} -eq 0 ]]; then
+    log_info "CNI image preflight skipped (spec.cni not set in $cfg)."
+    return 0
+  fi
+
+  while IFS= read -r archive; do
+    [[ -n "$archive" ]] && bundles+=("$archive")
+  done < <(find "$images_dir" -maxdepth 1 -type f -name "rke2-images*.tar*" | sort)
+
+  if [[ ${#bundles[@]} -eq 0 ]]; then
+    log_error "CNI image preflight failed: no staged rke2-images archives found in $images_dir"
+    return 1
+  fi
+
+  local cni
+  for cni in "${cni_plugins[@]}"; do
+    case "$cni" in
+      multus)
+        required["rancher/hardened-multus-cni:"]=1
+        labels["rancher/hardened-multus-cni:"]="Multus daemon image"
+        required["rancher/hardened-cni-plugins:"]=1
+        labels["rancher/hardened-cni-plugins:"]="Multus hardened-cni plugins image"
+        allow_separate["rancher/hardened-cni-plugins:"]=1
+        ;;
+      canal)
+        required["rancher/hardened-calico:"]=1
+        labels["rancher/hardened-calico:"]="Canal Calico image"
+        required["rancher/hardened-flannel:"]=1
+        labels["rancher/hardened-flannel:"]="Canal Flannel image"
+        ;;
+      cilium)
+        required["rancher/hardened-cilium:"]=1
+        labels["rancher/hardened-cilium:"]="Cilium image"
+        ;;
+      *)
+        log_info "CNI image preflight: no explicit image rules for cni='$cni' (skipping strict checks for this plugin)."
+        ;;
+    esac
+  done
+
+  if [[ ${#required[@]} -eq 0 ]]; then
+    log_info "CNI image preflight: no strict image requirements derived from spec.cni (${cni_plugins[*]})."
+    return 0
+  fi
+
+  log_info "Running CNI image preflight against staged archives in $images_dir"
+  local pattern archive found fail_count=0
+  for pattern in "${!required[@]}"; do
+    found=0
+    for archive in "${bundles[@]}"; do
+      if archive_contains_image_pattern "$archive" "$pattern"; then
+        log_info "  ✓ ${labels[$pattern]} found in $(basename "$archive")"
+        found=1
+        break
+      fi
+    done
+
+    if [[ $found -eq 0 && -n "${allow_separate[$pattern]:-}" ]]; then
+      if [[ -f "$images_dir/$HARDENED_CNI_BN" || -f "$STAGE_DIR/$HARDENED_CNI_BN" || -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $HARDENED_CNI_BN"
+        found=1
+      fi
+    fi
+
+    if [[ $found -eq 0 ]]; then
+      log_error "  ✗ Missing required CNI image reference pattern: $pattern (${labels[$pattern]:-required})"
+      ((fail_count++))
+    fi
+  done
+
+  if (( fail_count > 0 )); then
+    log_error "CNI image preflight failed ($fail_count missing requirement(s))."
+    log_error "Remediation: provide full CNI-specific image bundles (for example rke2-images-*.linux-${ARCH}.tar.*) via INSTALL_RKE2_ARTIFACT_PATH or stage them into $images_dir."
+    return 1
+  fi
+
+  log_info "CNI image preflight passed for spec.cni: ${cni_plugins[*]}"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: verify_image_layer_checksums
 # Purpose : Verify individual image layer checksums from tarball manifest against
 #           computed SHA256 digests. Provides deep integrity validation beyond
@@ -5853,6 +6063,39 @@ setup_custom_cluster_ca() {
     log WARN "No CA private key found (expected CUSTOM_CA_ROOT_KEY or CUSTOM_CA_INT_KEY). "\
              "Will continue with RKE2 self-signed cluster CA."
     return 0
+  fi
+
+  # Validate private key readability in non-interactive mode before invoking
+  # the CA helper. Encrypted keys can trigger passphrase prompts and fail in
+  # unattended runs.
+  local selected_key=""
+  if [[ -f "$ROOT_KEY" ]]; then
+    selected_key="$ROOT_KEY"
+  elif [[ -f "$INT_KEY" ]]; then
+    selected_key="$INT_KEY"
+  fi
+
+  if [[ -n "$selected_key" ]]; then
+    local key_header=""
+    key_header="$(head -n 1 "$selected_key" 2>/dev/null || true)"
+    if [[ "$key_header" == *"ENCRYPTED PRIVATE KEY"* ]]; then
+      log WARN "Detected encrypted private key: $selected_key"
+      log WARN "Custom CA helper runs non-interactively and may prompt for passphrase or fail."
+      log WARN "Remediation: provide an unencrypted key for automation, or run CA generation interactively."
+    fi
+
+    # Best-effort probe: verify key can be loaded without interactive input.
+    # Use timeout to avoid hanging if openssl still attempts to prompt.
+    local key_probe_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 3 openssl pkey -in "$selected_key" -noout -passin pass: >/dev/null 2>&1 || key_probe_rc=$?
+    else
+      openssl pkey -in "$selected_key" -noout -passin pass: >/dev/null 2>&1 || key_probe_rc=$?
+    fi
+    if [[ $key_probe_rc -ne 0 ]]; then
+      log WARN "Private key pre-check failed for $selected_key (openssl rc=$key_probe_rc)."
+      log WARN "If this key is passphrase-protected, helper may fail during custom CA generation."
+    fi
   fi
 
   # Find the generator script (prefer offline copy)
@@ -6689,6 +6932,32 @@ cache_rke2_artifacts() {
       fi
     done < "$DOWNLOADS_DIR/$SHA256_FILE"
 
+    # Add additional operational artifacts to metadata so SBOM verification
+    # can resolve path-specific checksums (including duplicate basenames across
+    # downloads/stage paths). We intentionally do not append these to the
+    # traditional sha256sum text manifest because duplicate basenames can make
+    # line-based verification ambiguous.
+    for extra in \
+      "$DOWNLOADS_DIR/install.sh|downloads" \
+      "$DOWNLOADS_DIR/$SHA256_FILE|downloads" \
+      "$STAGE_DIR/$SHA256_FILE|stage" \
+      "$STAGE_DIR/sha256sum-${ARCH}.json|stage"
+    do
+      epath="${extra%%|*}"
+      eloc="${extra##*|}"
+      [[ -f "$epath" ]] || continue
+      ebn="$(basename "$epath")"
+      esha="$(sha256sum "$epath" 2>/dev/null | awk '{print $1}' || true)"
+      [[ -n "$esha" ]] || continue
+      esize="$(stat -c%s "$epath" 2>/dev/null || echo 0)"
+      if [[ $first -eq 1 ]]; then
+        printf '  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$ebn" "$esha" "$esize" "$eloc" >> "$tmp_json"
+        first=0
+      else
+        printf ',\n  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$ebn" "$esha" "$esize" "$eloc" >> "$tmp_json"
+      fi
+    done
+
     # Wrap JSON entries into a structured object with metadata
     local out_json="$STAGE_DIR/sha256sum-${ARCH}.json"
     {
@@ -7349,11 +7618,7 @@ action_image() {
   # Initialize metrics for comprehensive tracking
   metrics_init "image_operation"
   
-  # Log configuration for audit trail
-  log_info "Configuration:"
-  log_info "  RKE2_VERSION: ${RKE2_VERSION:-<auto-detect>}"
-  log_info "  REGISTRY: ${REGISTRY:-<none>}"
-  log_info "  REG_USER: ${REG_USER:-<none>}"
+  # Log static directory context for audit trail (effective config is logged after YAML load)
   log_info "Directories:"
   log_info "  DOWNLOADS_DIR: $DOWNLOADS_DIR"
   log_info "  STAGE_DIR: $STAGE_DIR"
@@ -7379,6 +7644,7 @@ action_image() {
   # --- Read YAML configuration (optional) -----------------------------------
   report_progress "Loading configuration" 2 8
   local REQ_VER="${RKE2_VERSION:-}"
+  local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
   local REG_HOST="${REGISTRY%%/*}"
@@ -7392,6 +7658,7 @@ action_image() {
     fi
     
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
+    REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
@@ -7421,6 +7688,16 @@ action_image() {
 
   # Warn if using example default credentials
   warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+
+  # Honor explicit hardened-cni tag from env/YAML for artifact mirroring.
+  [[ -n "$REQ_CNI_VER" ]] && HARDENED_CNI_TAG="$REQ_CNI_VER"
+
+  # Log effective configuration after YAML/CLI/env resolution.
+  log_info "Configuration:"
+  log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
+  log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
+  log_info "  REGISTRY: ${REGISTRY:-<none>}"
+  log_info "  REG_USER: ${REG_USER:-<none>}"
 
   # Resolve cert paths relative to script dir if not absolute
   [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
@@ -7476,6 +7753,16 @@ action_image() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "artifacts_cached"
+
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "Required CNI images are not fully staged for offline deployment."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "cni_images_validated"
 
   # --- Optional: Load images into local runtime ------------------------------
   report_progress "Processing container images" 5 8
@@ -7630,6 +7917,7 @@ action_image() {
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
   
   # Build sbom_targets to include both downloads and files staged into STAGE_DIR
   local sbom_targets=(
@@ -7650,11 +7938,18 @@ action_image() {
   
   # Load expected checksums from manifest file
   declare -A expected_hash=()
+  declare -A expected_hash_path=()
+  local manifest_source="none"
+  local manifest_path=""
   if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
     log_info "Loading expected checksums from: $STAGE_DIR/$SHA256_FILE"
+    manifest_source="staged"
+    manifest_path="$STAGE_DIR/$SHA256_FILE"
     while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
   elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
     log_info "Loading expected checksums from: $DOWNLOADS_DIR/$SHA256_FILE"
+    manifest_source="downloads"
+    manifest_path="$DOWNLOADS_DIR/$SHA256_FILE"
     while read -r h fn; do
       expected_hash["$(basename "$fn")"]="$h"
     done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
@@ -7662,18 +7957,62 @@ action_image() {
     log_warn "No SHA256 manifest found - artifact verification will be limited"
   fi
 
+  # Load path-aware checksum metadata (preferred when duplicate basenames exist,
+  # e.g., downloads/sha256sum-<arch>.txt and stage/sha256sum-<arch>.txt).
+  local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+  if [[ -f "$staged_manifest_json" && -x "$(command -v python3 2>/dev/null || true)" ]]; then
+    while IFS='|' read -r _loc _name _sha; do
+      [[ -z "${_loc:-}" || -z "${_name:-}" || -z "${_sha:-}" ]] && continue
+      case "$_loc" in
+        stage) expected_hash_path["$STAGE_DIR/$_name"]="$_sha" ;;
+        images) expected_hash_path["${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}/$_name"]="$_sha" ;;
+        downloads) expected_hash_path["$DOWNLOADS_DIR/$_name"]="$_sha" ;;
+      esac
+    done < <(python3 - "$staged_manifest_json" <<'PY'
+import json,sys
+p=sys.argv[1]
+try:
+    data=json.load(open(p,'r',encoding='utf-8'))
+    for item in data.get('files',[]) or []:
+        loc=item.get('location')
+        name=item.get('name')
+        sha=item.get('sha256')
+        if loc and name and sha:
+            print(f"{loc}|{name}|{sha}")
+except Exception:
+    pass
+PY
+)
+  fi
+  if [[ -f "$staged_manifest_json" ]]; then
+    expected_hash_path["$staged_manifest_json"]="__SELF_GENERATED__"
+  fi
+
   # Prepare SBOM header with metadata
   {
-    echo "# RKE2 Image Prep SBOM"
+    echo "# RKE2 Image Prep SBOM (Human Review Report)"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo "Spec Name: ${sbom_name}"
+    echo "Action: image"
     echo "RKE2_VERSION: ${RKE2_VERSION:-<auto>}"
+    echo "HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto>}"
     echo "REGISTRY: ${REGISTRY:-<none>}"
+    echo "Manifest Source: ${manifest_source}"
+    echo "Manifest Path: ${manifest_path:-<none>}"
+    echo "SPDX JSON: ${sbom_json_file}"
     echo
-    echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
+    echo "# Verification Legend"
+    echo "#   yes          = checksum matches expected manifest value"
+    echo "#   NO (mismatch)= checksum differs from expected manifest value"
+    echo "#   no-manifest  = no expected checksum entry for artifact basename"
+    echo
+    echo "# Artifact inventory (machine-readable for tooling compatibility)"
+    echo "# path | size_bytes | sha256 | verified | mtime | source | expected_sha256 | verification_note"
   } > "$sbom_file"
 
   # Track verification metrics for security scoring
   local total_count=0 verified_count=0 manifest_present=0
+  local mismatch_count=0 no_manifest_count=0
   [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
 
   # Process each artifact and verify checksums
@@ -7682,31 +8021,59 @@ action_image() {
     [[ -f "$f" ]] || continue
     total_count=$((total_count + 1))
     
-    local fname size sha mtime src verified
+    local fname size sha mtime src verified expected_sha verification_note
     fname="$(basename "$f")"
     size=$(stat -c%s "$f" 2>/dev/null || echo 0)
     mtime=$(date -u -r "$f" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>")
     sha=$(sha256sum "$f" | awk '{print $1}')
     src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
     verified="unknown"
+    expected_sha="<none>"
+    verification_note=""
     
-    # Verify against expected checksum if available
-    if [[ -n "${expected_hash[$fname]:-}" ]]; then
-      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+    # Verify against expected checksum if available (prefer path-aware map,
+    # then fall back to basename map).
+    if [[ -n "${expected_hash_path[$f]:-}" ]]; then
+      expected_sha="${expected_hash_path[$f]}"
+      if [[ "${expected_hash_path[$f]}" == "__SELF_GENERATED__" ]]; then
         verified="yes"
+        verification_note="self-generated manifest metadata file"
+        verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
+      elif [[ "${expected_hash_path[$f]}" == "$sha" ]]; then
+        verified="yes"
+        verification_note="checksum matches path-aware manifest metadata"
         verified_count=$((verified_count + 1))
         metrics_increment "artifact_verified"
       else
         verified="NO (mismatch)"
+        verification_note="checksum mismatch (expected ${expected_hash_path[$f]})"
+        mismatch_count=$((mismatch_count + 1))
+        log_error "Checksum mismatch for $fname"
+        metrics_increment "artifact_mismatch"
+      fi
+    elif [[ -n "${expected_hash[$fname]:-}" ]]; then
+      expected_sha="${expected_hash[$fname]}"
+      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+        verified="yes"
+        verification_note="checksum matches manifest"
+        verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
+      else
+        verified="NO (mismatch)"
+        verification_note="checksum mismatch (expected ${expected_hash[$fname]})"
+        mismatch_count=$((mismatch_count + 1))
         log_error "Checksum mismatch for $fname"
         metrics_increment "artifact_mismatch"
       fi
     else
       verified="no-manifest"
+      verification_note="manifest entry missing for basename"
+      no_manifest_count=$((no_manifest_count + 1))
     fi
 
     # Append detailed entry to SBOM
-    printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
+    printf '%s | %s | %s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" "$expected_sha" "$verification_note" >> "$sbom_file"
     
     # Report verification status
     if [[ "$verified" == "yes" ]]; then
@@ -7736,8 +8103,27 @@ action_image() {
     echo "# Summary"
     echo "Artifacts discovered: $total_count"
     echo "Artifacts verified against manifest: $verified_count"
+    echo "Artifacts with checksum mismatch: $mismatch_count"
+    echo "Artifacts missing manifest entry: $no_manifest_count"
     echo "SHA256 manifest present: ${manifest_present}" 
     echo "security_score: ${security_score}"
+    echo
+    echo "# Human Review Findings"
+    if [[ $mismatch_count -eq 0 ]]; then
+      echo "- Integrity mismatches: none"
+    else
+      echo "- Integrity mismatches: ${mismatch_count} (investigate immediately)"
+    fi
+    if [[ $no_manifest_count -eq 0 ]]; then
+      echo "- Missing manifest coverage: none"
+    else
+      echo "- Missing manifest coverage: ${no_manifest_count} (review whether each file should be pinned)"
+    fi
+    echo "- Verified coverage: ${verified_count}/${total_count}"
+    echo "- Recommended reviewer checks:"
+    echo "  1. Confirm RKE2_VERSION/HARDENED_CNI_TAG align with approved release bill"
+    echo "  2. Confirm all required artifacts are either verified or intentionally unmanaged"
+    echo "  3. Cross-check SPDX JSON at ${sbom_json_file} for automation workflows"
   } >> "$sbom_file"
 
   log_success "SBOM created successfully"
@@ -7748,13 +8134,14 @@ action_image() {
   metrics_increment "success"
   metrics_increment "sbom_created"
 
-  # Generate machine-friendly JSON SBOM for tooling compatibility
-  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
+  # Generate SPDX 2.3 JSON SBOM for tooling compatibility
   if command -v python3 >/dev/null 2>&1; then
-    log_info "Generating JSON SBOM: $sbom_json_file"
+    log_info "Generating SPDX 2.3 JSON SBOM: $sbom_json_file"
     local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
     python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
-import sys, json
+import sys, json, re, hashlib
+from datetime import datetime, timezone
+
 sbom_txt = sys.argv[1]
 sbom_json = sys.argv[2]
 staged_json = sys.argv[3] if len(sys.argv) > 3 else None
@@ -7812,23 +8199,146 @@ with open(sbom_txt, 'r', encoding='utf-8') as fh:
       except Exception:
         summary['security_score'] = line.split(':',1)[1].strip()
 
-data = {
-  'metadata': header,
-  'artifacts': artifacts,
-  'summary': summary,
-}
+def sanitize_spdx_id(value: str) -> str:
+  v = re.sub(r'[^A-Za-z0-9.-]+', '-', value or 'artifact').strip('-')
+  if not v:
+    v = 'artifact'
+  return v
 
-# If a staged manifest JSON file exists, attempt to include it under 'staged_manifest'
+def package_spdx_id(path: str, name: str, index: int) -> str:
+  base = sanitize_spdx_id(name)
+  digest = hashlib.sha256((path or name or str(index)).encode('utf-8')).hexdigest()[:10]
+  return f"SPDXRef-Package-{base}-{digest}"
+
+def to_iso_utc(v: str) -> str:
+  if not v:
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+  return v
+
+created = to_iso_utc(header.get('generated'))
+doc_name = f"rke2-image-{header.get('rke2_version') or 'auto'}"
+namespace_suffix = created.replace(':', '').replace('-', '')
+doc_namespace = f"https://sbom.rke2-node-init.local/spdx/{doc_name}/{namespace_suffix}"
+
+root_spdx_id = "SPDXRef-RKE2ArtifactBundle"
+root_checksum = hashlib.sha256(''.join(sorted(a.get('sha256','') for a in artifacts)).encode('utf-8')).hexdigest() if artifacts else '0'*64
+
+packages = [
+  {
+    "SPDXID": root_spdx_id,
+    "name": "rke2-offline-artifact-bundle",
+    "versionInfo": header.get('rke2_version') or "NOASSERTION",
+    "supplier": "Organization: rke2-node-init",
+    "downloadLocation": "NOASSERTION",
+    "packageFileName": f"{doc_name}.bundle",
+    "checksums": [
+      {
+        "algorithm": "SHA256",
+        "checksumValue": root_checksum
+      }
+    ],
+    "primaryPackagePurpose": "BINARY",
+    "licenseDeclared": "NOASSERTION",
+    "licenseConcluded": "NOASSERTION",
+    "copyrightText": "NOASSERTION",
+    "attributionTexts": [
+      "Bundle includes offline RKE2 artifacts staged by rke2nodeinit image action."
+    ]
+  }
+]
+
+relationships = [
+  {
+    "spdxElementId": "SPDXRef-DOCUMENT",
+    "relationshipType": "DESCRIBES",
+    "relatedSpdxElement": root_spdx_id
+  }
+]
+
+for index, artifact in enumerate(artifacts):
+  path = artifact.get('path', '')
+  name = path.split('/')[-1] if path else 'artifact'
+  pkg_spdx_id = package_spdx_id(path, name, index)
+  sha = artifact.get('sha256') or "NOASSERTION"
+  source = artifact.get('source') or "NOASSERTION"
+  verified = artifact.get('verified') or "unknown"
+
+  pkg = {
+    "SPDXID": pkg_spdx_id,
+    "name": name,
+    "versionInfo": "NOASSERTION",
+    "supplier": "Organization: rke2-node-init",
+    "downloadLocation": "NOASSERTION",
+    "packageFileName": path,
+    "checksums": [{
+      "algorithm": "SHA256",
+      "checksumValue": sha
+    }] if sha != "NOASSERTION" else [],
+    "primaryPackagePurpose": "BINARY",
+    "licenseDeclared": "NOASSERTION",
+    "licenseConcluded": "NOASSERTION",
+    "copyrightText": "NOASSERTION",
+    "attributionTexts": [
+      f"source={source}; verified={verified}"
+    ]
+  }
+  packages.append(pkg)
+  relationships.append({
+    "spdxElementId": root_spdx_id,
+    "relationshipType": "CONTAINS",
+    "relatedSpdxElement": pkg_spdx_id
+  })
+
+external_document_refs = []
 if staged_json:
   try:
-    with open(staged_json, 'r', encoding='utf-8') as sf:
-      staged = json.load(sf)
-    data['staged_manifest'] = staged
+    with open(staged_json, 'rb') as sf:
+      staged_bytes = sf.read()
+    staged_sha = hashlib.sha256(staged_bytes).hexdigest()
+    external_document_refs.append({
+      "externalDocumentId": "DocumentRef-rke2-stage-manifest",
+      "spdxDocument": f"file://{staged_json}",
+      "checksum": {
+        "algorithm": "SHA256",
+        "checksumValue": staged_sha
+      }
+    })
   except Exception:
-    data['staged_manifest'] = None
+    pass
+
+data = {
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": doc_name,
+  "documentNamespace": doc_namespace,
+  "creationInfo": {
+    "created": created,
+    "creators": [
+      "Tool: rke2nodeinit"
+    ],
+    "comment": f"Generated from image action artifacts; security_score={summary.get('security_score', 'unknown')}"
+  },
+  "documentDescribes": [
+    root_spdx_id
+  ],
+  "packages": packages,
+  "relationships": relationships,
+  "annotations": [
+    {
+      "annotationDate": created,
+      "annotationType": "OTHER",
+      "annotator": "Tool: rke2nodeinit",
+      "comment": f"artifacts_discovered={summary.get('artifacts_discovered', 0)}, artifacts_verified={summary.get('artifacts_verified', 0)}, sha256_manifest_present={summary.get('sha256_manifest_present', 'unknown')}"
+    }
+  ]
+}
+
+if external_document_refs:
+  data["externalDocumentRefs"] = external_document_refs
 
 with open(sbom_json, 'w', encoding='utf-8') as out:
-  json.dump(data, out, indent=2, sort_keys=True)
+  json.dump(data, out, indent=2)
 print(sbom_json)
 PY
     if [[ $? -eq 0 ]]; then
@@ -8268,7 +8778,10 @@ action_server() {
   # Phase 7: Token and RKE2 configuration
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion/generation."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
@@ -8349,6 +8862,7 @@ action_server() {
 
   # Phase 8: Install RKE2
   report_progress "Installing RKE2 server" 8 8
+  local exported_node_token=""
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     cleanup_containerd_before_rke2 "rke2-server"
 
@@ -8369,6 +8883,23 @@ action_server() {
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
+
+    # Export server node token into outputs for operator convenience when
+    # available at this stage. If the file is not present yet, keep workflow
+    # non-fatal and rely on post-reboot retrieval guidance.
+    local server_node_token="/var/lib/rancher/rke2/server/node-token"
+    local token_export_path="$OUT_DIR/${SPEC_NAME:-server}-node-token.txt"
+    if [[ -f "$server_node_token" ]]; then
+      if cp -f "$server_node_token" "$token_export_path" >>"$LOG_FILE" 2>&1; then
+        chmod 600 "$token_export_path" >>"$LOG_FILE" 2>&1 || true
+        exported_node_token="$token_export_path"
+        log_info "Exported server node token to: $exported_node_token"
+      else
+        log_warn "Failed to export server node token to $token_export_path"
+      fi
+    else
+      log_info "Server node token not present yet; retrieve after reboot from /var/lib/rancher/rke2/server/node-token"
+    fi
 
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
@@ -8406,6 +8937,9 @@ action_server() {
   log_info "  2. After reboot, check cluster status: kubectl get nodes"
   log_info "  3. Retrieve node token: cat /var/lib/rancher/rke2/server/node-token"
   log_info "  4. Use token to join additional servers or agents"
+  if [[ -n "$exported_node_token" ]]; then
+    log_info "  5. Exported token copy: $exported_node_token"
+  fi
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -8653,7 +9187,10 @@ action_agent() {
   fi
 
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
@@ -9058,7 +9595,10 @@ action_add_server() {
   [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then

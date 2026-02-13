@@ -154,6 +154,7 @@ spec:
 spec:
   # Prefer camelCase keys in examples (e.g., `nodeIp`). The script also
   # accepts kebab-case aliases (e.g., `node-ip`) for backward compatibility.
+  rke2CNIVersion: v1.9.0-build20260116  # Optional: hardened-cni-plugins tag for image prep
   rke2:
     version: v1.34.1+rke2r1         # RKE2 version
 

@@ -28,6 +28,11 @@ Staging behavior
 
 - The script resolves the hardened-cni tag expected by the chart and ensures the tarball staged in `/var/lib/rancher/rke2/agent/images/` matches that tag exactly.
 - The tarball is written as a docker-archive with the `rancher/hardened-cni-plugins:<tag>` reference, so no retagging is required at runtime.
+- During `image`, the script now performs a CNI-aware preflight using `spec.cni` and verifies required images are present in staged archives. For `multus`/`canal` this includes chart images such as `hardened-multus-cni`, `hardened-calico`, and `hardened-flannel` in addition to `hardened-cni-plugins`.
+
+Important: `hardened-cni-plugins` alone is not a complete Multus/Canal offline set.
+
+- Recommended golden-image workflow: stage all required `rke2-images-*` flavor bundles for your selected CNI stack (for example via `INSTALL_RKE2_ARTIFACT_PATH`) so `image` preflight passes and runtime does not attempt external pulls.
 
 Environment variables:
 

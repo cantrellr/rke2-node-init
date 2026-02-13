@@ -32,7 +32,8 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
-- **Hardened CNI Alignment** – Fetches the chart-expected `hardened-cni-plugins` tag and stages it into the RKE2 images directory for offline pulls.
+- **Hardened CNI Alignment** – Uses `spec.rke2CNIVersion` when provided (or auto-selects a compatible tag) and stages `hardened-cni-plugins` into the RKE2 images directory for offline pulls.
+- **CNI Image Preflight** – During `image`, validates that staged archives contain required images for configured `spec.cni` plugins (for example Multus/Canal) and fails fast when required images are missing.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
@@ -57,13 +58,15 @@
 
 ## Workflow Overview
 
-1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, validate CNI-required staged images from `spec.cni`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v1`) that centralizes inputs and secrets.
+
+For strict offline clusters, provide complete image bundles for the selected CNI stack (for example `rke2-images-*.linux-amd64.tar.*` flavor archives in addition to the base `rke2-images.linux-amd64.tar.zst`). Staging only `hardened-cni-plugins` is not sufficient for Multus/Canal.
 
 ---
 
@@ -209,6 +212,7 @@ metadata:
   name: prod-image
 spec:
   rke2Version: v1.34.1+rke2r1
+  rke2CNIVersion: v1.9.0-build20260116
   registry: registry.example.local/rke2
   registryUsername: svc
   registryPassword: superSecret123!
@@ -225,6 +229,7 @@ spec:
 - **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
+- **Image prep:** `rke2Version`, `rke2CNIVersion`
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
@@ -273,7 +278,7 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 ├─ downloads/                        # image/push cache (images, tarballs, installers, nerdctl bundles)
 ├─ outputs/
 │  ├─ <metadata.name>/               # run-specific exports (README, configs, CA copies)
-│  └─ sbom/                          # SBOM or inspect metadata per image
+│  └─ sbom/                          # SBOM outputs per image (text inventory + SPDX 2.3 JSON)
 ├─ logs/                             # structured execution logs
 ├─ certs/                            # example CA material consumed by manifests
 ├─ rke2nodeinit.sh                   # the script

@@ -1,0 +1,22 @@
+apiVersion: rkeprep/v1
+kind: Image
+metadata:
+  name: preprod-vmware-image
+spec:
+  rke2Version: v1.35.0+rke2r3
+  rke2CNIVersion: v1.9.0-build20260116
+  registry: altregistry.dev.kube:8443
+  system-default-registry: altregistry.dev.kube:8443
+  defaultDns: [172.16.10.11, 172.16.10.12]
+  defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net, cantrelloffice.cloud]
+  customCA:
+    rootCrt: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca.crt
+    rootKey: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca-key.pem
+    intermediateCrt:
+    intermediateKey:
+    installToOSTrust: true
+  bootService:
+    enabled: false
+  #  yamlPath: /root/server-config.yaml
+    mode: oneshot
+    platform: vmware

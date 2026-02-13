@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--enable-fips` flag to enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds during installation.
 - `PRO_TOKEN` environment variable support to attach Ubuntu Pro when FIPS enablement is requested.
+- `image` action now performs CNI-aware staged-image preflight based on `spec.cni` and fails fast when required offline images are missing.
 
 ### Changed
 
 - Hardened CNI handling now fetches the exact chart tag and stages the archive into the RKE2 images directory to avoid mismatched pulls.
+- Golden-image guidance now recommends staging all required `rke2-images-*` flavor bundles (not only `hardened-cni-plugins`) for strict offline Multus/Canal deployments.
 
 ### Added - Phase 5: Advanced Error Handling & Metrics Dashboard (November 2025)
 
