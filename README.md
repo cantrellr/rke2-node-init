@@ -34,6 +34,7 @@
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
 - **Hardened CNI Alignment** – Uses `spec.rke2CNIVersion` when provided (or auto-selects a compatible tag) and stages `hardened-cni-plugins` into the RKE2 images directory for offline pulls.
 - **CNI Image Preflight** – During `image`, validates that staged archives contain required images for configured `spec.cni` plugins (for example Multus/Canal) and fails fast when required images are missing.
+- **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
@@ -58,10 +59,10 @@
 
 ## Workflow Overview
 
-1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, validate CNI-required staged images from `spec.cni`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, validate CNI-required staged images from `spec.cni`, strictly validate required image:tag references against staged archives, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
-3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
-4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
+3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer. Before install, staged artifacts are revalidated, including strict required image:tag presence checks.
+4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v2`) that centralizes inputs and secrets.
@@ -301,6 +302,7 @@ System locations used during installation:
 ## Verification & Troubleshooting
 
 - Run `sudo ./rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
+- `image`, `server`, and `agent` now fail fast when required chart/release image tags are not present in staged archives under `/var/lib/rancher/rke2/agent/images` and `/opt/rke2/stage`.
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
 - When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.

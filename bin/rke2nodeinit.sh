@@ -6423,6 +6423,172 @@ verify_required_cni_images_staged() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: collect_required_image_refs_for_validation
+# Purpose : Build a normalized required image:tag list for offline validation.
+#           Prefers previously generated chart image lists, then derives from
+#           staged RKE2 artifacts without requiring network access.
+# Arguments:
+#   $1 - Output file path
+# Returns : 0 when required refs were collected, non-zero otherwise
+# ------------------------------------------------------------------------------
+collect_required_image_refs_for_validation() {
+  local out_file="$1"
+  local required_bn="chart-images-required.linux-${ARCH}.txt"
+  local release_list_bn="rke2-images.linux-${ARCH}.txt"
+  local release_list_all_bn="rke2-images-all.linux-${ARCH}.txt"
+  local tmp
+
+  : > "$out_file"
+
+  for src in "$DOWNLOADS_DIR/$required_bn" "$STAGE_DIR/$required_bn"; do
+    [[ -s "$src" ]] || continue
+    tmp=$(mktemp) || return 2
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -n "$ref" && "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$src"
+    if [[ -s "$tmp" ]]; then
+      sort -u "$tmp" > "$out_file"
+      rm -f "$tmp" || true
+      log_info "Using required image reference source: $src"
+      return 0
+    fi
+    rm -f "$tmp" || true
+  done
+
+  local rke2_tar_candidate=""
+  for p in "$STAGE_DIR/$RKE2_TARBALL" "$DOWNLOADS_DIR/$RKE2_TARBALL"; do
+    if [[ -f "$p" ]]; then
+      rke2_tar_candidate="$p"
+      break
+    fi
+  done
+  if [[ -n "$rke2_tar_candidate" ]]; then
+    if extract_chart_images_from_rke2_tarball "$rke2_tar_candidate" "$out_file" && [[ -s "$out_file" ]]; then
+      log_info "Derived required image references from RKE2 tarball: $rke2_tar_candidate"
+      return 0
+    fi
+  fi
+
+  tmp=$(mktemp) || return 2
+  : > "$tmp"
+  for src in \
+    "$DOWNLOADS_DIR/$release_list_bn" \
+    "$DOWNLOADS_DIR/$release_list_all_bn" \
+    "$STAGE_DIR/$release_list_bn" \
+    "$STAGE_DIR/$release_list_all_bn"
+  do
+    [[ -f "$src" ]] || continue
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -n "$ref" && "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$src"
+  done
+
+  if [[ -s "$tmp" ]]; then
+    sort -u "$tmp" > "$out_file"
+    rm -f "$tmp" || true
+    log_info "Using required image references from local release image list files"
+    return 0
+  fi
+
+  rm -f "$tmp" || true
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: collect_staged_image_refs_for_validation
+# Purpose : Inventory normalized image references present in staged archives.
+# Arguments:
+#   $1 - Output file path
+# Returns : 0 when refs were discovered, non-zero otherwise
+# ------------------------------------------------------------------------------
+collect_staged_image_refs_for_validation() {
+  local out_file="$1"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local tmp_all tmp_refs archive
+
+  : > "$out_file"
+  tmp_all=$(mktemp) || return 2
+  : > "$tmp_all"
+
+  while IFS= read -r archive; do
+    [[ -n "$archive" ]] || continue
+    tmp_refs=$(mktemp) || { rm -f "$tmp_all" || true; return 2; }
+    if list_images_in_archive "$archive" "$tmp_refs"; then
+      cat "$tmp_refs" >> "$tmp_all"
+    fi
+    rm -f "$tmp_refs" || true
+  done < <(find "$images_dir" "$STAGE_DIR" -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.zst' -o -name '*.tzst' -o -name '*.zst' \) | sort -u)
+
+  if [[ -s "$tmp_all" ]]; then
+    sort -u "$tmp_all" > "$out_file"
+    rm -f "$tmp_all" || true
+    return 0
+  fi
+
+  rm -f "$tmp_all" || true
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_required_image_tags_staged
+# Purpose : Strictly verify all required image:tag references are present in
+#           staged on-node archives before offline server/agent startup.
+# Returns : 0 on success, non-zero when requirements cannot be proven.
+# ------------------------------------------------------------------------------
+verify_required_image_tags_staged() {
+  local required_tmp present_tmp missing_tmp
+  required_tmp=$(mktemp) || return 2
+  present_tmp=$(mktemp) || { rm -f "$required_tmp" || true; return 2; }
+  missing_tmp=$(mktemp) || { rm -f "$required_tmp" "$present_tmp" || true; return 2; }
+
+  if ! collect_required_image_refs_for_validation "$required_tmp"; then
+    log_error "Required image/tag validation failed: unable to determine required image reference list from staged artifacts."
+    log_error "Remediation: run 'image' action and ensure RKE2 artifact lists are staged for this architecture (${ARCH})."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  if ! collect_staged_image_refs_for_validation "$present_tmp"; then
+    log_error "Required image/tag validation failed: unable to inventory staged image archives in $STAGE_DIR and ${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  comm -23 "$required_tmp" "$present_tmp" > "$missing_tmp" || true
+  local missing_count
+  missing_count=$(wc -l < "$missing_tmp" | awk '{print $1}')
+
+  if (( missing_count > 0 )); then
+    log_error "Required image/tag validation failed: $missing_count required reference(s) missing from staged archives."
+    while IFS= read -r miss; do
+      [[ -n "$miss" ]] || continue
+      log_error "  ✗ Missing required image tag: $miss"
+    done < <(head -n 25 "$missing_tmp")
+    if (( missing_count > 25 )); then
+      log_error "  ... plus $((missing_count - 25)) additional missing references"
+    fi
+    log_error "Remediation: re-run 'image' and ensure all chart-required images are staged into ${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  local required_count
+  required_count=$(wc -l < "$required_tmp" | awk '{print $1}')
+  log_info "Required image/tag validation passed: $required_count required reference(s) available in staged archives."
+
+  rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: verify_image_layer_checksums
 # Purpose : Verify individual image layer checksums from tarball manifest against
 #           computed SHA256 digests. Provides deep integrity validation beyond
@@ -7222,6 +7388,12 @@ except:
     fi
   else
     log INFO "Deep layer verification skipped (use --verify-layers to enable)"
+  fi
+
+  if ! verify_required_image_tags_staged; then
+    log ERROR "Post-staging required image/tag validation FAILED"
+    log ERROR "Server/agent installs would attempt remote pulls in disconnected environments"
+    exit 3
   fi
   
   log INFO "Post-staging verification complete"
@@ -8550,6 +8722,16 @@ action_image() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "cni_images_validated"
+
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "required_image_tags_validated"
 
   # --- Optional: Load images into local runtime ------------------------------
   report_progress "Processing container images" 5 8
