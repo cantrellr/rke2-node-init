@@ -55,7 +55,7 @@ metadata:
 
 spec:
   registry:
-    endpoint: harbor.example.com/library/rke2
+    endpoint: harbor.example.com/rke2/rke2
     username: robot$rke2-pusher
     password: CHANGE-ME-HARBOR-ROBOT-TOKEN
   

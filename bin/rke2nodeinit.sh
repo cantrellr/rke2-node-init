@@ -3421,7 +3421,7 @@ append_spec_config_extras() {
   # Scalars we pass through as-is if present
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
-    "system-default-registry" "private-registry" "write-kubeconfig-mode"
+    "system-default-registry" "embedded-registry" "disable-default-registry-endpoint" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
     # Image overrides commonly required to avoid external pulls in air-gapped installs
@@ -7478,82 +7478,104 @@ except:
 #   Writes the YAML file; returns 0 on success.
 # ------------------------------------------------------------------------------
 write_registries_yaml_with_fallbacks() {
-  # Build a registries.yaml that points common upstreams to your offline endpoints in priority order.
-  # Args: primary_host [fallback_host] [default_offline_host] [username] [password] [ca_file]
+  # Build a registries.yaml that:
+  #   1) Enables distributed mirroring via the embedded registry (Spegel)
+  #   2) Forces all image pulls through the internal registry endpoint
+  #   3) Rewrites upstream image paths into a Harbor-like <project>/<upstream-registry>/<repo> layout
+  # Args: primary_registry_host registry_project username password ca_file
   local primary="$1"; shift || true
-  local fallback="$1"; shift || true
-  local default_offline="$1"; shift || true
+  local project="$1"; shift || true
   local user="$1"; shift || true
   local pass="$1"; shift || true
   local ca_file="$1"; shift || true
 
   mkdir -p /etc/rancher/rke2
 
-  # Build endpoint YAML list
-  endpoints_primary="      - \"https://${primary}\""
-  endpoints_fallback=""
-  endpoints_default=""
-  [[ -n "$fallback" ]]        && endpoints_fallback=$'\n'"      - \"https://${fallback}\""
-  [[ -n "$default_offline" ]] && endpoints_default=$'\n'"      - \"https://${default_offline}\""
+  local prefix=""
+  [[ -n "$project" ]] && prefix="${project}/"
 
-  # CA line (optional)
-  tls_block_primary=""
-  tls_block_fallback=""
-  tls_block_default=""
-  if [[ -n "$ca_file" && -f "$ca_file" ]]; then
-    tls_block_primary=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_fallback=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_default=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
+  # Discover registries from release image list files when available.
+  # This keeps registries.yaml aligned with the exact images staged/downloaded.
+  local -a regs=()
+  local list_file=""
+  for f in "$DOWNLOADS_DIR/rke2-images-all.linux-${ARCH}.txt" "$DOWNLOADS_DIR/rke2-images.linux-${ARCH}.txt"; do
+    if [[ -f "$f" ]]; then
+      list_file="$f"
+      break
+    fi
+  done
+
+  if [[ -n "$list_file" ]]; then
+    while IFS= read -r ref; do
+      # strip comments/whitespace
+      ref="${ref%%#*}"
+      ref="${ref%%[[:space:]]*}"
+      [[ -z "$ref" ]] && continue
+      ref="$(normalize_image_reference "$ref" 2>/dev/null || true)"
+      [[ -z "$ref" ]] && continue
+
+      local first="${ref%%/*}"
+      local reg=""
+      if [[ "$ref" == */* && ( "$first" == *.* || "$first" == *:* ) ]]; then
+        reg="$first"
+      else
+        reg="docker.io"
+      fi
+
+      # Skip mirroring for the internal registry host itself (avoid recursion)
+      [[ "$reg" == "$primary" ]] && continue
+
+      regs+=("$reg")
+    done < "$list_file"
   fi
 
-  # Auth (optional)
-  auth_block_primary=""
-  auth_block_fallback=""
-  auth_block_default=""
-  if [[ -n "$user" && -n "$pass" ]]; then
-    auth_block_primary=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_fallback=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_default=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
+  if [[ ${#regs[@]} -eq 0 ]]; then
+    regs=(docker.io registry.k8s.io ghcr.io quay.io gcr.io k8s.gcr.io)
   fi
 
-  # Known upstreams we want to mirror via offline registry
-  # Known upstreams we want to mirror via offline registry
-  REG_YAML="$(cat <<EOF
-mirrors:
-  "docker.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "registry.k8s.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "k8s.gcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "quay.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "ghcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "rancher":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-configs:
-  "${primary}":${auth_block_primary}${tls_block_primary}
-EOF
-)"
+  # Deduplicate
+  IFS=$'\n'
+  regs=($(printf '%s\n' "${regs[@]}" | sort -u))
+  unset IFS
 
-  # Optionally add configs for fallback/default
-  if [[ -n "$fallback" ]]; then
-    REG_YAML+=$'\n'"  \"${fallback}\":${auth_block_fallback}${tls_block_fallback}"
-  fi
-  if [[ -n "$default_offline" ]]; then
-    REG_YAML+=$'\n'"  \"${default_offline}\":${auth_block_default}${tls_block_default}"
-  fi
+  # Render YAML
+  {
+    echo "# Auto-generated by rke2nodeinit.sh - DO NOT EDIT"
+    echo "# Internal registry endpoint: https://${primary}"
+    echo "# Registry project/prefix: ${project:-<none>}"
+    echo
+    echo "mirrors:"
+    # Wildcard mirror entry prevents accidental external pulls when paired with
+    # disable-default-registry-endpoint: true in config.yaml.
+    echo "  \"*\":"
 
-  printf "%s\n" "${REG_YAML}" > /etc/rancher/rke2/registries.yaml
+    for reg in "${regs[@]}"; do
+      echo "  \"${reg}\":"
+      echo "    endpoint:"
+      echo "      - \"https://${primary}\""
+      echo "    rewrite:"
+      # Rewrite upstream image path into <project>/<upstream-registry>/<repo>
+      # Example: docker.io/rancher/pause -> altregistry/<project>/docker.io/rancher/pause
+      printf '      "^(.*)$": "%s%s/$1"\n' "$prefix" "$reg"
+    done
+
+    echo "configs:"
+    echo "  \"${primary}\":"
+
+    if [[ -n "$user" && -n "$pass" ]]; then
+      echo "    auth:"
+      echo "      username: \"${user}\""
+      echo "      password: \"${pass}\""
+    fi
+
+    if [[ -n "$ca_file" && -f "$ca_file" ]]; then
+      echo "    tls:"
+      echo "      ca_file: \"${ca_file}\""
+    fi
+  } > /etc/rancher/rke2/registries.yaml
+
   chmod 600 /etc/rancher/rke2/registries.yaml
-  log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
+  log INFO "Wrote /etc/rancher/rke2/registries.yaml for internal registry ${primary} (project='${project:-<none>}')"
 }
 
 # ------------------------------------------------------------------------------
@@ -8011,7 +8033,12 @@ ca_trust_registries() {
   # If a registry is configured, write registries.yaml with mirrors + auth + CA
   mkdir -p /etc/rancher/rke2
   if [[ -n "$REG_HOST" ]]; then
-    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
+    local _REG_HOST="${REG_HOST:-}" _REG_NS=""
+    if [[ -n "${REGISTRY:-}" ]]; then
+      _REG_HOST="${REGISTRY%%/*}"
+      [[ "$REGISTRY" == */* ]] && _REG_NS="${REGISTRY#*/}"
+    fi
+    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
   else
     rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
   fi
@@ -8475,7 +8502,19 @@ action_push() {
   for IMG in "${imgs[@]}"; do
     [[ -z "$IMG" ]] && continue
     local TARGET
-    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
+    # Canonicalize image reference so images without an explicit registry are treated as docker.io/
+    local src_ref="$IMG"
+    local src_repo="${IMG%:*}"
+    local src_tag="${IMG##*:}"
+    local first_seg="${src_repo%%/*}"
+    local canon_repo="$src_repo"
+    if [[ "$src_repo" != */* ]]; then
+      canon_repo="docker.io/$src_repo"
+    elif [[ "$first_seg" != *.* && "$first_seg" != *:* ]]; then
+      canon_repo="docker.io/$src_repo"
+    fi
+    local canon_img="${canon_repo}:${src_tag}"
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$canon_img"; else TARGET="$REG_HOST/$canon_img"; fi
 
     [[ $first -eq 0 ]] && echo "," >> "$manifest_json"
     printf '  {"source":"%s","target":"%s"}' "$IMG" "$TARGET" >> "$manifest_json"
@@ -8500,11 +8539,12 @@ action_push() {
     return 0
   fi
 
-  # Authenticate to registry
+
+  # Authenticate to registry (optional)
   report_progress "Authenticating to registry" 3 4
-  log_info "Logging into registry: $REG_HOST"
-  
-  if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
+  if [[ -n "${REG_USER:-}" && -n "${REG_PASS:-}" ]]; then
+    log_info "Logging into registry: $REG_HOST"
+    if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
     log_error "Registry login failed"
     log_error "Remediation steps:"
     log_error "  - Verify registry URL is correct: $REG_HOST"
@@ -8514,6 +8554,9 @@ action_push() {
     metrics_increment "failed"
     metrics_summary "Push Operation (Failed)"
     exit 1
+    fi
+  else
+    log_warn "No registry credentials provided; skipping nerdctl login (registry assumed open/no-auth)."
   fi
   metrics_increment "authenticated"
 
@@ -8527,7 +8570,19 @@ action_push() {
     push_num=$((push_num + 1))
     
     local TARGET
-    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
+    # Canonicalize image reference so images without an explicit registry are treated as docker.io/
+    local src_ref="$IMG"
+    local src_repo="${IMG%:*}"
+    local src_tag="${IMG##*:}"
+    local first_seg="${src_repo%%/*}"
+    local canon_repo="$src_repo"
+    if [[ "$src_repo" != */* ]]; then
+      canon_repo="docker.io/$src_repo"
+    elif [[ "$first_seg" != *.* && "$first_seg" != *:* ]]; then
+      canon_repo="docker.io/$src_repo"
+    fi
+    local canon_img="${canon_repo}:${src_tag}"
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$canon_img"; else TARGET="$REG_HOST/$canon_img"; fi
     
     log_info "[$push_num/$img_count] Processing: $IMG -> $TARGET"
     
@@ -8550,8 +8605,10 @@ action_push() {
     fi
   done
 
-  # Cleanup - logout from registry
-  nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
+  # Cleanup - logout from registry (only when credentials were used)
+  if [[ -n "${REG_USER:-}" && -n "${REG_PASS:-}" ]]; then
+    nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
+  fi
 
   # Display summary
   metrics_summary "Image Push Summary"

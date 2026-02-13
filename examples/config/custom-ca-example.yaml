@@ -85,7 +85,7 @@ spec:
   configureRegistries: true
   registry:
     endpoint: harbor.example.com
-    namespace: library/rke2
+    namespace: rke2/rke2
 
 ---
 # Multiple CA bundle

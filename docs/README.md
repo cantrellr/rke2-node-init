@@ -22,6 +22,7 @@
 - **[PHASE4-QUICK-REFERENCE.md](PHASE4-QUICK-REFERENCE.md)** - Commands, metrics, troubleshooting
 - **[Configuration Examples](../examples/config/)** - server, agent, add-server, image, push, airgap
 - **[Interactive Demos](../examples/)** - `phase3-cli-demo.sh`, `phase4-demo.sh`
+- **[RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md](RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md)** - Air-gapped golden image plan (v1.35.0+rke2r3) with `/rke2` internal registry layout and embedded mirror
 
 ---
 
