@@ -71,7 +71,7 @@ When using rke2-node-init:
 
 4. **Script Execution**
    - Always review scripts before execution
-   - Run with minimal required privileges (though root is required for system modifications)
+   - Run with minimal required privileges (note: `bin/rke2nodeinit.sh` requires root for system modifications)
    - Enable audit logging in production environments
 
 5. **Configuration Files**
@@ -110,4 +110,4 @@ If you have questions about this security policy, please open a general issue (n
 
 ---
 
-Last Updated: 2025-11-08
+Last Updated: 2026-02-13

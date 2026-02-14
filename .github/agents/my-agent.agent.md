@@ -29,7 +29,7 @@ certs/                       - CA generation scripts and examples
     generate-subordinate-ca.sh - Subordinate CA with YAML input
     verify-chain.sh          - Certificate chain verification
   examples/                  - Example YAML configurations
-configs/examples/            - Full action examples (server, agent, push, etc.)
+examples/config/             - Full action examples (server, agent, push, etc.)
 scripts/                     - Supporting tooling
   wsl-env/                   - WSL development environment setup
   test/                      - Interface detection and validation tests
@@ -53,8 +53,8 @@ Supported Actions
 Certificate Workflow
 --------------------
 The repository includes automated CA generation using Make targets:
-- `make certs-root-ca` - Generate encrypted root CA (AES-256) with safe permissions
-- `make certs-sub-ca INPUT=<yaml>` - Generate subordinate CA from YAML specification
+- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA (AES-256) with safe permissions
+- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA from YAML specification
 - `make certs-verify` - Validate OpenSSL availability and display security reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify certificate chain integrity
 
@@ -231,14 +231,14 @@ The repository is organized for modular offline operations:
 - `scripts/verify-chain.sh` - Certificate chain validation
 - `examples/` - YAML templates for CA generation
 
-**Configuration Examples**: `configs/examples/`
+**Configuration Examples**: `examples/config/`
 - server-example.yaml, agent-example.yaml, add-server-example.yaml
 - airgap-example.yaml, push-example.yaml, image-example.yaml
 - custom-ca-example.yaml, verify-example.yaml
 
 **Make Targets**: `Makefile`
-- `make certs-root-ca` - Generate encrypted root CA
-- `make certs-sub-ca INPUT=<yaml>` - Generate subordinate CA
+- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA
+- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA
 - `make certs-verify` - Validate OpenSSL and display reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify chain
 - `make token` - Generate base64 tokens for cluster join
@@ -372,8 +372,10 @@ When assisting users, follow these principles:
 ./scripts/wsl-env/wsl-dev-setup.sh
 
 # Generate certificates for testing
-make certs-root-ca
-make certs-sub-ca INPUT=certs/examples/rke2clusterCA-example.yaml
+./certs/scripts/generate-root-ca.sh --out-dir certs/scripts/outputs/root-ca
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/rke2clusterCA-example.yaml \
+  --root-key certs/scripts/outputs/root-ca/root-ca-key.pem \
+  --root-cert certs/scripts/outputs/root-ca/root-ca.crt
 
 # Validate scripts
 find . -name "*.sh" -exec bash -n {} \;

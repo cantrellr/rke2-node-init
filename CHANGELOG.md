@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Reduced default CNI permissions remediation timer cadence for faster Multus/Canal bootstrap convergence: `OnBootSec=10s`, `OnUnitActiveSec=15s`, `AccuracySec=5s` in `scripts/systemd/rke2-cni-perms.timer`.
+- Refreshed repository documentation for technical accuracy against current codebase and workflows (README surfaces, config examples, cert generation guides, VM GitOps docs, WSL setup, and security policy metadata).
 
 ## [1.2.0] - 2026-02-13
 
@@ -340,13 +341,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved `test-interface-detection.sh` to `scripts/test/`
 - Reorganized VM directory structure for better separation of concerns
 - Updated `.gitignore` with production configuration paths
- - Docs: aligned example paths to `examples/` and updated examples to prefer kebab-case keys; clarified that camelCase aliases are supported
- - CI: added example YAML validation and duplicate-token-file verification workflow
- - `bin/rke2nodeinit.sh` enhanced with OCI manifest fallback parsing and
+- Docs: aligned example paths to `examples/` and updated examples to prefer kebab-case keys; clarified that camelCase aliases are supported
+- CI: added example YAML validation and duplicate-token-file verification workflow
+- `bin/rke2nodeinit.sh` enhanced with OCI manifest fallback parsing and
    post-staging verification improvements: architecture detection, tarball
    integrity checks, and optional deep layer verification via `--verify-layers`.
- - Help text updated to document new `--verify-layers` flag and its behavior.
- - Added `PHASES-1-2-IMPLEMENTATION.md` documenting the OCI parsing and
+- Help text updated to document new `--verify-layers` flag and its behavior.
+- Added `PHASES-1-2-IMPLEMENTATION.md` documenting the OCI parsing and
    layer verification implementation details and test notes.
 
 ### Testing - Previous Tests

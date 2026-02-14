@@ -1,313 +1,114 @@
 # Contributing to rke2-node-init
 
-Thank you for your interest in contributing to rke2-node-init! This document provides guidelines and instructions for contributing to this project.
+Thanks for contributing. This guide covers the current workflow, repository layout, validation requirements, and documentation expectations.
 
-## Table of Contents
+## Prerequisites
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Workflow](#development-workflow)
-- [Coding Standards](#coding-standards)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [Submitting Changes](#submitting-changes)
-- [Release Process](#release-process)
+- Bash 4+
+- Python 3.11+ for validation tooling
+- `shellcheck`, `yamllint`, and `markdownlint` available locally
+- Familiarity with RKE2 air-gapped deployment patterns
 
-## Code of Conduct
-
-Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md) to keep our community welcoming and inclusive.
-
-## Getting Started
-
-### Prerequisites
-
-- Bash 4.0+ (script requires associative arrays)
-- Ubuntu 22.04+ or RHEL 8+ (for testing)
-- Git for version control
-- ShellCheck for linting Bash scripts
-- Basic understanding of RKE2 and Kubernetes
-- Familiarity with Phase 1-4 refactoring patterns (see docs/PHASE*-IMPLEMENTATION.md)
-
-### Understanding the Codebase
-
-The script has been modernized through 4 major phases:
-
-- **Phase 1**: Core utilities (19 functions) for validation, logging, metrics, progress
-- **Phase 2**: Refactored actions (verify, custom-ca, push, image)
-- **Phase 3**: CLI enhancements (help, version, verbosity, dry-run)
-- **Phase 4**: Deployment actions (server, agent, add-server, airgap)
-
-**Key Documentation:**
-- `docs/PHASE1-IMPLEMENTATION.md` - Core utility reference
-- `docs/PHASE4-QUICK-REFERENCE.md` - Quick command reference
-- `examples/phase*-demo.sh` - Interactive demonstrations
-
-### Fork and Clone
-
-1. Fork the repository on GitHub
-2. Clone your fork locally:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/rke2-node-init.git
-   cd rke2-node-init
-   ```
-
-3. Add the upstream repository:
-   ```bash
-   git remote add upstream https://github.com/cantrellr/rke2-node-init.git
-   ```
-
-4. Create a feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-## Development Workflow
-
-### Repository Structure
+## Repository Layout (Current)
 
 ```
 .
-├── bin/                    # Main executable scripts
-├── configs/
-│   └── examples/          # Example configuration files
-├── certs/                 # Certificate management
-│   ├── examples/          # Example certificates
-│   └── scripts/           # Certificate generation scripts
-├── docs/                  # Documentation
-├── scripts/               # Utility scripts
-│   ├── archived/          # Deprecated/unused scripts
-│   ├── test/              # Test scripts
-│   └── utils/             # Utility scripts
-├── tests/                 # Test suite
-│   ├── unit/              # Unit tests
-│   ├── integration/       # Integration tests
-│   └── fixtures/          # Test data
-└── vm/                    # VM management utilities
-    ├── scripts/           # PowerShell scripts
-    ├── templates/         # VM templates
-    └── docs/              # VM documentation
+├── bin/                    # Main executable (rke2nodeinit.sh)
+├── certs/                  # Certificate materials and generation scripts
+├── clusters/               # Cluster-scoped rkeprep/v2 YAML manifests
+├── configs/                # Additional configuration manifests
+├── docs/                   # Technical docs and redesign archive
+├── examples/               # Demo scripts and YAML examples
+├── scripts/                # Supporting utilities and operational scripts
+├── tests/                  # Bash-based test and CI validation scripts
+├── vm/                     # vSphere provisioning scripts and templates
+└── vm-configs/             # VM GitOps schema + declarative VM configs
 ```
 
-### Making Changes
+## Development Workflow
 
-1. **Update your fork** before starting work:
-   ```bash
-   git fetch upstream
-   git merge upstream/main
-   ```
+1. Create a feature branch from `main`.
+2. Keep changes scoped (code, config, and docs updated together).
+3. Run local validation before opening a PR.
+4. Open PR with test evidence and impacted docs list.
 
-2. **Make your changes** following our coding standards
+## Local Validation Checklist
 
-3. **Test your changes** thoroughly
+### Bash
 
-4. **Lint your code**:
-   ```bash
-   # Shell scripts
-   shellcheck bin/rke2nodeinit.sh
-   
-   # Markdown files
-   markdownlint README.md
-   
-   # YAML files
-   yamllint configs/examples/
-   ```
+```bash
+shellcheck bin/rke2nodeinit.sh
+shellcheck scripts/*.sh
+shellcheck tests/*.sh
+```
 
-5. **Commit your changes** with descriptive messages:
-   ```bash
-   git add .
-   git commit -m "feat: add new feature X"
-   ```
+### YAML / JSON
+
+```bash
+yamllint configs examples vm-configs
+python3 scripts/vm-config/config_validator.py vm-configs/ --all
+python3 -c "import json; json.load(open('vm-configs/schema.json'))"
+```
+
+### Markdown
+
+```bash
+markdownlint README.md docs/**/*.md certs/**/*.md examples/**/*.md
+```
+
+### Repository Tests
+
+```bash
+bash tests/test_hardened_cni_fetch.sh
+bash tests/test_truncated_image_staging.sh
+bash tests/test_verify_stage_images.sh
+bash tests/verify_no_duplicate_tokenfile.sh
+bash tests/ci/test_ca_generation.sh
+bash tests/ci/test_subordinate_encryption.sh
+```
+
+## CI Workflows You Should Expect
+
+- `.github/workflows/validate-rke-configs.yml`
+- `.github/workflows/validate-vm-configs.yml`
+- `.github/workflows/verify-tokenfile.yml`
+- `.github/workflows/certs-ci.yml`
+
+Changes to VM GitOps manifests may also interact with `.github/workflows/apply-vm-configs.yml` on self-hosted runners.
 
 ## Coding Standards
 
-### Shell Scripts
+- Use `set -Eeuo pipefail` in Bash scripts.
+- Prefer explicit validation and actionable error messages.
+- Keep public flags/options backward compatible unless intentionally versioned.
+- Avoid hardcoding secrets, tokens, private keys, or production endpoints.
 
-- **Bash Version**: Target Bash 5.x+
-- **Error Handling**: Use `set -Eeuo pipefail` at the start of scripts
-- **Indentation**: 2 spaces (no tabs)
-- **Line Length**: Prefer max 120 characters
-- **Naming**:
-  - Functions: `snake_case` or `action_verb` pattern
-  - Variables: `UPPER_CASE` for constants, `lower_case` for local variables
-- **Comments**: Use descriptive comments for complex logic
-- **Quotes**: Always quote variables: `"${variable}"`
+## Documentation Standards
 
-### Example
+When behavior changes, update all relevant docs in the same PR:
 
-```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
+- [README.md](README.md)
+- [docs/README.md](docs/README.md)
+- [examples/config/README.md](examples/config/README.md)
+- [CHANGELOG.md](CHANGELOG.md)
 
-# Function to perform action
-action_example() {
-  local input="${1:-default}"
-  local readonly CONSTANT="value"
-  
-  echo "Processing: ${input}"
-}
-```
+Documentation updates must include:
 
-### PowerShell Scripts
+1. Correct command paths (`bin/rke2nodeinit.sh`, `scripts/...`).
+2. Current action/flag names and supported kinds.
+3. Updated date metadata when present.
+4. Security-safe examples (no real credentials).
 
-- **Indentation**: 4 spaces
-- **Naming**: PascalCase for functions and parameters
-- **Error Handling**: Use `-ErrorAction Stop` where appropriate
+## Pull Request Expectations
 
-### Documentation
+Each PR should include:
 
-- **Markdown**: Follow [markdownlint](https://github.com/DavidAnson/markdownlint) rules
-- **Code Blocks**: Always specify language for syntax highlighting
-- **Links**: Use relative links for internal documentation
+- Problem statement and rationale
+- Technical summary of changes
+- Validation evidence (commands and results)
+- Docs updated list
+- Risk/rollback notes for operational changes
 
-## Testing
+## Security Reporting
 
-### Manual Testing
-
-Before submitting:
-
-1. Test the main script in a clean environment
-2. Verify all actions work as expected
-3. Test with both online and offline scenarios
-4. Validate error handling and edge cases
-
-### Test Structure
-
-```bash
-# tests/unit/test_function.sh
-#!/usr/bin/env bash
-
-test_function_name() {
-  # Arrange
-  local input="test"
-  
-  # Act
-  local result
-  result=$(function_name "${input}")
-  
-  # Assert
-  [[ "${result}" == "expected" ]] || return 1
-}
-```
-
-### Running Tests
-
-```bash
-# Run unit tests (when available)
-bash tests/unit/run_tests.sh
-
-# Run integration tests (when available)
-bash tests/integration/run_tests.sh
-```
-
-## Documentation
-
-### README Updates
-
-- Update README.md for new features or changes
-- Include usage examples
-- Update the Table of Contents if adding new sections
-
-### Documentation Files
-
-- **Architecture**: Update `docs/architecture.md` for structural changes
-- **Network Config**: Update `docs/network-config.md` for network-related changes
-- **Troubleshooting**: Add common issues to `docs/troubleshooting.md`
-
-### Code Comments
-
-- Comment complex logic
-- Use inline comments sparingly
-- Prefer self-documenting code with descriptive names
-
-## Submitting Changes
-
-### Pull Request Process
-
-1. **Update documentation** related to your changes
-
-2. **Ensure all tests pass** and code is linted
-
-3. **Push to your fork**:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-4. **Create a Pull Request** on GitHub:
-   - Use a descriptive title
-   - Reference related issues
-   - Provide a detailed description of changes
-   - Include testing steps
-
-### Pull Request Template
-
-```markdown
-## Description
-Brief description of changes
-
-## Related Issues
-Fixes #123
-
-## Changes Made
-- Change 1
-- Change 2
-
-## Testing
-- [ ] Manual testing completed
-- [ ] Linting passed
-- [ ] Documentation updated
-
-## Breaking Changes
-Yes/No - Description if yes
-```
-
-### Commit Message Format
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-- `feat:` New feature
-- `fix:` Bug fix
-- `docs:` Documentation changes
-- `style:` Code style changes (formatting, etc.)
-- `refactor:` Code refactoring
-- `test:` Adding or updating tests
-- `chore:` Maintenance tasks
-
-Examples:
-```
-feat: add support for custom CA bundles
-fix: resolve network interface detection issue
-docs: update README with new configuration options
-```
-
-## Release Process
-
-### Versioning
-
-We follow [Semantic Versioning](https://semver.org/):
-
-- **MAJOR**: Breaking changes
-- **MINOR**: New features (backward compatible)
-- **PATCH**: Bug fixes (backward compatible)
-
-### Release Checklist
-
-1. Update CHANGELOG.md
-2. Update version references in documentation
-3. Tag the release
-4. Create GitHub release with notes
-
-## Questions?
-
-If you have questions:
-
-1. Check existing [documentation](README.md)
-2. Search [existing issues](https://github.com/cantrellr/rke2-node-init/issues)
-3. Open a new issue with the `question` label
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the same license as the project (see [LICENSE](LICENSE)).
-
----
-
-Thank you for contributing to rke2-node-init!
+Do not open public issues for vulnerabilities. Follow [SECURITY.md](SECURITY.md).

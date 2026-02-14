@@ -1,7 +1,7 @@
 # 🗺️ RKE2 Node Init - Project Roadmap
 
-**Last Updated:** Unreleased  
-**Status:** Active Development - **Phases 1-5 Complete!** 🎉  
+**Last Updated:** February 13, 2026  
+**Status:** Active Development - **Post-Phase 5 Hardening & Automation**  
 **GitHub Issues:** [View All Issues](https://github.com/cantrellr/rke2-node-init/issues)
 
 ---
@@ -35,6 +35,8 @@
 
 ## 📊 Progress Overview
 
+> Snapshot reflects roadmap-tracked backlog status and may differ from live issue totals.
+
 - **Total Issues:** 12
 - **Completed:** 6/12 (50%) - *Including Phases 1-4*
 - **In Progress:** 0/12
@@ -42,7 +44,7 @@
 
 ---
 
-## 🆕 Recent Updates (Unreleased)
+## 🆕 Recent Updates (Current Cycle)
 
 - Hardened CNI staging now aligns to the chart-required tag to avoid offline pull mismatches.
 - Added `--enable-fips` flow for Ubuntu Pro FIPS enablement and FIPS RKE2 builds.
@@ -53,8 +55,8 @@
 
 ## 🔴 Sprint 1: Immediate (This Week) - CRITICAL
 
-**Target:** Complete by November 15, 2025  
-**Progress:** 2/4 completed (50%)
+**Target:** Complete in current active security sprint  
+**Progress:** 2/4 completed (security remediation remains open)
 
 ### ✅ Issue #39: Fix CRLF Line Endings
 - **Status:** ✅ **COMPLETED**
@@ -96,8 +98,8 @@
 
 ## 🟡 Sprint 2: Short Term (This Month)
 
-**Target:** Complete by December 8, 2025  
-**Progress:** 0/4 started
+**Target:** Current quarter quality backlog  
+**Progress:** 1/4 completed
 
 ### ⏳ Issue #42: Fix ShellCheck Warnings
 - **Status:** ⏳ **TODO**
@@ -141,45 +143,26 @@
 
 ---
 
-## 🟢 Sprint 3: Phase 5 Planning (Future)
+## 🟢 Sprint 3: Long Term (Q1-Q2 2026)
 
-**Target:** TBD  
-**Focus:** Advanced features and operational excellence
+**Target:** Q1-Q2 2026  
+**Focus:** CI/CD, auditability, and operations automation
 
-### 🔮 Phase 5: Advanced Features (Proposed)
+### ✅ Phase 5: Advanced Features (Delivered)
 
-**Estimated Effort:** 2-3 weeks  
-**Priority:** P3 - Enhancement
+**Completion:** November 2025  
+**Status:** Core reliability and metrics capabilities implemented
 
-#### Advanced Error Handling
-- Trap-based cleanup on failures
-- Error context preservation across function calls
-- Graceful degradation patterns
-- Automatic rollback capabilities on critical failures
-
-#### Metrics Dashboard
-- `metrics_dashboard()` function for consolidated display
-- Multi-action metrics aggregation
-- Historical metrics tracking and export
-- JSON/CSV export for analytics integration
-
-#### Enhanced Validation Framework
-- Pre-flight checks before deployment
-- Dependency verification (packages, binaries)
-- Resource availability checks (disk, memory, network)
-- Network connectivity tests to RKE2 endpoints
-
-#### Integration & Automation
-- Ansible playbook templates
-- Terraform module examples
-- CI/CD pipeline integration
-- Kubernetes operator for cluster lifecycle
+- ✅ Trap-based cleanup and improved error handling
+- ✅ Graceful degradation patterns
+- ✅ Metrics dashboard and export support
+- ✅ Standardized progress reporting across actions
 
 ---
 
-## 🟡 Sprint 3: Long Term (This Quarter)
+## 🟡 Sprint 4: Long Term (Q2 2026)
 
-**Target:** Complete by February 8, 2026  
+**Target:** Complete by end of Q2 2026  
 **Progress:** 0/4 started
 
 ### ⏳ Issue #46: Build CI/CD Pipeline
@@ -272,6 +255,12 @@
 
 ## 🔄 Recent Updates
 
+### February 13, 2026
+- ✅ Hardened CNI staging now aligns with chart-required tags for offline parity
+- ✅ Added `--enable-fips` flow for Ubuntu Pro FIPS + FIPS-compatible RKE2 builds
+- ✅ Added persistent CNI permissions remediation assets (script + systemd service + timer)
+- ✅ STIG guidance now standardizes timer-based CNI permissions enforcement
+
 ### November 8, 2025
 - ✅ Created 12 GitHub issues from code review
 - ✅ Fixed CRLF line endings in test-interface-detection.sh (Issue #39)
@@ -322,6 +311,6 @@ gh issue close 39 --comment "Fixed CRLF line endings"
 
 ---
 
-**Next Review:** November 15, 2025  
+**Next Review:** March 1, 2026  
 **Team:** RKE2 DevOps  
 **Repository:** [cantrellr/rke2-node-init](https://github.com/cantrellr/rke2-node-init)

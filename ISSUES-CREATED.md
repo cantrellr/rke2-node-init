@@ -99,7 +99,7 @@ All priority action items from the comprehensive code review have been created a
 ### Issue #62: [P2-INFRA] Add GitHub Actions template for non-interactive cert generation
 **Link:** https://github.com/cantrellr/rke2-node-init/issues/62  
 **Effort:** 3-6 hours  
-**Action:** Add `.github/workflows/certs-generation-template.yml` showcasing non-interactive `make certs-root-ca` and `make certs-sub-ca` using `${{ secrets.* }}` placeholders, artifact handling, and running the verification script. Include README notes recommending Vault or ephemeral runners.
+**Action:** Add `.github/workflows/certs-generation-template.yml` showcasing non-interactive `certs/scripts/generate-root-ca.sh` and `certs/scripts/generate-subordinate-ca.sh` usage with `${{ secrets.* }}` placeholders, artifact handling, and running the verification script. Include README notes recommending Vault or ephemeral runners.
 
 ### Issue #63: [P2-DOCS] Standardize README files and cross-references
 **Link:** https://github.com/cantrellr/rke2-node-init/issues/63  

@@ -1,6 +1,6 @@
 # rke2nodeinit.sh
 
-`rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without network access.
+`bin/rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without public Internet access.
 
 ---
 
@@ -127,20 +127,6 @@ flowchart TD
     ActionAirgap --> End
     ActionAddServer --> End
 
-    click Start call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1")
-    click CheckBash call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L4")
-    click CheckRoot call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L9")
-    click CheckCRLF call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L15")
-    click ParseArgs call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1012")
-    click SelectAction call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1092")
-    click ActionImage call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L664")
-    click ActionPush call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L563")
-    click ActionServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L828")
-    click ActionAgent call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L944")
-    click ActionVerify call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1102")
-    click ActionAirgap call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1121")
-    click ActionAddServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1057")
-    click End call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh")
 ```
 
 ---
@@ -156,6 +142,9 @@ flowchart TD
 | `agent` | Offline worker node | Configure network, join tokens, CA trust, and install `rke2-agent` |
 | `verify` | Any host | Validate prerequisites without making changes |
 | `airgap` | Offline template | Runs `image` but powers off instead of rebooting, ideal for VM templating |
+| `label-node` | Running cluster node | Apply Kubernetes labels with `kubectl` using YAML or CLI-provided labels |
+| `taint-node` | Running cluster node | Apply Kubernetes taints with `kubectl` using YAML or CLI-provided taints |
+| `list-images` | Any host with staged artifacts | Display effective/staged RKE2 image archives and required image references |
 
 Each action honors both CLI flags and YAML values. When both are provided, YAML values take precedence and are logged accordingly.
 
@@ -171,13 +160,13 @@ The repository includes a STIG helper script and guidance for firewall zoning an
 
 ```bash
 # With a manifest
-sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f clusters/prod-image.yaml image
 
 # Direct action without YAML
-sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
+sudo ./bin/rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
 
 # Print sanitized manifest for auditing
-sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
+sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 ```
 
 ### Common Flags
@@ -197,11 +186,10 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 
 ### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `12`) to control the entropy, for example `make token TOKEN_SIZE=24`.
+- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `32`) to control entropy, for example `make token TOKEN_SIZE=24`.
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
-- `make token` to print a fresh Base64 token and save it under `outputs/generated-token/token-<timestamp>.txt`. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 
 ## YAML Configuration Reference
 
@@ -301,7 +289,7 @@ System locations used during installation:
 
 ## Verification & Troubleshooting
 
-- Run `sudo ./rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
+- Run `sudo ./bin/rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
 - `image`, `server`, and `agent` now fail fast when required chart/release image tags are not present in staged archives under `/var/lib/rancher/rke2/agent/images` and `/opt/rke2/stage`.
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
@@ -334,4 +322,4 @@ The script honors several environment variables that can be set prior to executi
 
 ---
 
-For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh -h`.
+For more examples, inspect the `examples/` directory or review the inline help via `./bin/rke2nodeinit.sh -h`.

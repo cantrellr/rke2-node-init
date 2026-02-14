@@ -2,6 +2,8 @@
 
 This document describes what scripts/apply-stigs.sh does and how to run it safely.
 
+**Last Updated:** February 13, 2026
+
 ## What scripts/apply-stigs.sh does
 
 The script follows a report-first workflow for host firewall and RKE2 STIG checks. It:
