@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
-**Script Version:** rke2nodeinit.sh v0.8b  
+**Script Version:** rke2nodeinit.sh v1.2.0  
 **Actions Covered:** `verify`, `airgap`, `label-node`, `taint-node`, `custom-ca`, `list-images`  
 **Lines:** 8143-8549
 
@@ -717,7 +717,7 @@ sudo bin/rke2nodeinit.sh custom-ca -f custom-ca-config.yaml
 ### Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
   name: dc1manager-custom-ca

@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Airgap
 metadata:
   name: rke2-airgap-template
@@ -20,7 +20,7 @@ spec:
 
 ---
 # Enterprise example with custom CA
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Airgap
 metadata:
   name: enterprise-rke2-template
@@ -43,7 +43,7 @@ spec:
 
 ---
 # Minimal airgap template
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Airgap
 metadata:
   name: minimal-airgap-template

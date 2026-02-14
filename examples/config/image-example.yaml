@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: rke2-base-image
@@ -32,7 +32,7 @@ spec:
 
 ---
 # Minimal example - use defaults
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: rke2-minimal-image
@@ -42,7 +42,7 @@ spec:
 
 ---
 # Example with network configuration for template creation
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: rke2-template-image

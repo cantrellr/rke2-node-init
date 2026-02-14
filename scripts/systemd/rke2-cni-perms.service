@@ -1,0 +1,14 @@
+[Unit]
+Description=Normalize CNI permissions for Multus/Canal compatibility
+Documentation=https://github.com/rancher/rke2
+After=network-online.target rke2-server.service rke2-agent.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fix-cni-perms.sh
+
+[Install]
+WantedBy=multi-user.target

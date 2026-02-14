@@ -94,7 +94,7 @@ demo_section "2. Verbosity Control"
 
 # Create a simple test YAML for verify
 cat > /tmp/phase3-demo-verify.yaml <<'EOF'
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: phase3-demo-verify
@@ -116,7 +116,7 @@ demo_section "3. Dry-Run Mode"
 
 # Create a minimal image config for dry-run demo
 cat > /tmp/phase3-demo-image.yaml <<'EOF'
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: phase3-demo-image
@@ -136,7 +136,7 @@ demo_command "Dry-run mode - simulate image preparation without changes" \
 
 # Create a minimal server config for dry-run demo
 cat > /tmp/phase3-demo-server.yaml <<'EOF'
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: phase3-demo-server

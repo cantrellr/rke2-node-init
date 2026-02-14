@@ -2,12 +2,17 @@
   "default": true,
   "MD003": { "style": "atx" },
   "MD007": { "indent": 2 },
-  "MD013": { "line_length": 120, "code_blocks": false, "tables": false },
+  "MD013": false,
   "MD024": { "siblings_only": true },
   "MD025": false,
+    "MD022": false,
+    "MD031": false,
+  "MD032": false,
   "MD033": false,
   "MD034": false,
+  "MD040": false,
   "MD041": false,
+  "MD060": false,
   "no-hard-tabs": true,
   "whitespace": true
 }

@@ -7,14 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced default CNI permissions remediation timer cadence for faster Multus/Canal bootstrap convergence: `OnBootSec=10s`, `OnUnitActiveSec=15s`, `AccuracySec=5s` in `scripts/systemd/rke2-cni-perms.timer`.
+- Refreshed repository documentation for technical accuracy against current codebase and workflows (README surfaces, config examples, cert generation guides, VM GitOps docs, WSL setup, and security policy metadata).
+
+## [1.2.0] - 2026-02-13
+
 ### Added
 
 - `--enable-fips` flag to enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds during installation.
 - `PRO_TOKEN` environment variable support to attach Ubuntu Pro when FIPS enablement is requested.
+- `image` action now performs CNI-aware staged-image preflight based on `spec.cni` and fails fast when required offline images are missing.
+- Added persistent Multus/Canal CNI permission remediation assets: `scripts/fix-cni-perms.sh`, `scripts/systemd/rke2-cni-perms.service`, and `scripts/systemd/rke2-cni-perms.timer`.
+- `image` action now supports enabling CNI permission remediation via CLI (`--fix-cni-permissions`) or YAML (`spec.fixCNIPermissions: true`).
 
 ### Changed
 
 - Hardened CNI handling now fetches the exact chart tag and stages the archive into the RKE2 images directory to avoid mismatched pulls.
+- Golden-image guidance now recommends staging all required `rke2-images-*` flavor bundles (not only `hardened-cni-plugins`) for strict offline Multus/Canal deployments.
+- STIG remediation documentation now standardizes on the timer-based CNI permission fix workflow (service + timer) for stable operation.
 
 ### Added - Phase 5: Advanced Error Handling & Metrics Dashboard (November 2025)
 
@@ -329,13 +341,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved `test-interface-detection.sh` to `scripts/test/`
 - Reorganized VM directory structure for better separation of concerns
 - Updated `.gitignore` with production configuration paths
- - Docs: aligned example paths to `examples/` and updated examples to prefer kebab-case keys; clarified that camelCase aliases are supported
- - CI: added example YAML validation and duplicate-token-file verification workflow
- - `bin/rke2nodeinit.sh` enhanced with OCI manifest fallback parsing and
+- Docs: aligned example paths to `examples/` and updated examples to prefer kebab-case keys; clarified that camelCase aliases are supported
+- CI: added example YAML validation and duplicate-token-file verification workflow
+- `bin/rke2nodeinit.sh` enhanced with OCI manifest fallback parsing and
    post-staging verification improvements: architecture detection, tarball
    integrity checks, and optional deep layer verification via `--verify-layers`.
- - Help text updated to document new `--verify-layers` flag and its behavior.
- - Added `PHASES-1-2-IMPLEMENTATION.md` documenting the OCI parsing and
+- Help text updated to document new `--verify-layers` flag and its behavior.
+- Added `PHASES-1-2-IMPLEMENTATION.md` documenting the OCI parsing and
    layer verification implementation details and test notes.
 
 ### Testing - Previous Tests
@@ -419,7 +431,7 @@ This symlink will be removed in a future release. Please update your scripts.
   flag is intentionally opt-in because it performs an exhaustive hash check
   of every image layer.
 
-## [1.0.0] - TBD
+## [1.2.0] - TBD
 
 ### Initial Release
 - Full air-gapped RKE2 cluster deployment automation
@@ -430,6 +442,6 @@ This symlink will be removed in a future release. Please update your scripts.
 - Comprehensive logging and error handling
 - YAML-based configuration with CLI override support
 
-[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v1.2.0...HEAD
 [0.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.2.0
-[1.0.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v1.0.0
+[1.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v1.2.0

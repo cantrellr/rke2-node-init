@@ -15,21 +15,21 @@ Key Features
 - **Certificate Management**: Comprehensive CA generation workflow with encrypted root keys, subordinate CA signing, and OpenSSL v3_ca extensions.
 - **Registry Mirroring**: Automatic image retagging, SBOM generation with syft, and push to private registries with authentication.
 - **Security Hardened**: set -Eeuo pipefail, root privilege enforcement, credential masking, input validation, and CRLF detection.
-- **YAML-Driven Configuration**: apiVersion: rkeprep/v1 with comprehensive spec options for all actions.
+- **YAML-Driven Configuration**: apiVersion: rkeprep/v2 with comprehensive spec options for all actions.
 - **Node Management**: Built-in kubectl integration for labeling and tainting nodes.
 - **Operational Transparency**: Timestamped logs, CLI spinners for long operations, and detailed error reporting with line numbers.
 
 Repository Structure
 --------------------
 ```
-bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v1.0.0)
+bin/rke2nodeinit.sh          - Main automation script (9100+ lines, v1.2.0)
 certs/                       - CA generation scripts and examples
   scripts/
     generate-root-ca.sh      - Encrypted root CA generation
     generate-subordinate-ca.sh - Subordinate CA with YAML input
     verify-chain.sh          - Certificate chain verification
   examples/                  - Example YAML configurations
-configs/examples/            - Full action examples (server, agent, push, etc.)
+examples/config/             - Full action examples (server, agent, push, etc.)
 scripts/                     - Supporting tooling
   wsl-env/                   - WSL development environment setup
   test/                      - Interface detection and validation tests
@@ -53,8 +53,8 @@ Supported Actions
 Certificate Workflow
 --------------------
 The repository includes automated CA generation using Make targets:
-- `make certs-root-ca` - Generate encrypted root CA (AES-256) with safe permissions
-- `make certs-sub-ca INPUT=<yaml>` - Generate subordinate CA from YAML specification
+- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA (AES-256) with safe permissions
+- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA from YAML specification
 - `make certs-verify` - Validate OpenSSL availability and display security reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify certificate chain integrity
 
@@ -161,7 +161,7 @@ This agent assists with the rke2-node-init automation framework, which prepares 
 ## Capabilities
 
 ### Configuration & Planning
-- Parse and validate `apiVersion: rkeprep/v1` YAML configurations
+- Parse and validate `apiVersion: rkeprep/v2` YAML configurations
 - Generate node-specific YAML templates for server, agent, and add-server actions
 - Design multi-interface networking configurations (static IP, DHCP, DNS, MTU, metrics)
 - Recommend secure configurations for air-gapped and offline deployments
@@ -212,7 +212,7 @@ This agent assists with the rke2-node-init automation framework, which prepares 
 
 The repository is organized for modular offline operations:
 
-**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v1.0.0)
+**Core Script**: `bin/rke2nodeinit.sh` (9116 lines, v1.2.0)
 - 10 actions: image, push, server, add-server, agent, verify, airgap, label-node, taint-node, custom-ca
 - Multi-interface networking via spec.interfaces[] in YAML
 - 40+ reliability functions across 5 completed implementation phases
@@ -231,14 +231,14 @@ The repository is organized for modular offline operations:
 - `scripts/verify-chain.sh` - Certificate chain validation
 - `examples/` - YAML templates for CA generation
 
-**Configuration Examples**: `configs/examples/`
+**Configuration Examples**: `examples/config/`
 - server-example.yaml, agent-example.yaml, add-server-example.yaml
 - airgap-example.yaml, push-example.yaml, image-example.yaml
 - custom-ca-example.yaml, verify-example.yaml
 
 **Make Targets**: `Makefile`
-- `make certs-root-ca` - Generate encrypted root CA
-- `make certs-sub-ca INPUT=<yaml>` - Generate subordinate CA
+- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA
+- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA
 - `make certs-verify` - Validate OpenSSL and display reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify chain
 - `make token` - Generate base64 tokens for cluster join
@@ -372,8 +372,10 @@ When assisting users, follow these principles:
 ./scripts/wsl-env/wsl-dev-setup.sh
 
 # Generate certificates for testing
-make certs-root-ca
-make certs-sub-ca INPUT=certs/examples/rke2clusterCA-example.yaml
+./certs/scripts/generate-root-ca.sh --out-dir certs/scripts/outputs/root-ca
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/rke2clusterCA-example.yaml \
+  --root-key certs/scripts/outputs/root-ca/root-ca-key.pem \
+  --root-cert certs/scripts/outputs/root-ca/root-ca.crt
 
 # Validate scripts
 find . -name "*.sh" -exec bash -n {} \;
@@ -404,4 +406,4 @@ Repository: [rke2-node-init](https://github.com/cantrellr/rke2-node-init)
 
 **Last Updated**: November 21, 2025  
 **Agent Version**: 1.0.0  
-**Script Version**: 1.0.0 (Phases 1-5 complete, 9116 lines)
+**Script Version**: 1.2.0 (Phases 1-5 complete, 9116 lines)

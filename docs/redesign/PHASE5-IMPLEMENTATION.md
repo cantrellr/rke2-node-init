@@ -420,7 +420,7 @@ metrics_export_json "/path/to/metrics.json"
     "retry_failures": 0
   },
   "hostname": "server01",
-  "script_version": "1.0.0-phase5",
+    "script_version": "1.2.0",
   "dry_run": false
 }
 ```

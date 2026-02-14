@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: push-to-registry
@@ -27,7 +27,7 @@ spec:
 
 ---
 # Example using environment variables for credentials
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: push-secure-registry
@@ -47,7 +47,7 @@ spec:
 
 ---
 # Harbor registry example
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: push-to-harbor
@@ -55,7 +55,7 @@ metadata:
 
 spec:
   registry:
-    endpoint: harbor.example.com/library/rke2
+    endpoint: harbor.example.com/rke2/rke2
     username: robot$rke2-pusher
     password: CHANGE-ME-HARBOR-ROBOT-TOKEN
   
@@ -63,7 +63,7 @@ spec:
 
 ---
 # JFrog Artifactory example
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: push-to-artifactory
@@ -80,7 +80,7 @@ spec:
 
 ---
 # Development/Testing registry (insecure)
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: push-dev-registry

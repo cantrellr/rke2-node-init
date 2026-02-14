@@ -55,7 +55,7 @@ The toolkit follows a three-phase workflow:
 **Usage**:
 ```powershell
 $cred = Get-Credential
-.\New-VmsFromCsv.ps1 -CsvPath .\new-vms-from-csv-template.csv `
+.\New-VmsFromCsv.ps1 -CsvPath .\vm-template.csv `
                      -VCenter vcsa.lab.local `
                      -Credential $cred
 ```
@@ -82,7 +82,7 @@ $cred = Get-Credential
 **Usage**:
 ```powershell
 $cred = Get-Credential
-.\Clone-VmsFromCsv.ps1 -CsvPath .\clone-vms-from-csv-template.csv `
+.\Clone-VmsFromCsv.ps1 -CsvPath .\clone-vm-template.csv `
                        -VCenter vcsa.lab.local `
                        -Credential $cred `
                        -PowerOn
@@ -140,10 +140,8 @@ The `vm/` directory includes several CSV templates:
 
 | Template | Purpose |
 |----------|---------|
-| `new-vms-from-csv-template.csv` | Template for creating new VMs from scratch |
-| `clone-vms-from-csv-template.csv` | Template for cloning VMs from templates |
-| `clone-rkeimage-matrix.csv` | Example matrix for bulk RKE2 node cloning |
-| `new-vm-template.csv` | Alternative template format for VM creation |
+| `vm-template.csv` | Template for creating new VMs from scratch |
+| `clone-vm-template.csv` | Template for cloning VMs from templates |
 
 **CSV Best Practices**:
 - Use descriptive VM names that include node type (ctrl/work)
@@ -191,7 +189,7 @@ The `vm/` directory includes several CSV templates:
 ```powershell
 # Clone VMs from a template
 $cred = Get-Credential
-.\Clone-VmsFromCsv.ps1 -CsvPath .\clone-rkeimage-matrix.csv `
+.\Clone-VmsFromCsv.ps1 -CsvPath .\clone-vm-template.csv `
                        -VCenter vcsa.lab.local `
                        -Credential $cred `
                        -PowerOn
@@ -337,7 +335,7 @@ Get-DrsRule -Name "dc1manager_Controllers" -Cluster "R01_Kubernetes" | Format-Li
 - Cluster doesn't have DRS enabled
 - Insufficient permissions
 
-**Solution**: 
+**Solution**:
 ```powershell
 # Verify VM folder location
 Get-VM -Name "dc1manager-ctrl01" | Select-Object Name, Folder
@@ -382,5 +380,5 @@ Get-Help .\New-VmsFromCsv.ps1 -Examples
 
 ---
 
-**Last Updated**: November 8, 2025  
+**Last Updated**: February 13, 2026  
 **Maintainer**: Cloud Operations Team

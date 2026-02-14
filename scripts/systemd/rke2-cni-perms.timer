@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically normalize CNI permissions for Multus/Canal compatibility
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=5s
+Unit=rke2-cni-perms.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

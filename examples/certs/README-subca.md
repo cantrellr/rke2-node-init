@@ -1,24 +1,38 @@
-Subordinate CA input template
+# Subordinate CA input template
 
 This folder contains a sample YAML used by the subordinate CA generator.
 
-Usage
+This folder contains sample YAML used by `certs/scripts/generate-subordinate-ca.sh`.
 
-Interactive (Make will prompt for missing values):
+## Usage
 
-  make certs-sub-ca INPUT=examples/certs/subca-input.yaml
+Interactive (script prompts for missing values):
 
-Fully non-interactive (provide root key/cert/pass when calling Make):
+```bash
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+  --root-key /path/to/root-key.pem \
+  --root-cert /path/to/root-cert.pem
+```
 
-    make certs-sub-ca INPUT=examples/certs/subca-input.yaml ROOT_KEY=/path/to/root-key.pem \
-      ROOT_CERT=/path/to/root-cert.pem ROOT_PASS='rootpassphrase'
+Fully non-interactive (including encrypted root key passphrase):
 
-Or run the generator directly:
+```bash
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+  --root-key /path/to/root-key.pem \
+  --root-cert /path/to/root-cert.pem \
+  --root-passphrase 'rootpassphrase'
+```
 
-    ./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
-      --root-key /path/to/root-key.pem --root-cert /path/to/root-cert.pem
+Specify output directory and encrypted subordinate key:
 
-Notes
+```bash
+./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+  --out-dir certs/scripts/outputs/sub-ca \
+  --root-key /path/to/root-key.pem \
+  --root-cert /path/to/root-cert.pem \
+  --encrypt-sub-key --sub-passphrase 'subordinate-passphrase'
+```
+
+## Notes
 - If you have `yq` installed the generator will parse YAML robustly. Otherwise it falls back to a simple grep-based extraction.
-- `ROOT_PASS` is forwarded as `--root-passphrase` to the generator so it can run non-interactively if the root key is encrypted.
-- Keep generated private keys secure. Consider using `SUB_ENCRYPT=true` and `SUB_PASSFILE` to encrypt subordinate private key storage.
+- Keep generated private keys secure. Prefer `--encrypt-sub-key` with `--sub-passfile` (or `--sub-passphrase`) for encrypted subordinate key storage.

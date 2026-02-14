@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: dc1manager-ctrl01
@@ -16,7 +16,7 @@ spec:
     - name: ens33
       ip: 10.1.1.215
       prefix: 24
-      gateway: 10.1.1.1
+      gateway: 
       dns: ["4.2.2.2"]
       searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan18
@@ -52,7 +52,7 @@ spec:
   tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
-#  customCA:
-#    rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt
-#    rootKey: /opt/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
-#    installToOSTrust: true
+  customCA:
+    rootCrt: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca.crt
+    rootKey: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca-key.pem
+    installToOSTrust: true

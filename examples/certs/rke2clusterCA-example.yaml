@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
   name: example-cluster-ca
@@ -32,7 +32,7 @@ spec:
 
 ---
 # Example for a specific domain/environment
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
   name: production-domain-ca

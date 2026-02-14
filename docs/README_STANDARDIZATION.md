@@ -1,17 +1,18 @@
-README Standardization Plan
+README Standardization Status
 
-Date: November 9, 2025
+Date: February 13, 2026
 
 Purpose:
-This document lists README files to standardize across the repository and the small patchset plan to apply consistent headings, quick-start commands, and cross-references to the canonical Makefile cert targets.
+This document tracks README normalization efforts and confirms current canonical command paths and cross-reference expectations.
 
 Scope:
 - root README.md
-- certs/README.md (already updated)
-- configs/examples/README.md (already updated)
-- scripts/WSL-DEV-SETUP.md (already updated)
+- certs/README.md
+- examples/config/README.md
+- scripts/wsl-env/WSL-DEV-SETUP.md
 - vm/docs/README.md
-- any other README.md found under subfolders
+- vm-configs/README.md
+- any other README*.md found under subfolders
 
 Standard README structure (template):
 1. Short summary (1-2 lines)
@@ -22,19 +23,19 @@ Standard README structure (template):
 6. Files & layout
 7. Getting help / Contributing
 
-Planned changes (patchset):
+Current standardization checks:
 1. Identify all README files
-2. Create a minimal patch for each file: inject Quick Start and Security notes, ensure certs references use Make targets
-3. Run grep checks to verify updated references ("make certs-root-ca", "make certs-sub-ca")
-4. Commit changes in a small batch
+2. Ensure command paths match current tree (`bin/`, `examples/config/`, `scripts/wsl-env/`)
+3. Ensure certificate docs reference `certs/scripts/*` directly
+4. Validate cross-links and refresh metadata dates
 
-Checklist (to be executed):
-- [ ] Find README files across repo
-- [ ] Draft per-file patches
-- [ ] Apply patches and validate links/references
+Checklist (current cycle):
+- [x] Find README files across repo
+- [x] Draft per-file patches
+- [x] Apply patches and validate links/references
 - [ ] Commit and push
 
 Notes:
-- Keep edits minimal and safe; avoid rewriting large documentation content in a single change.
-- For docs that require large rewrites (root README), propose a follow-up PR for review.
+- Historical redesign docs under `docs/redesign/` are retained as archive content.
+- Canonical current references should point to root README, docs index, and examples/config README.
 

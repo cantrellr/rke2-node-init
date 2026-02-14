@@ -8,13 +8,15 @@ This script helps set up a Docker-in-WSL development environment supporting two 
 Files
 - `wsl-dev-setup.sh` - idempotent bash script to install runtime/tooling inside Ubuntu WSL2.
 
+Last Updated: February 13, 2026
+
 Quick start
 1. Open your WSL Ubuntu distro (Windows Terminal -> Ubuntu) or open a Remote-WSL window in VS Code.
 2. Make the script executable and run it:
 
 ```bash
-chmod +x scripts/wsl-dev-setup.sh
-./scripts/wsl-dev-setup.sh
+chmod +x scripts/wsl-env/wsl-dev-setup.sh
+./scripts/wsl-env/wsl-dev-setup.sh
 ```
 
 What it installs
@@ -52,12 +54,16 @@ If you need to generate a test Root / Subordinate CA for local RKE2 testing, use
 
 ```bash
 # From the repo root
-make certs-root-ca
-make certs-sub-ca INPUT=certs/examples/rke2clusterCA-example.yaml
+./certs/scripts/generate-root-ca.sh --out-dir certs/scripts/outputs/root-ca
+./certs/scripts/generate-subordinate-ca.sh \
+	--input examples/certs/rke2clusterCA-example.yaml \
+	--out-dir certs/scripts/outputs/sub-ca \
+	--root-key certs/scripts/outputs/root-ca/root-ca-key.pem \
+	--root-cert certs/scripts/outputs/root-ca/root-ca.crt
 ```
 
 Customization
-Edit `scripts/wsl-dev-setup.sh` to pin specific versions or to remove pieces you don't need.
+Edit `scripts/wsl-env/wsl-dev-setup.sh` to pin specific versions or to remove pieces you don't need.
 
 Support
 If you have issues, capture the failing command, its output, and your WSL distro / Windows build number and open an issue.

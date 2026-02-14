@@ -35,7 +35,7 @@ assignees: ''
 
 ```yaml
 # Paste your sanitized YAML config here (remove sensitive data)
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: NodeConfig
 # ...
 ```

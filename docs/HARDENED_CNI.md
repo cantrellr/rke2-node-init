@@ -28,6 +28,11 @@ Staging behavior
 
 - The script resolves the hardened-cni tag expected by the chart and ensures the tarball staged in `/var/lib/rancher/rke2/agent/images/` matches that tag exactly.
 - The tarball is written as a docker-archive with the `rancher/hardened-cni-plugins:<tag>` reference, so no retagging is required at runtime.
+- During `image`, the script now performs a CNI-aware preflight using `spec.cni` and verifies required images are present in staged archives. For `multus`/`canal` this includes chart images such as `hardened-multus-cni`, `hardened-calico`, and `hardened-flannel` in addition to `hardened-cni-plugins`.
+
+Important: `hardened-cni-plugins` alone is not a complete Multus/Canal offline set.
+
+- Recommended golden-image workflow: stage all required `rke2-images-*` flavor bundles for your selected CNI stack (for example via `INSTALL_RKE2_ARTIFACT_PATH`) so `image` preflight passes and runtime does not attempt external pulls.
 
 Environment variables:
 
@@ -35,7 +40,20 @@ Environment variables:
 - `HARDENED_CNI_TAG`: explicit tag to use when mirroring with skopeo.
 - `HARDENED_CNI_REQUIRED`: set to `0` to allow skipping hardened-cni acquisition (default: required).
 
+List effective image tags
+-------------------------
+
+To enumerate the effective image:tag set for a host (base RKE2 list + chart-required list + staged archive RepoTags), run:
+
+```bash
+./scripts/list-effective-rke2-images.sh
+```
+
+This is useful when troubleshooting why an optional image (for example `hardened-multus-cni`) was selected via auto-fallback instead of derived from the base `rke2-images` bundle.
+
 Logs
 ----
+
+Tag-derivation note: missing tag extraction is logged as `INFO` when a local hardened-cni tar already exists, and as `WARN` when no local hardened-cni artifact is present.
 
 The script writes raw skopeo output to `logs/skopeo-hardened-cni-plugins-*.log` and includes a short tail of that output in the main run log on error to simplify debugging.

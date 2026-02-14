@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: verify-prerequisites
@@ -33,7 +33,7 @@ spec:
 
 ---
 # Minimal verification (checks all with defaults)
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: basic-verify
@@ -45,7 +45,7 @@ spec:
 
 ---
 # Verify specific components
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: verify-network-registry
@@ -66,7 +66,7 @@ spec:
 
 ---
 # Pre-deployment verification
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: pre-deployment-verify
@@ -102,7 +102,7 @@ spec:
 
 ---
 # Post-installation verification
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Verify
 metadata:
   name: post-install-verify

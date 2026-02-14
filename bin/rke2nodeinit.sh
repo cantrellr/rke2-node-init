@@ -20,7 +20,7 @@ esac
 # rke2nodeinit.sh
 # ----------------------------------------------------
 #
-#       Version: 0.8b (multi-interface support)
+#       Version: 1.2.0 (multi-interface support)
 #       Written by: Ron Cantrell
 #           Github: cantrellr
 #            Email: charlescantrelljr@outlook.com
@@ -56,7 +56,7 @@ esac
 #   - Node management: Label and taint nodes via kubectl integration
 #   - Offline-first design: All artifacts cached locally for air-gapped deployments
 #   - Progress indicators: Spinner feedback for long-running operations
-#   - YAML-driven configuration: apiVersion rkeprep/v1 with comprehensive spec options
+#   - YAML-driven configuration: apiVersion rkeprep/v2 with comprehensive spec options
 #
 # Major architectural improvements:
 #   - Multi-interface support via YAML spec.interfaces[] or --interface CLI args
@@ -77,7 +77,7 @@ esac
 #   - Credential masking in sanitized YAML output
 #   - Warning for default/example credentials
 #
-# YAML configuration (apiVersion: rkeprep/v1):
+# YAML configuration (apiVersion: rkeprep/v2):
 #   Supported kinds: Push, Image, Server, AddServer, Agent, Verify, Airgap, CustomCA
 #   Required: metadata.name for all configurations
 #   Multi-interface syntax:
@@ -92,7 +92,7 @@ esac
 #         dhcp4: true
 #
 # CLI flags:
-#   -f FILE               YAML config file (apiVersion: rkeprep/v1)
+#   -f FILE               YAML config file (apiVersion: rkeprep/v2)
 #   -v VERSION            RKE2 version tag (e.g., v1.34.1+rke2r1)
 #   -r REGISTRY           Private registry (host[/namespace])
 #   -u USER               Registry username
@@ -163,11 +163,12 @@ DRY_PUSH=0                  # --dry-push skips actual registry push
 DRY_RUN=0                   # --dry-run simulates write operations without making changes
 VERBOSE=0                   # --verbose enables detailed output
 QUIET=0                     # --quiet suppresses informational messages
-SCRIPT_VERSION="1.0.0"      # Script version
+SCRIPT_VERSION="1.2.0"      # Script version
 APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately instead of deferring to next reboot
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
+FIX_CNI_PERMISSIONS=0       # --fix-cni-permissions installs/enables CNI permission remediation (image)
 BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
 BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
 BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
@@ -211,6 +212,12 @@ HARDENED_CNI_REQUIRED="${HARDENED_CNI_REQUIRED:-1}"
 HARDENED_CNI_BN="hardened-cni-plugins-${ARCH}.tar"
 HARDENED_CNI_FILE="$DOWNLOADS_DIR/$HARDENED_CNI_BN"
 
+# Optional explicit tag for rancher/hardened-multus-cni when Multus is used.
+HARDENED_MULTUS_TAG="${HARDENED_MULTUS_TAG:-}"
+# Basename used for saved hardened-multus-cni archive.
+HARDENED_MULTUS_BN="hardened-multus-cni-${ARCH}.tar"
+HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+
 # Logging - LOG_FILE will be set by initialize_action_context or defaults to timestamped name
 LOG_FILE=""
 
@@ -238,7 +245,7 @@ RKE2 Node Initialization Script
 Version: ${SCRIPT_VERSION}
 Compatible with: RKE2 v1.24+
 Bash version: ${BASH_VERSION}
-Last updated: November 16, 2025
+Last updated: February 13, 2026
 
 Phase 1: Core utilities (19 functions)
 Phase 2: Action refactoring (4 actions)  
@@ -435,6 +442,8 @@ Optional Flags:
   -u USER       Registry username
   -p PASS       Registry password
   --load-images Load images into container runtime
+  --fix-cni-permissions
+               Install/enable CNI permission remediation (service + timer)
   --dry-run     Simulate preparation without making changes
   --verbose     Show detailed operation progress
   --quiet       Suppress detailed progress (show summary only)
@@ -446,6 +455,8 @@ YAML Structure:
     name: golden-image
   spec:
     rke2Version: v1.28.1+rke2r1
+    fixCNIPermissions: true
+    rke2CNIVersion: v1.9.0-build20260116
     registry: registry.example.com/rke2
     registryUsername: admin
     registryPassword: password
@@ -472,7 +483,7 @@ Exit Codes:
 
 Output Files:
   outputs/sbom/<name>-sbom.txt      - Text SBOM with verification
-  outputs/sbom/<name>-sbom.json     - JSON SBOM for tooling
+  outputs/sbom/<name>-sbom.json     - SPDX 2.3 JSON SBOM for tooling
   outputs/<name>/README.txt         - Human-readable summary
   /etc/rke2image.defaults           - Site defaults
 
@@ -683,9 +694,11 @@ log_success() {
 #=============================================================================
 detect_os() {
   if [[ -f /etc/os-release ]]; then
-    # Source the file to get ID variable
-    . /etc/os-release
-    echo "${ID}"
+    # Parse ID without relying on sourced shell variables.
+    local os_id
+    os_id="$(grep -E '^ID=' /etc/os-release | head -n1 | cut -d= -f2 | tr -d '"')"
+    [[ -z "$os_id" ]] && os_id="unknown"
+    echo "$os_id"
     return 0
   else
     echo "unknown"
@@ -1818,7 +1831,7 @@ USAGE:
   sudo ./rke2nodeinit.sh [options] <action>
   sudo ./rke2nodeinit.sh <action> --help
 
-YAML KINDS (apiVersion: rkeprep/v1):
+YAML KINDS (apiVersion: rkeprep/v2):
   Push        - Push RKE2 images to private registry
   Image       - Prepare air-gapped base image (full prep + reboot)
   Airgap      - Same as Image but powers off instead of reboot (for VM templating)
@@ -1841,7 +1854,7 @@ ACTIONS (CLI):
   taint-node   - Apply Kubernetes taints to node (requires -n or --node-name)
 
 OPTIONS:
-  -f FILE      YAML config file (apiVersion: rkeprep/v1; kind selects action)
+  -f FILE      YAML config file (apiVersion: rkeprep/v2; kind selects action)
   -v VER       RKE2 version tag (e.g., v1.34.1+rke2r1). Auto-detects latest if omitted
   -r REG       Private registry (host[/namespace]), e.g., registry.example.com/rke2
   -u USER      Registry username for authentication
@@ -1868,6 +1881,10 @@ OPTIONS:
                container runtime (nerdctl/ctr). This is opt-in; by default
                images are left staged as a tarball on the node for air-gapped
                template workflows.
+  --fix-cni-permissions
+               Install and enable timer-based CNI permission remediation
+               (service + timer) during image preparation. Also supported via
+               YAML: spec.fixCNIPermissions: true
   --verify-layers
                Perform deep layer checksum verification of staged images
                tarball. Verifies individual layer SHA256 digests against
@@ -1892,7 +1909,7 @@ OPTIONS:
                (default: auto-detect based on available tools)
 
 MULTI-INTERFACE YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: Server
   metadata:
     name: ctrl01-server
@@ -1916,7 +1933,7 @@ MULTI-INTERFACE YAML EXAMPLE:
         dhcp4: true
 
 CUSTOM CA YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: CustomCA
   metadata:
     name: enterprise-ca
@@ -1928,12 +1945,13 @@ CUSTOM CA YAML EXAMPLE:
     installToOSTrust: true                    # default: true
 
 BOOT SERVICE YAML EXAMPLE:
-  apiVersion: rkeprep/v1
+  apiVersion: rkeprep/v2
   kind: Image
   metadata:
     name: base-image
   spec:
     rke2Version: v1.34.1+rke2r1
+    rke2CNIVersion: v1.9.0-build20260116
     bootService:
       enabled: true
       yamlPath: /root/server-config.yaml  # Config to run on first boot
@@ -2064,6 +2082,557 @@ cache_hardened_cni_http() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: extract_hardened_cni_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-cni-plugins`.
+#
+# Notes:
+# - The RKE2 images bundle is the authoritative source for the exact image tags
+#   used by the release (including hardened-cni-plugins used by Multus).
+# - This helper supports .tar, .tar.gz/.tgz, and .tar.zst.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_cni_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  # Extract manifest.json from the images tarball into a temp file.
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  # Parse manifest.json to find hardened-cni-plugins RepoTags.
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            # Accept with or without registry prefix
+            if re.search(r'(^|/)rancher/hardened-cni-plugins:', rt):
+                # split on first ':' from the right to preserve registry ports
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    # Fallback: very simple extraction (best-effort)
+    tag=$(grep -oE 'rancher/hardened-cni-plugins:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-cni-plugins:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_hardened_multus_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-multus-cni`.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_multus_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            if re.search(r'(^|/)rancher/hardened-multus-cni:', rt):
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    tag=$(grep -oE 'rancher/hardened-multus-cni:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-multus-cni:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: normalize_image_reference
+# Purpose : Canonicalize container image references so comparisons are stable
+#           across equivalent forms (for example docker.io prefixes).
+# Arguments:
+#   $1 - Image reference
+# Returns:
+#   Prints normalized image reference (best-effort).
+# ------------------------------------------------------------------------------
+normalize_image_reference() {
+  local ref="${1:-}"
+  ref="${ref#docker://}"
+  ref="${ref#oci://}"
+  ref="${ref%\"}"
+  ref="${ref#\"}"
+  ref="${ref%\'}"
+  ref="${ref#\'}"
+  ref="${ref%%[[:space:]]*}"
+
+  # Normalize common registry aliases
+  ref="${ref#docker.io/}"
+  ref="${ref#index.docker.io/}"
+
+  printf '%s' "$ref"
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_chart_images_from_rke2_tarball
+# Purpose : Inspect the downloaded RKE2 tarball for chart/manifests content and
+#           extract image:tag references from Helm chart YAML files.
+# Arguments:
+#   $1 - Path to rke2.<suffix>.tar.gz
+#   $2 - Output file path for required image references
+# Returns:
+#   0 on success (including empty result), non-zero on extraction errors.
+# ------------------------------------------------------------------------------
+extract_chart_images_from_rke2_tarball() {
+  local rke2_tar="$1"
+  local out_file="$2"
+
+  [[ -f "$rke2_tar" ]] || return 1
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not available; cannot extract chart image references from $rke2_tar"
+    return 2
+  fi
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if ! python3 - "$rke2_tar" >"$tmp" <<'PY'; then
+import io
+import re
+import sys
+import tarfile
+
+tar_path = sys.argv[1]
+
+# image refs with explicit tag, with or without registry prefix
+img_re = re.compile(
+    r'(?<![A-Za-z0-9._/-])'
+    r'((?:[A-Za-z0-9.-]+(?::[0-9]+)?/)?'
+    r'[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+'
+    r':[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})'
+)
+
+refs = set()
+
+def scan_text(text: str) -> None:
+    for m in img_re.findall(text or ""):
+        ref = m.strip().strip('"\'')
+        if ref:
+            refs.add(ref)
+
+def is_chartish(name: str) -> bool:
+    n = name.lower()
+    return ("/charts/" in n) or ("/chart/" in n) or ("/manifests/" in n)
+
+def is_yaml(name: str) -> bool:
+    n = name.lower()
+    return n.endswith(".yaml") or n.endswith(".yml")
+
+try:
+    with tarfile.open(tar_path, mode="r:*") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name
+            if not is_chartish(name):
+                continue
+
+            low = name.lower()
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            payload = extracted.read()
+
+            if low.endswith(".tgz") or low.endswith(".tar.gz"):
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as nested:
+                        for nmember in nested.getmembers():
+                            if nmember.isfile() and is_yaml(nmember.name):
+                                nf = nested.extractfile(nmember)
+                                if nf is None:
+                                    continue
+                                ntext = nf.read().decode("utf-8", errors="ignore")
+                                scan_text(ntext)
+                except Exception:
+                    pass
+            elif is_yaml(low):
+                text = payload.decode("utf-8", errors="ignore")
+                scan_text(text)
+except Exception:
+    raise
+
+for ref in sorted(refs):
+    print(ref)
+PY
+    rm -f "$tmp" || true
+    return 4
+  fi
+
+  # normalize and deduplicate
+  : > "$out_file"
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    normalize_image_reference "$ref" >> "$out_file"
+    printf '\n' >> "$out_file"
+  done < "$tmp"
+  sort -u -o "$out_file" "$out_file"
+  rm -f "$tmp" || true
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_required_images_from_release_txt
+# Purpose : Use release-provided image list files as authoritative required
+#           image references when chart files are not discoverable in the
+#           downloaded RKE2 tarball.
+# Arguments:
+#   $1 - Base release URL (e.g. https://github.com/.../<version>)
+#   $2 - Checksum manifest filename (e.g. sha256sum-amd64.txt)
+#   $3 - Output file path for required image references
+# Returns:
+#   0 when at least one required image is written, non-zero otherwise.
+# ------------------------------------------------------------------------------
+extract_required_images_from_release_txt() {
+  local base_url="$1"
+  local sha_file="$2"
+  local out_file="$3"
+
+  local -a candidates=(
+    "rke2-images.linux-${ARCH}.txt"
+    "rke2-images-all.linux-${ARCH}.txt"
+  )
+
+  : > "$out_file"
+
+  local bn path
+  for bn in "${candidates[@]}"; do
+    path="$DOWNLOADS_DIR/$bn"
+
+    if [[ ! -f "$path" && -n "$base_url" && -f "$DOWNLOADS_DIR/$sha_file" ]]; then
+      if grep -qE "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" 2>/dev/null; then
+        log INFO "Downloading release image list: $bn"
+        if curl -Lf "$base_url/$bn" -o "$path" >>"$LOG_FILE" 2>&1; then
+          chmod 0644 "$path" || true
+        else
+          rm -f "$path" || true
+        fi
+      fi
+    fi
+
+    [[ -f "$path" ]] || continue
+
+    if command -v sha256sum >/dev/null 2>&1 && [[ -f "$DOWNLOADS_DIR/$sha_file" ]]; then
+      if grep -qE "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" 2>/dev/null; then
+        if ! (grep -E "[[:space:]]${bn}$" "$DOWNLOADS_DIR/$sha_file" | sha256sum -c - >>"$LOG_FILE" 2>&1); then
+          log WARN "Checksum verification failed for $bn; skipping this required-image source"
+          continue
+        fi
+      fi
+    fi
+
+    # Normalize and keep only explicit repo:tag references
+    local tmp
+    tmp=$(mktemp) || return 2
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$path"
+
+    if [[ -s "$tmp" ]]; then
+      sort -u "$tmp" > "$out_file"
+      rm -f "$tmp" || true
+      log INFO "Using release image list source: $bn"
+      return 0
+    fi
+    rm -f "$tmp" || true
+  done
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: list_images_in_archive
+# Purpose : Extract image references (RepoTags) from a docker-archive style
+#           images tarball for comparison against required chart images.
+# Arguments:
+#   $1 - Path to images tarball
+#   $2 - Output file path for image references
+# Returns:
+#   0 on success, non-zero on parse/extraction errors.
+# ------------------------------------------------------------------------------
+list_images_in_archive() {
+  local images_tar="$1"
+  local out_file="$2"
+  [[ -f "$images_tar" ]] || return 1
+
+  local manifest_tmp
+  manifest_tmp=$(mktemp) || return 2
+  local rc=0
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$manifest_tmp" || true
+      return 3
+    fi
+    zstd -dc "$images_tar" 2>/dev/null | tar -xO manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  elif [[ "$images_tar" == *.tar.gz || "$images_tar" == *.tgz || "$images_tar" == *.gz ]]; then
+    gzip -dc "$images_tar" 2>/dev/null | tar -xO manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  else
+    tar -xOf "$images_tar" manifest.json >"$manifest_tmp" 2>/dev/null || rc=$?
+  fi
+
+  : > "$out_file"
+  if [[ $rc -eq 0 && -s "$manifest_tmp" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$manifest_tmp" <<'PY' > "$out_file" 2>/dev/null || true
+import json, sys
+data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+refs = set()
+for entry in data:
+    for tag in (entry.get('RepoTags') or []):
+        if tag:
+            refs.add(tag)
+for ref in sorted(refs):
+    print(ref)
+PY
+    else
+      grep -oE '[A-Za-z0-9./_-]+:[A-Za-z0-9_.-]+' "$manifest_tmp" | sort -u > "$out_file" || true
+    fi
+  fi
+
+  # OCI layout fallback when manifest.json was not present
+  if [[ ! -s "$out_file" ]]; then
+    local oci_refs
+    oci_refs=$(parse_oci_image_index "$images_tar" 2>/dev/null || true)
+    if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]] && command -v python3 >/dev/null 2>&1; then
+      python3 - <<'PY' "$oci_refs" > "$out_file" 2>/dev/null || true
+import json, sys
+refs = json.loads(sys.argv[1])
+for ref in sorted(set(refs)):
+    if ref:
+        print(ref)
+PY
+    fi
+  fi
+
+  local norm_tmp
+  norm_tmp=$(mktemp) || { rm -f "$manifest_tmp" || true; return 4; }
+  : > "$norm_tmp"
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    normalize_image_reference "$ref" >> "$norm_tmp"
+    printf '\n' >> "$norm_tmp"
+  done < "$out_file"
+  sort -u "$norm_tmp" > "$out_file"
+
+  rm -f "$manifest_tmp" "$norm_tmp" || true
+  [[ -s "$out_file" ]] || return 5
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_missing_images_from_list
+# Purpose : Download missing images into supplemental docker-archive tar files.
+#           Prefers skopeo (daemonless), falls back to nerdctl/docker.
+# Arguments:
+#   $1 - File containing one image reference per line
+# Returns:
+#   0 on success, non-zero if any image could not be downloaded.
+# ------------------------------------------------------------------------------
+cache_missing_images_from_list() {
+  local list_file="$1"
+  [[ -f "$list_file" ]] || return 1
+
+  local cache_dir="$DOWNLOADS_DIR"
+  mkdir -p "$cache_dir"
+
+  local img safe bn dest failed=0 pulled=0
+  while IFS= read -r img; do
+    [[ -z "$img" ]] && continue
+    safe=$(echo "$img" | sed -E 's#[/:@]#_#g')
+    bn="rke2-images-missing-${safe}.tar"
+    dest="$cache_dir/$bn"
+
+    if [[ -f "$dest" ]]; then
+      log INFO "Missing image already cached: $bn"
+      continue
+    fi
+
+    if command -v skopeo >/dev/null 2>&1; then
+      if skopeo copy --all --dest-tls-verify=false "docker://$img" "docker-archive:${dest}:$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with skopeo: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with skopeo: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    if command -v nerdctl >/dev/null 2>&1; then
+      if nerdctl -n k8s.io pull "$img" >>"$LOG_FILE" 2>&1 && nerdctl -n k8s.io save -o "$dest" "$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with nerdctl: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with nerdctl: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+      if docker pull "$img" >>"$LOG_FILE" 2>&1 && docker save -o "$dest" "$img" >>"$LOG_FILE" 2>&1; then
+        log INFO "Cached missing image with docker: $img -> $dest"
+        ((pulled++))
+      else
+        log ERROR "Failed to cache missing image with docker: $img"
+        rm -f "$dest" || true
+        ((failed++))
+      fi
+      continue
+    fi
+
+    log ERROR "No supported image client available to fetch missing image: $img (need skopeo, nerdctl, or docker)"
+    ((failed++))
+  done < "$list_file"
+
+  log INFO "Missing image cache summary: pulled=$pulled failed=$failed"
+  (( failed == 0 ))
+}
+
+# ------------------------------------------------------------------------------
+# Function: reconcile_chart_images_against_downloaded_bundle
+# Purpose : Derive chart-required images from RKE2 tarball, compare with image
+#           bundle contents, and download/cache any missing image references.
+# Arguments:
+#   None (uses DOWNLOADS_DIR globals)
+# Returns:
+#   0 when requirements are satisfied, non-zero on extraction/repair failure.
+# ------------------------------------------------------------------------------
+reconcile_chart_images_against_downloaded_bundle() {
+  local base_url="${1:-}"
+  local sha_file="${2:-$SHA256_FILE}"
+  local rke2_tar="$DOWNLOADS_DIR/$RKE2_TARBALL"
+  local images_tar="$DOWNLOADS_DIR/$IMAGES_TAR"
+  [[ -f "$rke2_tar" && -f "$images_tar" ]] || return 0
+
+  local required_file="$DOWNLOADS_DIR/chart-images-required.linux-${ARCH}.txt"
+  local present_file="$DOWNLOADS_DIR/chart-images-present.linux-${ARCH}.txt"
+  local missing_file="$DOWNLOADS_DIR/chart-images-missing.linux-${ARCH}.txt"
+
+  # Recompute reconciliation artifacts every run (avoid stale carry-over).
+  : > "$required_file"
+  : > "$missing_file"
+
+  extract_chart_images_from_rke2_tarball "$rke2_tar" "$required_file" || true
+
+  if [[ ! -s "$required_file" ]]; then
+    if ! extract_required_images_from_release_txt "$base_url" "$sha_file" "$required_file"; then
+      log WARN "No chart or release-list image references found; skipping chart-image reconciliation"
+      : > "$missing_file"
+      return 0
+    fi
+  fi
+
+  if ! list_images_in_archive "$images_tar" "$present_file"; then
+    log ERROR "Failed to inventory bundled images from $images_tar"
+    return 2
+  fi
+
+  comm -23 "$required_file" "$present_file" > "$missing_file" || true
+
+  local required_count present_count missing_count
+  required_count=$(wc -l < "$required_file" | awk '{print $1}')
+  present_count=$(wc -l < "$present_file" | awk '{print $1}')
+  missing_count=$(wc -l < "$missing_file" | awk '{print $1}')
+
+  log INFO "Chart image reconciliation: required=$required_count present=$present_count missing=$missing_count"
+
+  if (( missing_count == 0 )); then
+    log INFO "All chart-referenced images are present in $IMAGES_TAR"
+    return 0
+  fi
+
+  log WARN "Detected $missing_count chart-referenced image(s) absent from $IMAGES_TAR; caching supplemental archives"
+  if ! cache_missing_images_from_list "$missing_file"; then
+    log ERROR "Failed to cache one or more missing chart-referenced images"
+    return 3
+  fi
+
+  log INFO "Cached supplemental images for missing chart references. Manifest: $missing_file"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: cache_hardened_cni_skopeo
 # Purpose : Mirror the `rancher/hardened-cni-plugins` image into a local
 #           docker-archive tarball using `skopeo` (no daemon required). The
@@ -2085,38 +2654,25 @@ cache_hardened_cni_skopeo() {
 
   mkdir -p "$DOWNLOADS_DIR"
 
-  # Determine desired tag: prefer explicit, then RKE2_VERSION, then try to
-  # infer from downloaded images manifest, otherwise fall back to 'latest'.
+  # Determine desired tag:
+  #   1) explicit_tag (HARDENED_CNI_TAG)
+  #   2) extract the exact tag from the downloaded RKE2 images tarball
+  #   3) RKE2_VERSION (last-resort heuristic)
+  #
+  # The images tarball is the authoritative source for chart-bundled images.
   local desired_tag=""
+  local desired_tag_source=""
   if [[ -n "$explicit_tag" ]]; then
     desired_tag="$explicit_tag"
-  elif [[ -n "${RKE2_VERSION:-}" ]]; then
+    desired_tag_source="explicit"
+  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    desired_tag=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
+  fi
+
+  if [[ -z "$desired_tag" && -n "${RKE2_VERSION:-}" ]]; then
     desired_tag="${RKE2_VERSION}"
-  else
-    # Try to infer from the images tar (if present in downloads)
-    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" && -x "$(command -v zstd || true)" ]]; then
-      # Extract manifest.json from tar.zst and search for rke2-runtime tags
-      local _manifest
-      _manifest=$(mktemp)
-      if zstd -d -c "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null | tar -Ox manifest.json > "$_manifest" 2>/dev/null; then
-        if command -v python3 >/dev/null 2>&1; then
-          desired_tag=$(python3 - <<PY 2>/dev/null
-import json,sys
-try:
-    j=json.load(open('$_manifest'))
-    for e in j:
-        for t in e.get('RepoTags',[]):
-            if 'rke2-runtime' in t:
-                print(t.split(':',1)[1])
-                raise SystemExit
-except Exception:
-    pass
-PY
-) || true
-        fi
-      fi
-      rm -f "$_manifest" || true
-    fi
+    desired_tag_source="rke2-version"
   fi
 
   # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
@@ -2140,11 +2696,25 @@ PY
     chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
     rm -f "$_tfile" "$_hfile" || true
   fi
-  if [[ -z "$chosen" ]]; then
+  # If we have an authoritative tag from the images tarball (or explicit
+  # operator override), use it directly and skip remote tag selection.
+  # For RKE2_VERSION fallback, only force direct override when the value is a
+  # valid OCI image tag (RKE2 release tags can include '+' which is invalid).
+  if [[ -n "$desired_tag" ]]; then
+    if [[ "$desired_tag_source" == "rke2-version" ]]; then
+      if [[ "$desired_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        chosen="$desired_tag"
+      else
+        log WARN "RKE2 version '$desired_tag' is not OCI-tag-safe; using discovered hardened-cni tag '${chosen:-latest}'"
+      fi
+    else
+      chosen="$desired_tag"
+    fi
+  elif [[ -z "$chosen" ]]; then
     chosen="latest"
   fi
 
-  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag')"
+  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag'; source='${desired_tag_source:-none}')"
 
   local dest="$DOWNLOADS_DIR/$bn"
   # Use docker-archive format (creates tar with manifest.json compatible with tooling)
@@ -2218,6 +2788,124 @@ PY
   fi
 
   log INFO "skopeo mirrored hardened-cni -> $dest"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_multus_skopeo
+# Purpose : Mirror `rancher/hardened-multus-cni` into a local docker-archive
+#           tarball for offline Multus deployments.
+# Arguments:
+#   $1 - Optional explicit tag to use
+# Returns : 0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+cache_hardened_multus_skopeo() {
+  local explicit_tag="${1:-}"
+  local bn="${HARDENED_MULTUS_BN:-hardened-multus-cni-${ARCH}.tar}"
+  local repo="docker://rancher/hardened-multus-cni"
+
+  if ! command -v skopeo >/dev/null 2>&1; then
+    log WARN "skopeo not available; cannot mirror hardened-multus-cni"
+    return 2
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+
+  local desired_tag=""
+  local desired_tag_source=""
+  if [[ -n "$explicit_tag" ]]; then
+    desired_tag="$explicit_tag"
+    desired_tag_source="explicit"
+  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    desired_tag=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
+  fi
+
+  local chosen=""
+  if [[ -n "$desired_tag" ]]; then
+    chosen="$desired_tag"
+  else
+    local tags_json
+    tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+    if command -v python3 >/dev/null 2>&1; then
+      chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
+import json,re,sys
+raw=sys.argv[1]
+tags=[]
+try:
+    doc=json.loads(raw) if raw else {}
+    tags=doc.get("Tags") or []
+except Exception:
+    tags=[]
+
+def score(tag):
+    m=re.search(r'build(\d{8})$', tag)
+    b=int(m.group(1)) if m else -1
+    sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
+    if sv:
+        major,minor,patch=map(int,sv.groups())
+    else:
+        major=minor=patch=-1
+    return (b,major,minor,patch,tag)
+
+if not tags:
+    print("latest")
+else:
+    print(sorted(tags, key=score, reverse=True)[0])
+PY
+)
+    fi
+    [[ -n "$chosen" ]] || chosen="latest"
+  fi
+
+  log INFO "skopeo: chosen hardened-multus tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
+
+  local dest="$DOWNLOADS_DIR/$bn"
+  local tmp_dest
+  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+  rm -f "$tmp_dest" || true
+
+  local dest_ref="rancher/hardened-multus-cni:${chosen}"
+  local rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+  else
+    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+  fi
+
+  if [[ $rc -ne 0 ]]; then
+    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
+    rm -f "$tmp_dest" || true
+    return 1
+  fi
+
+  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+    log ERROR "Failed to move mirrored hardened-multus into place: $tmp_dest -> $dest"
+    rm -f "$tmp_dest" || true
+    return 1
+  }
+  chmod 0644 "$dest" || true
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+    local sha
+    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+    if [[ -n "$sha" ]]; then
+      if [[ -f "$manifest" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        grep -v -F " $bn" "$manifest" > "$mtmp" || true
+        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
+        mv "$mtmp" "$manifest"
+      else
+        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+      fi
+      log INFO "Appended hardened-multus checksum to manifest: $manifest"
+    fi
+  fi
+
+  log INFO "skopeo mirrored hardened-multus -> $dest"
   return 0
 }
 
@@ -2733,7 +3421,7 @@ append_spec_config_extras() {
   # Scalars we pass through as-is if present
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
-    "system-default-registry" "private-registry" "write-kubeconfig-mode"
+    "system-default-registry" "embedded-registry" "disable-default-registry-endpoint" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
     # Image overrides commonly required to avoid external pulls in air-gapped installs
@@ -2880,7 +3568,7 @@ sanitize_yaml() {
 # ------------------------------------------------------------------------------
 normalize_list_csv() {
   local v="$1"
-  v="${v#[}"; v="${v%]}"
+  v="${v#\[}"; v="${v%\]}"
   v="${v//\"/}"; v="${v//\'/}"
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
 }
@@ -3017,12 +3705,13 @@ format_inline_list() {
   local _raw="$1"
   [[ -z "$_raw" ]] && return
   local _clean
-  _clean="${_raw#[}"; _clean="${_clean%]}"
+  _clean="${_raw#\[}"; _clean="${_clean%\]}"
   _clean="${_clean//;/,}"
   local -a _items=()
-  IFS=',' read -r -a _tmp <<<"$_clean"
+  local -a _tmp_items=()
+  IFS=',' read -r -a _tmp_items <<<"$_clean"
   local _item
-  for _item in "${_tmp[@]}"; do
+  for _item in "${_tmp_items[@]}"; do
     _item="$(trim_whitespace "$_item")"
     [[ -n "$_item" ]] && _items+=("$_item")
   done
@@ -3609,6 +4298,72 @@ normalize_bool_value() {
   else
     printf '"%s"\n' "$lowered"
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Function: bool_value_is_true
+# Purpose : Interpret boolean-like values from CLI/YAML safely.
+# Arguments:
+#   $1 - Raw value
+# Returns :
+#   0 when value is true/1/yes/on, non-zero otherwise.
+# ------------------------------------------------------------------------------
+bool_value_is_true() {
+  local raw="${1:-}"
+  local v
+  v="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ ${v:0:1} == '"' && ${v: -1} == '"' ]]; then
+      v="${v:1:-1}"
+    elif [[ ${v:0:1} == "'" && ${v: -1} == "'" ]]; then
+      v="${v:1:-1}"
+    fi
+  fi
+
+  case "${v,,}" in
+    true|1|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Function: install_cni_permission_remediation
+# Purpose : Install and enable timer-based CNI permissions remediation used to
+#           prevent Multus startup failures when host CNI paths are hardened.
+# Arguments:
+#   None (uses REPO_ROOT and DRY_RUN globals)
+# Returns :
+#   0 on success, non-zero on failure.
+# ------------------------------------------------------------------------------
+install_cni_permission_remediation() {
+  local script_src="$REPO_ROOT/scripts/fix-cni-perms.sh"
+  local svc_src="$REPO_ROOT/scripts/systemd/rke2-cni-perms.service"
+  local timer_src="$REPO_ROOT/scripts/systemd/rke2-cni-perms.timer"
+
+  if [[ ! -f "$script_src" || ! -f "$svc_src" || ! -f "$timer_src" ]]; then
+    log_error "CNI remediation assets missing in repository"
+    log_error "Expected: $script_src, $svc_src, $timer_src"
+    return 1
+  fi
+
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    log_info "DRY-RUN: Would install /usr/local/sbin/fix-cni-perms.sh"
+    log_info "DRY-RUN: Would install systemd units rke2-cni-perms.service and rke2-cni-perms.timer"
+    log_info "DRY-RUN: Would run systemctl daemon-reload and enable --now service+timer"
+    return 0
+  fi
+
+  install -m 0755 "$script_src" /usr/local/sbin/fix-cni-perms.sh || return 1
+  install -m 0644 "$svc_src" /etc/systemd/system/rke2-cni-perms.service || return 1
+  install -m 0644 "$timer_src" /etc/systemd/system/rke2-cni-perms.timer || return 1
+
+  systemctl daemon-reload >>"$LOG_FILE" 2>&1 || return 1
+  systemctl disable --now rke2-cni-perms.path >>"$LOG_FILE" 2>&1 || true
+  systemctl reset-failed rke2-cni-perms.service rke2-cni-perms.timer >>"$LOG_FILE" 2>&1 || true
+  systemctl enable --now rke2-cni-perms.service rke2-cni-perms.timer >>"$LOG_FILE" 2>&1 || return 1
+
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -4309,6 +5064,48 @@ disable_boot_service() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: uninstall_boot_service_artifacts
+# Purpose : Remove boot automation systemd unit and script from the host.
+# Arguments:
+#   None (uses global BOOT_SERVICE_PATH, BOOT_SCRIPT_PATH)
+# Returns :
+#   0 on success, non-zero on failure
+# ------------------------------------------------------------------------------
+uninstall_boot_service_artifacts() {
+  local service_name
+  service_name="$(basename "$BOOT_SERVICE_PATH")"
+
+  if systemctl list-unit-files "$service_name" >/dev/null 2>&1 || [[ -f "$BOOT_SERVICE_PATH" ]]; then
+    systemctl disable "$service_name" >>"$LOG_FILE" 2>&1 || true
+    systemctl stop "$service_name" >>"$LOG_FILE" 2>&1 || true
+    systemctl unmask "$service_name" >>"$LOG_FILE" 2>&1 || true
+  fi
+
+  if [[ -f "$BOOT_SERVICE_PATH" ]]; then
+    rm -f "$BOOT_SERVICE_PATH" || {
+      log ERROR "Failed to remove boot service unit: $BOOT_SERVICE_PATH"
+      return 1
+    }
+  fi
+
+  if [[ -f "$BOOT_SCRIPT_PATH" ]]; then
+    rm -f "$BOOT_SCRIPT_PATH" || {
+      log ERROR "Failed to remove boot script: $BOOT_SCRIPT_PATH"
+      return 1
+    }
+  fi
+
+  rm -f /var/lib/rke2-boot-complete || true
+
+  if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
+    log WARN "systemctl daemon-reload failed after boot artifact removal"
+  fi
+
+  log INFO "Boot service/script artifacts removed (if present)"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: detect_latest_rke2_version
 # Purpose : Query GitHub for the most recent RKE2 release tag when the operator
 #           does not supply an explicit version. The result populates the global
@@ -4419,8 +5216,8 @@ write_netplan_multi() {
   disable_cloud_init_net
   purge_old_netplan
 
-  local _tmp="/etc/netplan/99-rke-static.yaml"
-  : > "$_tmp"
+  local _netplan_tmp="/etc/netplan/99-rke-static.yaml"
+  : > "$_netplan_tmp"
 
   # Write netplan header
   {
@@ -4428,7 +5225,7 @@ write_netplan_multi() {
     echo "  version: 2"
     echo "  renderer: networkd"
     echo "  ethernets:"
-  } >> "$_tmp"
+  } >> "$_netplan_tmp"
 
   local _idx=0 _primary_nic="" _summary=""; local -a _ifaces=()
   local _entry
@@ -4538,7 +5335,7 @@ write_netplan_multi() {
       # Disable IPv6 on all interfaces
       echo "      accept-ra: false"
       echo "      link-local: []"
-    } >> "$_tmp"
+    } >> "$_netplan_tmp"
 
     local _desc="${_nic[ip]:-}${_nic[cidr]:+ (${_nic[cidr]})}"
     if [[ "$_dhcp" == "true" ]]; then
@@ -4557,8 +5354,8 @@ write_netplan_multi() {
   done
 
   export NETPLAN_LAST_NIC="$_primary_nic"
-  chmod 600 "$_tmp"
-  log INFO "Netplan written to $_tmp (primary=$_primary_nic; interfaces=${_summary})"
+  chmod 600 "$_netplan_tmp"
+  log INFO "Netplan written to $_netplan_tmp (primary=$_primary_nic; interfaces=${_summary})"
 
   if (( APPLY_NETPLAN_NOW )); then
     log INFO "Applying netplan immediately (--apply-netplan-now flag set)..."
@@ -5464,6 +6261,376 @@ except Exception as e:
 }
 
 # ------------------------------------------------------------------------------
+# Function: collect_requested_cni_plugins
+# Purpose : Resolve requested CNI plugins from YAML spec.cni as normalized
+#           lowercase values (supports list and scalar forms).
+# Arguments:
+#   $1 - Path to YAML config file
+# Returns :
+#   Prints one CNI name per line (unique). Returns 0 even when none are found.
+# ------------------------------------------------------------------------------
+collect_requested_cni_plugins() {
+  local file="$1"
+  local -a raw=()
+
+  [[ -n "$file" && -f "$file" ]] || return 0
+
+  while IFS= read -r item; do
+    [[ -n "$item" ]] && raw+=("$item")
+  done < <(yaml_spec_list_items "$file" "cni" 2>/dev/null || true)
+
+  if [[ ${#raw[@]} -eq 0 ]]; then
+    local scalar
+    scalar="$(yaml_spec_get "$file" cni 2>/dev/null || true)"
+    [[ -n "$scalar" ]] && raw+=("$scalar")
+  fi
+
+  local item norm token
+  local -A seen=()
+  for item in "${raw[@]}"; do
+    norm="$(echo "$item" | tr '[:upper:]' '[:lower:]' | tr -d '[]"' | tr -d '\r\n' | sed 's/[[:space:]]//g')"
+    [[ -z "$norm" ]] && continue
+    IFS=',' read -r -a _tokens <<< "$norm"
+    for token in "${_tokens[@]}"; do
+      [[ -z "$token" ]] && continue
+      if [[ -z "${seen[$token]:-}" ]]; then
+        seen[$token]=1
+        printf '%s\n' "$token"
+      fi
+    done
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Function: archive_contains_image_pattern
+# Purpose : Determine whether an image reference pattern exists in a staged
+#           images archive (Docker manifest, OCI index, or raw fallback scan).
+# Arguments:
+#   $1 - Archive path
+#   $2 - Pattern to search for (e.g., rancher/hardened-multus-cni:)
+# Returns : 0 if pattern found, 1 otherwise
+# ------------------------------------------------------------------------------
+archive_contains_image_pattern() {
+  local archive="$1"
+  local pattern="$2"
+  local manifest=""
+  local oci_refs=""
+
+  [[ -f "$archive" ]] || return 1
+
+  if [[ "$archive" == *.zst ]]; then
+    command -v zstd >/dev/null 2>&1 || return 1
+    manifest="$(zstd -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+  elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+    command -v gzip >/dev/null 2>&1 || return 1
+    manifest="$(gzip -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+  else
+    manifest="$(tar -xOf "$archive" manifest.json 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$manifest" ]] && echo "$manifest" | grep -q "$pattern"; then
+    return 0
+  fi
+
+  oci_refs="$(parse_oci_image_index "$archive" 2>/dev/null || true)"
+  if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]] && echo "$oci_refs" | grep -q "$pattern"; then
+    return 0
+  fi
+
+  if [[ "$archive" == *.zst ]]; then
+    zstd -dc "$archive" 2>/dev/null | grep -a -q "$pattern" && return 0 || true
+  elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+    gzip -dc "$archive" 2>/dev/null | grep -a -q "$pattern" && return 0 || true
+  else
+    grep -a -q "$pattern" "$archive" && return 0 || true
+  fi
+
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_required_cni_images_staged
+# Purpose : Ensure the staged image archives contain required images for the
+#           configured spec.cni plugins so offline nodes do not pull remotely.
+# Arguments:
+#   $1 - Optional YAML config path (defaults to CONFIG_FILE)
+# Returns : 0 on success, non-zero when required CNI images are missing
+# ------------------------------------------------------------------------------
+verify_required_cni_images_staged() {
+  local cfg="${1:-$CONFIG_FILE}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local -a cni_plugins=()
+  local -a bundles=()
+  local -A required=()
+  local -A labels=()
+  local -A allow_separate=()
+
+  if [[ -z "$cfg" || ! -f "$cfg" ]]; then
+    log_info "CNI image preflight skipped (no YAML config file provided)."
+    return 0
+  fi
+
+  while IFS= read -r cni; do
+    [[ -n "$cni" ]] && cni_plugins+=("$cni")
+  done < <(collect_requested_cni_plugins "$cfg")
+
+  if [[ ${#cni_plugins[@]} -eq 0 ]]; then
+    log_info "CNI image preflight skipped (spec.cni not set in $cfg)."
+    return 0
+  fi
+
+  while IFS= read -r archive; do
+    [[ -n "$archive" ]] && bundles+=("$archive")
+  done < <(find "$images_dir" -maxdepth 1 -type f -name "rke2-images*.tar*" | sort)
+
+  if [[ ${#bundles[@]} -eq 0 ]]; then
+    log_error "CNI image preflight failed: no staged rke2-images archives found in $images_dir"
+    return 1
+  fi
+
+  local cni
+  for cni in "${cni_plugins[@]}"; do
+    case "$cni" in
+      multus)
+        required["rancher/hardened-multus-cni:"]=1
+        labels["rancher/hardened-multus-cni:"]="Multus daemon image"
+        allow_separate["rancher/hardened-multus-cni:"]=1
+        required["rancher/hardened-cni-plugins:"]=1
+        labels["rancher/hardened-cni-plugins:"]="Multus hardened-cni plugins image"
+        allow_separate["rancher/hardened-cni-plugins:"]=1
+        ;;
+      canal)
+        required["rancher/hardened-calico:"]=1
+        labels["rancher/hardened-calico:"]="Canal Calico image"
+        required["rancher/hardened-flannel:"]=1
+        labels["rancher/hardened-flannel:"]="Canal Flannel image"
+        ;;
+      cilium)
+        required["rancher/hardened-cilium:"]=1
+        labels["rancher/hardened-cilium:"]="Cilium image"
+        ;;
+      *)
+        log_info "CNI image preflight: no explicit image rules for cni='$cni' (skipping strict checks for this plugin)."
+        ;;
+    esac
+  done
+
+  if [[ ${#required[@]} -eq 0 ]]; then
+    log_info "CNI image preflight: no strict image requirements derived from spec.cni (${cni_plugins[*]})."
+    return 0
+  fi
+
+  log_info "Running CNI image preflight against staged archives in $images_dir"
+  local pattern archive found fail_count=0
+  for pattern in "${!required[@]}"; do
+    found=0
+    for archive in "${bundles[@]}"; do
+      if archive_contains_image_pattern "$archive" "$pattern"; then
+        log_info "  ✓ ${labels[$pattern]} found in $(basename "$archive")"
+        found=1
+        break
+      fi
+    done
+
+    if [[ $found -eq 0 && -n "${allow_separate[$pattern]:-}" ]]; then
+      local separate_bn=""
+      case "$pattern" in
+        rancher/hardened-cni-plugins:)
+          separate_bn="$HARDENED_CNI_BN"
+          ;;
+        rancher/hardened-multus-cni:)
+          separate_bn="$HARDENED_MULTUS_BN"
+          ;;
+      esac
+      if [[ -n "$separate_bn" ]] && [[ -f "$images_dir/$separate_bn" || -f "$STAGE_DIR/$separate_bn" || -f "$DOWNLOADS_DIR/$separate_bn" ]]; then
+        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $separate_bn"
+        found=1
+      fi
+    fi
+
+    if [[ $found -eq 0 ]]; then
+      log_error "  ✗ Missing required CNI image reference pattern: $pattern (${labels[$pattern]:-required})"
+      ((fail_count++))
+    fi
+  done
+
+  if (( fail_count > 0 )); then
+    log_error "CNI image preflight failed ($fail_count missing requirement(s))."
+    log_error "Remediation: provide full CNI-specific image bundles (for example rke2-images-*.linux-${ARCH}.tar.*) via INSTALL_RKE2_ARTIFACT_PATH or stage them into $images_dir."
+    return 1
+  fi
+
+  log_info "CNI image preflight passed for spec.cni: ${cni_plugins[*]}"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: collect_required_image_refs_for_validation
+# Purpose : Build a normalized required image:tag list for offline validation.
+#           Prefers previously generated chart image lists, then derives from
+#           staged RKE2 artifacts without requiring network access.
+# Arguments:
+#   $1 - Output file path
+# Returns : 0 when required refs were collected, non-zero otherwise
+# ------------------------------------------------------------------------------
+collect_required_image_refs_for_validation() {
+  local out_file="$1"
+  local required_bn="chart-images-required.linux-${ARCH}.txt"
+  local release_list_bn="rke2-images.linux-${ARCH}.txt"
+  local release_list_all_bn="rke2-images-all.linux-${ARCH}.txt"
+  local tmp
+
+  : > "$out_file"
+
+  for src in "$DOWNLOADS_DIR/$required_bn" "$STAGE_DIR/$required_bn"; do
+    [[ -s "$src" ]] || continue
+    tmp=$(mktemp) || return 2
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -n "$ref" && "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$src"
+    if [[ -s "$tmp" ]]; then
+      sort -u "$tmp" > "$out_file"
+      rm -f "$tmp" || true
+      log_info "Using required image reference source: $src"
+      return 0
+    fi
+    rm -f "$tmp" || true
+  done
+
+  local rke2_tar_candidate=""
+  for p in "$STAGE_DIR/$RKE2_TARBALL" "$DOWNLOADS_DIR/$RKE2_TARBALL"; do
+    if [[ -f "$p" ]]; then
+      rke2_tar_candidate="$p"
+      break
+    fi
+  done
+  if [[ -n "$rke2_tar_candidate" ]]; then
+    if extract_chart_images_from_rke2_tarball "$rke2_tar_candidate" "$out_file" && [[ -s "$out_file" ]]; then
+      log_info "Derived required image references from RKE2 tarball: $rke2_tar_candidate"
+      return 0
+    fi
+  fi
+
+  tmp=$(mktemp) || return 2
+  : > "$tmp"
+  for src in \
+    "$DOWNLOADS_DIR/$release_list_bn" \
+    "$DOWNLOADS_DIR/$release_list_all_bn" \
+    "$STAGE_DIR/$release_list_bn" \
+    "$STAGE_DIR/$release_list_all_bn"
+  do
+    [[ -f "$src" ]] || continue
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      [[ "$ref" =~ ^[[:space:]]*# ]] && continue
+      ref="$(normalize_image_reference "$ref")"
+      [[ -n "$ref" && "$ref" == *:* ]] || continue
+      printf '%s\n' "$ref" >> "$tmp"
+    done < "$src"
+  done
+
+  if [[ -s "$tmp" ]]; then
+    sort -u "$tmp" > "$out_file"
+    rm -f "$tmp" || true
+    log_info "Using required image references from local release image list files"
+    return 0
+  fi
+
+  rm -f "$tmp" || true
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: collect_staged_image_refs_for_validation
+# Purpose : Inventory normalized image references present in staged archives.
+# Arguments:
+#   $1 - Output file path
+# Returns : 0 when refs were discovered, non-zero otherwise
+# ------------------------------------------------------------------------------
+collect_staged_image_refs_for_validation() {
+  local out_file="$1"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local tmp_all tmp_refs archive
+
+  : > "$out_file"
+  tmp_all=$(mktemp) || return 2
+  : > "$tmp_all"
+
+  while IFS= read -r archive; do
+    [[ -n "$archive" ]] || continue
+    tmp_refs=$(mktemp) || { rm -f "$tmp_all" || true; return 2; }
+    if list_images_in_archive "$archive" "$tmp_refs"; then
+      cat "$tmp_refs" >> "$tmp_all"
+    fi
+    rm -f "$tmp_refs" || true
+  done < <(find "$images_dir" "$STAGE_DIR" -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.zst' -o -name '*.tzst' -o -name '*.zst' \) | sort -u)
+
+  if [[ -s "$tmp_all" ]]; then
+    sort -u "$tmp_all" > "$out_file"
+    rm -f "$tmp_all" || true
+    return 0
+  fi
+
+  rm -f "$tmp_all" || true
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: verify_required_image_tags_staged
+# Purpose : Strictly verify all required image:tag references are present in
+#           staged on-node archives before offline server/agent startup.
+# Returns : 0 on success, non-zero when requirements cannot be proven.
+# ------------------------------------------------------------------------------
+verify_required_image_tags_staged() {
+  local required_tmp present_tmp missing_tmp
+  required_tmp=$(mktemp) || return 2
+  present_tmp=$(mktemp) || { rm -f "$required_tmp" || true; return 2; }
+  missing_tmp=$(mktemp) || { rm -f "$required_tmp" "$present_tmp" || true; return 2; }
+
+  if ! collect_required_image_refs_for_validation "$required_tmp"; then
+    log_error "Required image/tag validation failed: unable to determine required image reference list from staged artifacts."
+    log_error "Remediation: run 'image' action and ensure RKE2 artifact lists are staged for this architecture (${ARCH})."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  if ! collect_staged_image_refs_for_validation "$present_tmp"; then
+    log_error "Required image/tag validation failed: unable to inventory staged image archives in $STAGE_DIR and ${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  comm -23 "$required_tmp" "$present_tmp" > "$missing_tmp" || true
+  local missing_count
+  missing_count=$(wc -l < "$missing_tmp" | awk '{print $1}')
+
+  if (( missing_count > 0 )); then
+    log_error "Required image/tag validation failed: $missing_count required reference(s) missing from staged archives."
+    while IFS= read -r miss; do
+      [[ -n "$miss" ]] || continue
+      log_error "  ✗ Missing required image tag: $miss"
+    done < <(head -n 25 "$missing_tmp")
+    if (( missing_count > 25 )); then
+      log_error "  ... plus $((missing_count - 25)) additional missing references"
+    fi
+    log_error "Remediation: re-run 'image' and ensure all chart-required images are staged into ${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}."
+    rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+    return 1
+  fi
+
+  local required_count
+  required_count=$(wc -l < "$required_tmp" | awk '{print $1}')
+  log_info "Required image/tag validation passed: $required_count required reference(s) available in staged archives."
+
+  rm -f "$required_tmp" "$present_tmp" "$missing_tmp" || true
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: verify_image_layer_checksums
 # Purpose : Verify individual image layer checksums from tarball manifest against
 #           computed SHA256 digests. Provides deep integrity validation beyond
@@ -5794,6 +6961,39 @@ setup_custom_cluster_ca() {
     log WARN "No CA private key found (expected CUSTOM_CA_ROOT_KEY or CUSTOM_CA_INT_KEY). "\
              "Will continue with RKE2 self-signed cluster CA."
     return 0
+  fi
+
+  # Validate private key readability in non-interactive mode before invoking
+  # the CA helper. Encrypted keys can trigger passphrase prompts and fail in
+  # unattended runs.
+  local selected_key=""
+  if [[ -f "$ROOT_KEY" ]]; then
+    selected_key="$ROOT_KEY"
+  elif [[ -f "$INT_KEY" ]]; then
+    selected_key="$INT_KEY"
+  fi
+
+  if [[ -n "$selected_key" ]]; then
+    local key_header=""
+    key_header="$(head -n 1 "$selected_key" 2>/dev/null || true)"
+    if [[ "$key_header" == *"ENCRYPTED PRIVATE KEY"* ]]; then
+      log WARN "Detected encrypted private key: $selected_key"
+      log WARN "Custom CA helper runs non-interactively and may prompt for passphrase or fail."
+      log WARN "Remediation: provide an unencrypted key for automation, or run CA generation interactively."
+    fi
+
+    # Best-effort probe: verify key can be loaded without interactive input.
+    # Use timeout to avoid hanging if openssl still attempts to prompt.
+    local key_probe_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 3 openssl pkey -in "$selected_key" -noout -passin pass: >/dev/null 2>&1 || key_probe_rc=$?
+    else
+      openssl pkey -in "$selected_key" -noout -passin pass: >/dev/null 2>&1 || key_probe_rc=$?
+    fi
+    if [[ $key_probe_rc -ne 0 ]]; then
+      log WARN "Private key pre-check failed for $selected_key (openssl rc=$key_probe_rc)."
+      log WARN "If this key is passphrase-protected, helper may fail during custom CA generation."
+    fi
   fi
 
   # Find the generator script (prefer offline copy)
@@ -6231,6 +7431,12 @@ except:
   else
     log INFO "Deep layer verification skipped (use --verify-layers to enable)"
   fi
+
+  if ! verify_required_image_tags_staged; then
+    log ERROR "Post-staging required image/tag validation FAILED"
+    log ERROR "Server/agent installs would attempt remote pulls in disconnected environments"
+    exit 3
+  fi
   
   log INFO "Post-staging verification complete"
 }
@@ -6272,82 +7478,104 @@ except:
 #   Writes the YAML file; returns 0 on success.
 # ------------------------------------------------------------------------------
 write_registries_yaml_with_fallbacks() {
-  # Build a registries.yaml that points common upstreams to your offline endpoints in priority order.
-  # Args: primary_host [fallback_host] [default_offline_host] [username] [password] [ca_file]
+  # Build a registries.yaml that:
+  #   1) Enables distributed mirroring via the embedded registry (Spegel)
+  #   2) Forces all image pulls through the internal registry endpoint
+  #   3) Rewrites upstream image paths into a Harbor-like <project>/<upstream-registry>/<repo> layout
+  # Args: primary_registry_host registry_project username password ca_file
   local primary="$1"; shift || true
-  local fallback="$1"; shift || true
-  local default_offline="$1"; shift || true
+  local project="$1"; shift || true
   local user="$1"; shift || true
   local pass="$1"; shift || true
   local ca_file="$1"; shift || true
 
   mkdir -p /etc/rancher/rke2
 
-  # Build endpoint YAML list
-  endpoints_primary="      - \"https://${primary}\""
-  endpoints_fallback=""
-  endpoints_default=""
-  [[ -n "$fallback" ]]        && endpoints_fallback=$'\n'"      - \"https://${fallback}\""
-  [[ -n "$default_offline" ]] && endpoints_default=$'\n'"      - \"https://${default_offline}\""
+  local prefix=""
+  [[ -n "$project" ]] && prefix="${project}/"
 
-  # CA line (optional)
-  tls_block_primary=""
-  tls_block_fallback=""
-  tls_block_default=""
-  if [[ -n "$ca_file" && -f "$ca_file" ]]; then
-    tls_block_primary=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_fallback=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_default=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
+  # Discover registries from release image list files when available.
+  # This keeps registries.yaml aligned with the exact images staged/downloaded.
+  local -a regs=()
+  local list_file=""
+  for f in "$DOWNLOADS_DIR/rke2-images-all.linux-${ARCH}.txt" "$DOWNLOADS_DIR/rke2-images.linux-${ARCH}.txt"; do
+    if [[ -f "$f" ]]; then
+      list_file="$f"
+      break
+    fi
+  done
+
+  if [[ -n "$list_file" ]]; then
+    while IFS= read -r ref; do
+      # strip comments/whitespace
+      ref="${ref%%#*}"
+      ref="${ref%%[[:space:]]*}"
+      [[ -z "$ref" ]] && continue
+      ref="$(normalize_image_reference "$ref" 2>/dev/null || true)"
+      [[ -z "$ref" ]] && continue
+
+      local first="${ref%%/*}"
+      local reg=""
+      if [[ "$ref" == */* && ( "$first" == *.* || "$first" == *:* ) ]]; then
+        reg="$first"
+      else
+        reg="docker.io"
+      fi
+
+      # Skip mirroring for the internal registry host itself (avoid recursion)
+      [[ "$reg" == "$primary" ]] && continue
+
+      regs+=("$reg")
+    done < "$list_file"
   fi
 
-  # Auth (optional)
-  auth_block_primary=""
-  auth_block_fallback=""
-  auth_block_default=""
-  if [[ -n "$user" && -n "$pass" ]]; then
-    auth_block_primary=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_fallback=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_default=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
+  if [[ ${#regs[@]} -eq 0 ]]; then
+    regs=(docker.io registry.k8s.io ghcr.io quay.io gcr.io k8s.gcr.io)
   fi
 
-  # Known upstreams we want to mirror via offline registry
-  # Known upstreams we want to mirror via offline registry
-  REG_YAML="$(cat <<EOF
-mirrors:
-  "docker.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "registry.k8s.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "k8s.gcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "quay.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "ghcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "rancher":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-configs:
-  "${primary}":${auth_block_primary}${tls_block_primary}
-EOF
-)"
+  # Deduplicate
+  IFS=$'\n'
+  regs=($(printf '%s\n' "${regs[@]}" | sort -u))
+  unset IFS
 
-  # Optionally add configs for fallback/default
-  if [[ -n "$fallback" ]]; then
-    REG_YAML+=$'\n'"  \"${fallback}\":${auth_block_fallback}${tls_block_fallback}"
-  fi
-  if [[ -n "$default_offline" ]]; then
-    REG_YAML+=$'\n'"  \"${default_offline}\":${auth_block_default}${tls_block_default}"
-  fi
+  # Render YAML
+  {
+    echo "# Auto-generated by rke2nodeinit.sh - DO NOT EDIT"
+    echo "# Internal registry endpoint: https://${primary}"
+    echo "# Registry project/prefix: ${project:-<none>}"
+    echo
+    echo "mirrors:"
+    # Wildcard mirror entry prevents accidental external pulls when paired with
+    # disable-default-registry-endpoint: true in config.yaml.
+    echo "  \"*\":"
 
-  printf "%s\n" "${REG_YAML}" > /etc/rancher/rke2/registries.yaml
+    for reg in "${regs[@]}"; do
+      echo "  \"${reg}\":"
+      echo "    endpoint:"
+      echo "      - \"https://${primary}\""
+      echo "    rewrite:"
+      # Rewrite upstream image path into <project>/<upstream-registry>/<repo>
+      # Example: docker.io/rancher/pause -> altregistry/<project>/docker.io/rancher/pause
+      printf '      "^(.*)$": "%s%s/$1"\n' "$prefix" "$reg"
+    done
+
+    echo "configs:"
+    echo "  \"${primary}\":"
+
+    if [[ -n "$user" && -n "$pass" ]]; then
+      echo "    auth:"
+      echo "      username: \"${user}\""
+      echo "      password: \"${pass}\""
+    fi
+
+    if [[ -n "$ca_file" && -f "$ca_file" ]]; then
+      echo "    tls:"
+      echo "      ca_file: \"${ca_file}\""
+    fi
+  } > /etc/rancher/rke2/registries.yaml
+
   chmod 600 /etc/rancher/rke2/registries.yaml
-  log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
+  log INFO "Wrote /etc/rancher/rke2/registries.yaml for internal registry ${primary} (project='${project:-<none>}')"
 }
 
 # ------------------------------------------------------------------------------
@@ -6383,6 +7611,7 @@ fetch_rke2_ca_generator() {
 # ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
+  local requires_multus=0
 
   # If operator provided a local artifact path, prefer it and stage from there
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
@@ -6461,6 +7690,43 @@ cache_rke2_artifacts() {
   fi
   chmod +x install.sh || true
 
+  if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+    local _cni
+    while IFS= read -r _cni; do
+      [[ "$_cni" == "multus" ]] && requires_multus=1
+    done < <(collect_requested_cni_plugins "$CONFIG_FILE")
+  fi
+
+  # If operator didn't set HARDENED_CNI_TAG, attempt to extract the exact
+  # `rancher/hardened-cni-plugins` tag from the downloaded RKE2 images tarball.
+  # This makes hardened-cni staging deterministic and aligned with the RKE2
+  # release (no "latest" drift).
+  if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
+      log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
+    else
+      if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+        log INFO "Unable to derive HARDENED_CNI_TAG from images tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
+      else
+        log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+      fi
+    fi
+  fi
+
+  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+    if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
+      log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
+    else
+      if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+        log INFO "Unable to derive HARDENED_MULTUS_TAG from images tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+      else
+        log WARN "Unable to derive HARDENED_MULTUS_TAG from images tarball; hardened-multus mirroring will auto-select a tag"
+      fi
+    fi
+  fi
+
   # Optionally download hardened-cni-plugins when configured. Prefer skopeo
   # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
   if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
@@ -6497,6 +7763,26 @@ cache_rke2_artifacts() {
     fi
   fi
 
+  if [[ $requires_multus -eq 1 ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_MULTUS_BN; skipping hardened-multus acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "Multus requested; attempting to mirror hardened-multus from Docker Hub"
+        if ! cache_hardened_multus_skopeo "${HARDENED_MULTUS_TAG:-}"; then
+          log ERROR "Failed to mirror hardened-multus-cni required for spec.cni=multus"
+          popd >/dev/null || true
+          return 6
+        fi
+      else
+        log ERROR "Multus requested but skopeo is not available to mirror hardened-multus-cni"
+        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_MULTUS_BN in $DOWNLOADS_DIR"
+        popd >/dev/null || true
+        return 6
+      fi
+    fi
+  fi
+
   # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
     if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
@@ -6522,6 +7808,15 @@ cache_rke2_artifacts() {
     fi
   fi
 
+  # Reconcile chart-referenced images from the RKE2 tarball against the
+  # downloaded images bundle and cache supplemental archives for anything
+  # missing from the base bundle.
+  if ! reconcile_chart_images_against_downloaded_bundle "$BASE_URL" "$SHA256_FILE"; then
+    log ERROR "Chart image reconciliation failed"
+    popd >/dev/null || true
+    return 5
+  fi
+
   popd >/dev/null
 
   # --- Stage artifacts for offline install -----------------------------------
@@ -6532,6 +7827,30 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" "$tmpimg"
     mv -T "$tmpimg" "$IMAGES_DIR/$IMAGES_TAR"
     log INFO "Staged ${IMAGES_TAR} into $IMAGES_DIR/"
+  fi
+
+  # Stage any supplemental chart-image archives downloaded during
+  # reconciliation for the current run only (based on current missing list).
+  local missing_manifest="$DOWNLOADS_DIR/chart-images-missing.linux-${ARCH}.txt"
+  if [[ -s "$missing_manifest" ]]; then
+    while IFS= read -r missing_ref; do
+      [[ -z "$missing_ref" ]] && continue
+      local safe supplemental_bn supplemental
+      safe=$(echo "$missing_ref" | sed -E 's#[/:@]#_#g')
+      supplemental_bn="rke2-images-missing-${safe}.tar"
+      supplemental="$DOWNLOADS_DIR/$supplemental_bn"
+      [[ -f "$supplemental" ]] || continue
+
+      local tmp_sup_img="$IMAGES_DIR/.tmp-${supplemental_bn}.$$"
+      cp -f "$supplemental" "$tmp_sup_img"
+      mv -T "$tmp_sup_img" "$IMAGES_DIR/$supplemental_bn"
+      log INFO "Staged supplemental image archive $supplemental_bn into $IMAGES_DIR"
+
+      local tmp_sup_stage="$STAGE_DIR/.tmp-${supplemental_bn}.$$"
+      cp -f "$supplemental" "$tmp_sup_stage"
+      mv -T "$tmp_sup_stage" "$STAGE_DIR/$supplemental_bn"
+      log INFO "Staged supplemental image archive $supplemental_bn into $STAGE_DIR"
+    done < "$missing_manifest"
   fi
 
   mkdir -p "$STAGE_DIR"
@@ -6557,6 +7876,18 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
     mv -T "$tmpc_img" "$IMAGES_DIR/$HARDENED_CNI_BN"
     log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
+  fi
+
+  if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+    local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
+    mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
+    log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
+
+    local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
+    mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
+    log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
@@ -6612,6 +7943,32 @@ cache_rke2_artifacts() {
         fi
       fi
     done < "$DOWNLOADS_DIR/$SHA256_FILE"
+
+    # Add additional operational artifacts to metadata so SBOM verification
+    # can resolve path-specific checksums (including duplicate basenames across
+    # downloads/stage paths). We intentionally do not append these to the
+    # traditional sha256sum text manifest because duplicate basenames can make
+    # line-based verification ambiguous.
+    for extra in \
+      "$DOWNLOADS_DIR/install.sh|downloads" \
+      "$DOWNLOADS_DIR/$SHA256_FILE|downloads" \
+      "$STAGE_DIR/$SHA256_FILE|stage" \
+      "$STAGE_DIR/sha256sum-${ARCH}.json|stage"
+    do
+      epath="${extra%%|*}"
+      eloc="${extra##*|}"
+      [[ -f "$epath" ]] || continue
+      ebn="$(basename "$epath")"
+      esha="$(sha256sum "$epath" 2>/dev/null | awk '{print $1}' || true)"
+      [[ -n "$esha" ]] || continue
+      esize="$(stat -c%s "$epath" 2>/dev/null || echo 0)"
+      if [[ $first -eq 1 ]]; then
+        printf '  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$ebn" "$esha" "$esize" "$eloc" >> "$tmp_json"
+        first=0
+      else
+        printf ',\n  {"name":"%s","sha256":"%s","size":%s,"location":"%s"}\n' "$ebn" "$esha" "$esize" "$eloc" >> "$tmp_json"
+      fi
+    done
 
     # Wrap JSON entries into a structured object with metadata
     local out_json="$STAGE_DIR/sha256sum-${ARCH}.json"
@@ -6676,7 +8033,12 @@ ca_trust_registries() {
   # If a registry is configured, write registries.yaml with mirrors + auth + CA
   mkdir -p /etc/rancher/rke2
   if [[ -n "$REG_HOST" ]]; then
-    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
+    local _REG_HOST="${REG_HOST:-}" _REG_NS=""
+    if [[ -n "${REGISTRY:-}" ]]; then
+      _REG_HOST="${REGISTRY%%/*}"
+      [[ "$REGISTRY" == */* ]] && _REG_NS="${REGISTRY#*/}"
+    fi
+    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
   else
     rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
   fi
@@ -7140,7 +8502,19 @@ action_push() {
   for IMG in "${imgs[@]}"; do
     [[ -z "$IMG" ]] && continue
     local TARGET
-    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
+    # Canonicalize image reference so images without an explicit registry are treated as docker.io/
+    local src_ref="$IMG"
+    local src_repo="${IMG%:*}"
+    local src_tag="${IMG##*:}"
+    local first_seg="${src_repo%%/*}"
+    local canon_repo="$src_repo"
+    if [[ "$src_repo" != */* ]]; then
+      canon_repo="docker.io/$src_repo"
+    elif [[ "$first_seg" != *.* && "$first_seg" != *:* ]]; then
+      canon_repo="docker.io/$src_repo"
+    fi
+    local canon_img="${canon_repo}:${src_tag}"
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$canon_img"; else TARGET="$REG_HOST/$canon_img"; fi
 
     [[ $first -eq 0 ]] && echo "," >> "$manifest_json"
     printf '  {"source":"%s","target":"%s"}' "$IMG" "$TARGET" >> "$manifest_json"
@@ -7165,11 +8539,12 @@ action_push() {
     return 0
   fi
 
-  # Authenticate to registry
+
+  # Authenticate to registry (optional)
   report_progress "Authenticating to registry" 3 4
-  log_info "Logging into registry: $REG_HOST"
-  
-  if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
+  if [[ -n "${REG_USER:-}" && -n "${REG_PASS:-}" ]]; then
+    log_info "Logging into registry: $REG_HOST"
+    if ! spinner_run "Logging into $REG_HOST" nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS"; then
     log_error "Registry login failed"
     log_error "Remediation steps:"
     log_error "  - Verify registry URL is correct: $REG_HOST"
@@ -7179,6 +8554,9 @@ action_push() {
     metrics_increment "failed"
     metrics_summary "Push Operation (Failed)"
     exit 1
+    fi
+  else
+    log_warn "No registry credentials provided; skipping nerdctl login (registry assumed open/no-auth)."
   fi
   metrics_increment "authenticated"
 
@@ -7192,7 +8570,19 @@ action_push() {
     push_num=$((push_num + 1))
     
     local TARGET
-    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
+    # Canonicalize image reference so images without an explicit registry are treated as docker.io/
+    local src_ref="$IMG"
+    local src_repo="${IMG%:*}"
+    local src_tag="${IMG##*:}"
+    local first_seg="${src_repo%%/*}"
+    local canon_repo="$src_repo"
+    if [[ "$src_repo" != */* ]]; then
+      canon_repo="docker.io/$src_repo"
+    elif [[ "$first_seg" != *.* && "$first_seg" != *:* ]]; then
+      canon_repo="docker.io/$src_repo"
+    fi
+    local canon_img="${canon_repo}:${src_tag}"
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$canon_img"; else TARGET="$REG_HOST/$canon_img"; fi
     
     log_info "[$push_num/$img_count] Processing: $IMG -> $TARGET"
     
@@ -7215,8 +8605,10 @@ action_push() {
     fi
   done
 
-  # Cleanup - logout from registry
-  nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
+  # Cleanup - logout from registry (only when credentials were used)
+  if [[ -n "${REG_USER:-}" && -n "${REG_PASS:-}" ]]; then
+    nerdctl logout "$REG_HOST" >>"$LOG_FILE" 2>&1 || true
+  fi
 
   # Display summary
   metrics_summary "Image Push Summary"
@@ -7273,11 +8665,7 @@ action_image() {
   # Initialize metrics for comprehensive tracking
   metrics_init "image_operation"
   
-  # Log configuration for audit trail
-  log_info "Configuration:"
-  log_info "  RKE2_VERSION: ${RKE2_VERSION:-<auto-detect>}"
-  log_info "  REGISTRY: ${REGISTRY:-<none>}"
-  log_info "  REG_USER: ${REG_USER:-<none>}"
+  # Log static directory context for audit trail (effective config is logged after YAML load)
   log_info "Directories:"
   log_info "  DOWNLOADS_DIR: $DOWNLOADS_DIR"
   log_info "  STAGE_DIR: $STAGE_DIR"
@@ -7303,8 +8691,17 @@ action_image() {
   # --- Read YAML configuration (optional) -----------------------------------
   report_progress "Loading configuration" 2 8
   local REQ_VER="${RKE2_VERSION:-}"
+  local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
+  local REQ_MULTUS_VER="${HARDENED_MULTUS_TAG:-}"
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
+  local cni_plugins_csv=""
+  local system_default_registry=""
+  local boot_enabled_cfg="false"
+  local boot_yaml_path_cfg=""
+  local boot_mode_cfg=""
+  local boot_platform_cfg=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
   
@@ -7316,16 +8713,38 @@ action_image() {
     fi
     
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
+    REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
+    REQ_MULTUS_VER="${REQ_MULTUS_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2MultusVersion rke2MultusCniVersion rke2MultusCNIVersion || true)}"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if bool_value_is_true "$fix_cni_permissions_yaml"; then
+      fix_cni_permissions_enabled=1
+    fi
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
     REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"
+    system_default_registry="$(yaml_spec_get_any "$CONFIG_FILE" system-default-registry systemDefaultRegistry || true)"
     REG_HOST="${REGISTRY%%/*}"
+
+    local -a _cni_plugins=()
+    local _cni
+    while IFS= read -r _cni; do
+      [[ -n "$_cni" ]] && _cni_plugins+=("$_cni")
+    done < <(collect_requested_cni_plugins "$CONFIG_FILE")
+    if [[ ${#_cni_plugins[@]} -gt 0 ]]; then
+      cni_plugins_csv="$(IFS=','; echo "${_cni_plugins[*]}")"
+    fi
     
     local d1 s1
     d1="$(yaml_spec_get "$CONFIG_FILE" defaultDns || true)"
     s1="$(yaml_spec_get "$CONFIG_FILE" defaultSearchDomains || true)"
     [[ -n "$d1" ]] && defaultDnsCsv="$(normalize_list_csv "$d1")"
     [[ -n "$s1" ]] && defaultSearchCsv="$(normalize_list_csv "$s1")"
+
+    boot_enabled_cfg="$(normalize_bool_value "$(yaml_spec_get "$CONFIG_FILE" bootService.enabled || echo false)")"
+    boot_yaml_path_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.yamlPath || true)"
+    boot_mode_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
+    boot_platform_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
     
     # Optional custom CA for registry/cluster
     CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
@@ -7345,6 +8764,27 @@ action_image() {
 
   # Warn if using example default credentials
   warn_default_credentials "$REGISTRY" "$REG_USER" "$REG_PASS"
+
+  # Honor explicit hardened-cni tag from env/YAML for artifact mirroring.
+  [[ -n "$REQ_CNI_VER" ]] && HARDENED_CNI_TAG="$REQ_CNI_VER"
+  [[ -n "$REQ_MULTUS_VER" ]] && HARDENED_MULTUS_TAG="$REQ_MULTUS_VER"
+
+  # Log effective configuration after YAML/CLI/env resolution.
+  log_info "Configuration:"
+  log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
+  log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
+  log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
+  log_info "  CNI_PLUGINS: ${cni_plugins_csv:-<unset>}"
+  log_info "  FIX_CNI_PERMISSIONS: ${fix_cni_permissions_enabled}"
+  log_info "  REGISTRY: ${REGISTRY:-<none>}"
+  log_info "  SYSTEM_DEFAULT_REGISTRY: ${system_default_registry:-<unset>}"
+  log_info "  REG_USER: ${REG_USER:-<none>}"
+  log_info "  DEFAULT_DNS: ${defaultDnsCsv:-<unset>}"
+  log_info "  DEFAULT_SEARCH_DOMAINS: ${defaultSearchCsv:-<unset>}"
+  log_info "  BOOT_SERVICE_ENABLED: ${boot_enabled_cfg}"
+  log_info "  BOOT_SERVICE_MODE: ${boot_mode_cfg:-<unset>}"
+  log_info "  BOOT_SERVICE_PLATFORM: ${boot_platform_cfg:-<unset>}"
+  log_info "  BOOT_SERVICE_YAML_PATH: ${boot_yaml_path_cfg:-<unset>}"
 
   # Resolve cert paths relative to script dir if not absolute
   [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
@@ -7400,6 +8840,26 @@ action_image() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "artifacts_cached"
+
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "Required CNI images are not fully staged for offline deployment."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "cni_images_validated"
+
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "required_image_tags_validated"
 
   # --- Optional: Load images into local runtime ------------------------------
   report_progress "Processing container images" 5 8
@@ -7465,7 +8925,7 @@ action_image() {
   metrics_increment "defaults_saved"
 
   # --- Boot Service Installation (optional enablement) -----------------------
-  log_info "Installing first-boot automation script and service..."
+  log_info "Reconciling first-boot automation script and service..."
   
   # Read boot service configuration from YAML if provided
   local boot_enabled="false"
@@ -7488,32 +8948,31 @@ action_image() {
   # Normalize boolean value
   boot_enabled="$(normalize_bool_value "$boot_enabled")"
   
-  # Install boot script and service (always install, conditionally enable)
-  if install_boot_script; then
-    if install_boot_service; then
-      log_info "✓ Boot script and service installed successfully"
-      log_info "  Script: $BOOT_SCRIPT_PATH"
-      log_info "  Service: $BOOT_SERVICE_PATH"
-      log_info "  Mode: $BOOT_SERVICE_MODE"
-      log_info "  Platform: $(detect_vm_platform)"
-      log_info "  Config search paths:"
-      for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-        log_info "    - $search_path"
-      done
-      log_info "  Target directory: $BOOT_TARGET_DIR"
-      
-      # Display Hyper-V specific requirements
-      if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-        log_info ""
-        log_info "Hyper-V Configuration Required:"
-        log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
-        log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-        log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
-        log_info "  Without this, the guest hostname will be used as fallback."
-      fi
-      
-      # Check if boot service should be enabled
-      if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+  # Install and enable boot service only when explicitly requested.
+  if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+    if install_boot_script; then
+      if install_boot_service; then
+        log_info "✓ Boot script and service installed successfully"
+        log_info "  Script: $BOOT_SCRIPT_PATH"
+        log_info "  Service: $BOOT_SERVICE_PATH"
+        log_info "  Mode: $BOOT_SERVICE_MODE"
+        log_info "  Platform: $(detect_vm_platform)"
+        log_info "  Config search paths:"
+        for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
+          log_info "    - $search_path"
+        done
+        log_info "  Target directory: $BOOT_TARGET_DIR"
+        
+        # Display Hyper-V specific requirements
+        if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
+          log_info ""
+          log_info "Hyper-V Configuration Required:"
+          log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
+          log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
+          log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
+          log_info "  Without this, the guest hostname will be used as fallback."
+        fi
+
         if enable_boot_service; then
           log_info "✓ Boot service ENABLED for next reboot"
           log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
@@ -7522,15 +8981,37 @@ action_image() {
           log_warn "Failed to enable boot service; install completed but service not active"
         fi
       else
-        log_info "Boot service installed but NOT enabled"
-        log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
-        log_info "Manual enable: systemctl enable $(basename "$BOOT_SERVICE_PATH")"
+        log_warn "Failed to install boot service; continuing without first-boot automation"
       fi
     else
-      log_warn "Failed to install boot service; continuing without first-boot automation"
+      log_warn "Failed to install boot script; continuing without first-boot automation"
     fi
   else
-    log_warn "Failed to install boot script; continuing without first-boot automation"
+    if ! uninstall_boot_service_artifacts; then
+      log_error "Boot service is disabled by configuration, but existing artifacts could not be removed"
+      exit 1
+    fi
+    log_info "Boot service not requested; boot script/service not installed"
+    log_info "To enable: use --enable-boot-service flag or set bootService.enabled: true in YAML"
+  fi
+
+  # --- Optional: Enable CNI permission remediation ----------------------------
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Enabling CNI permission remediation (requested by YAML/CLI)"
+    if install_cni_permission_remediation; then
+      log_info "✓ CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_error "Failed to install/enable CNI permission remediation"
+      log_error "Remediation: verify scripts/fix-cni-perms.sh and scripts/systemd/* are present"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+  else
+    log_info "CNI permission remediation not requested (set spec.fixCNIPermissions: true or --fix-cni-permissions)"
   fi
 
   # --- SBOM and README generation --------------------------------------------
@@ -7554,31 +9035,86 @@ action_image() {
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
   
-  # Build sbom_targets to include both downloads and files staged into STAGE_DIR
-  local sbom_targets=(
-    "$DOWNLOADS_DIR/$IMAGES_TAR"
-    "$DOWNLOADS_DIR/$RKE2_TARBALL"
-    "$DOWNLOADS_DIR/$SHA256_FILE"
-    "$DOWNLOADS_DIR/install.sh"
-    "$STAGE_DIR/$RKE2_TARBALL"
-    "$STAGE_DIR/$SHA256_FILE"
-    "$STAGE_DIR/sha256sum-${ARCH}.json"
-    "$STAGE_DIR/install.sh"
-  )
-  [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
-  [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
-  # Include hardened-cni artifact when present
-  [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$DOWNLOADS_DIR/$HARDENED_CNI_BN")
-  [[ -n "${HARDENED_CNI_BN:-}" && -f "$STAGE_DIR/$HARDENED_CNI_BN" ]] && sbom_targets+=("$STAGE_DIR/$HARDENED_CNI_BN")
+  # Build sbom_targets to include baseline artifacts plus any downloaded/staged
+  # image archives discovered at runtime.
+  local -a sbom_targets=()
+  local -A sbom_seen=()
+  add_sbom_target() {
+    local target="${1:-}"
+    [[ -n "$target" && -f "$target" ]] || return 0
+    [[ -n "${sbom_seen[$target]:-}" ]] && return 0
+    sbom_seen["$target"]=1
+    sbom_targets+=("$target")
+  }
+  archive_looks_like_image_bundle() {
+    local archive="${1:-}"
+    local manifest=""
+    local oci_refs=""
+
+    [[ -f "$archive" ]] || return 1
+
+    if [[ "$archive" == *.zst ]]; then
+      command -v zstd >/dev/null 2>&1 || return 1
+      manifest="$(zstd -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+    elif [[ "$archive" == *.gz || "$archive" == *.tgz ]]; then
+      command -v gzip >/dev/null 2>&1 || return 1
+      manifest="$(gzip -dc "$archive" 2>/dev/null | tar -xO manifest.json 2>/dev/null || true)"
+    else
+      manifest="$(tar -xOf "$archive" manifest.json 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$manifest" ]] && echo "$manifest" | grep -q '"RepoTags"'; then
+      return 0
+    fi
+
+    oci_refs="$(parse_oci_image_index "$archive" 2>/dev/null || true)"
+    if [[ -n "$oci_refs" && "$oci_refs" != "[]" ]]; then
+      return 0
+    fi
+
+    return 1
+  }
+
+  add_sbom_target "$DOWNLOADS_DIR/$IMAGES_TAR"
+  add_sbom_target "$DOWNLOADS_DIR/$RKE2_TARBALL"
+  add_sbom_target "$DOWNLOADS_DIR/$SHA256_FILE"
+  add_sbom_target "$DOWNLOADS_DIR/install.sh"
+  add_sbom_target "$STAGE_DIR/$RKE2_TARBALL"
+  add_sbom_target "$STAGE_DIR/$SHA256_FILE"
+  add_sbom_target "$STAGE_DIR/sha256sum-${ARCH}.json"
+  add_sbom_target "$STAGE_DIR/install.sh"
+  [[ -n "$full_tgz" ]] && add_sbom_target "$DOWNLOADS_DIR/$full_tgz"
+  [[ -n "$std_tgz"  ]] && add_sbom_target "$DOWNLOADS_DIR/$std_tgz"
+
+  # Include any downloaded/staged image archives (docker-archive or OCI-layout)
+  # so SBOM coverage stays current as image acquisition evolves.
+  local agent_images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local dir archive
+  for dir in "$DOWNLOADS_DIR" "$STAGE_DIR" "$agent_images_dir"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r archive; do
+      [[ -n "$archive" ]] || continue
+      archive_looks_like_image_bundle "$archive" || continue
+      add_sbom_target "$archive"
+    done < <(find "$dir" -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.zst' -o -name '*.tzst' -o -name '*.zst' \) | sort)
+  done
   
   # Load expected checksums from manifest file
   declare -A expected_hash=()
+  declare -A expected_hash_path=()
+  local manifest_source="none"
+  local manifest_path=""
   if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
     log_info "Loading expected checksums from: $STAGE_DIR/$SHA256_FILE"
+    manifest_source="staged"
+    manifest_path="$STAGE_DIR/$SHA256_FILE"
     while read -r h fn; do expected_hash["$(basename "$fn")"]="$h"; done < <(awk '{print $1, $2}' "$STAGE_DIR/$SHA256_FILE")
   elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
     log_info "Loading expected checksums from: $DOWNLOADS_DIR/$SHA256_FILE"
+    manifest_source="downloads"
+    manifest_path="$DOWNLOADS_DIR/$SHA256_FILE"
     while read -r h fn; do
       expected_hash["$(basename "$fn")"]="$h"
     done < <(awk '{print $1, $2}' "$DOWNLOADS_DIR/$SHA256_FILE")
@@ -7586,18 +9122,62 @@ action_image() {
     log_warn "No SHA256 manifest found - artifact verification will be limited"
   fi
 
+  # Load path-aware checksum metadata (preferred when duplicate basenames exist,
+  # e.g., downloads/sha256sum-<arch>.txt and stage/sha256sum-<arch>.txt).
+  local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
+  if [[ -f "$staged_manifest_json" && -x "$(command -v python3 2>/dev/null || true)" ]]; then
+    while IFS='|' read -r _loc _name _sha; do
+      [[ -z "${_loc:-}" || -z "${_name:-}" || -z "${_sha:-}" ]] && continue
+      case "$_loc" in
+        stage) expected_hash_path["$STAGE_DIR/$_name"]="$_sha" ;;
+        images) expected_hash_path["${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}/$_name"]="$_sha" ;;
+        downloads) expected_hash_path["$DOWNLOADS_DIR/$_name"]="$_sha" ;;
+      esac
+    done < <(python3 - "$staged_manifest_json" <<'PY'
+import json,sys
+p=sys.argv[1]
+try:
+    data=json.load(open(p,'r',encoding='utf-8'))
+    for item in data.get('files',[]) or []:
+        loc=item.get('location')
+        name=item.get('name')
+        sha=item.get('sha256')
+        if loc and name and sha:
+            print(f"{loc}|{name}|{sha}")
+except Exception:
+    pass
+PY
+)
+  fi
+  if [[ -f "$staged_manifest_json" ]]; then
+    expected_hash_path["$staged_manifest_json"]="__SELF_GENERATED__"
+  fi
+
   # Prepare SBOM header with metadata
   {
-    echo "# RKE2 Image Prep SBOM"
+    echo "# RKE2 Image Prep SBOM (Human Review Report)"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo "Spec Name: ${sbom_name}"
+    echo "Action: image"
     echo "RKE2_VERSION: ${RKE2_VERSION:-<auto>}"
+    echo "HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto>}"
     echo "REGISTRY: ${REGISTRY:-<none>}"
+    echo "Manifest Source: ${manifest_source}"
+    echo "Manifest Path: ${manifest_path:-<none>}"
+    echo "SPDX JSON: ${sbom_json_file}"
     echo
-    echo "# Artifact inventory: path | size_bytes | sha256 | verified | mtime | source"
+    echo "# Verification Legend"
+    echo "#   yes          = checksum matches expected manifest value"
+    echo "#   NO (mismatch)= checksum differs from expected manifest value"
+    echo "#   no-manifest  = no expected checksum entry for artifact basename"
+    echo
+    echo "# Artifact inventory (machine-readable for tooling compatibility)"
+    echo "# path | size_bytes | sha256 | verified | mtime | source | expected_sha256 | verification_note"
   } > "$sbom_file"
 
   # Track verification metrics for security scoring
   local total_count=0 verified_count=0 manifest_present=0
+  local mismatch_count=0 no_manifest_count=0
   [[ ${#expected_hash[@]} -gt 0 ]] && manifest_present=1
 
   # Process each artifact and verify checksums
@@ -7606,31 +9186,59 @@ action_image() {
     [[ -f "$f" ]] || continue
     total_count=$((total_count + 1))
     
-    local fname size sha mtime src verified
+    local fname size sha mtime src verified expected_sha verification_note
     fname="$(basename "$f")"
     size=$(stat -c%s "$f" 2>/dev/null || echo 0)
     mtime=$(date -u -r "$f" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "<unknown>")
     sha=$(sha256sum "$f" | awk '{print $1}')
     src="$( [[ "$f" == "$DOWNLOADS_DIR"/* ]] && echo downloads || echo staged )"
     verified="unknown"
+    expected_sha="<none>"
+    verification_note=""
     
-    # Verify against expected checksum if available
-    if [[ -n "${expected_hash[$fname]:-}" ]]; then
-      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+    # Verify against expected checksum if available (prefer path-aware map,
+    # then fall back to basename map).
+    if [[ -n "${expected_hash_path[$f]:-}" ]]; then
+      expected_sha="${expected_hash_path[$f]}"
+      if [[ "${expected_hash_path[$f]}" == "__SELF_GENERATED__" ]]; then
         verified="yes"
+        verification_note="self-generated manifest metadata file"
+        verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
+      elif [[ "${expected_hash_path[$f]}" == "$sha" ]]; then
+        verified="yes"
+        verification_note="checksum matches path-aware manifest metadata"
         verified_count=$((verified_count + 1))
         metrics_increment "artifact_verified"
       else
         verified="NO (mismatch)"
+        verification_note="checksum mismatch (expected ${expected_hash_path[$f]})"
+        mismatch_count=$((mismatch_count + 1))
+        log_error "Checksum mismatch for $fname"
+        metrics_increment "artifact_mismatch"
+      fi
+    elif [[ -n "${expected_hash[$fname]:-}" ]]; then
+      expected_sha="${expected_hash[$fname]}"
+      if [[ "${expected_hash[$fname]}" == "$sha" ]]; then
+        verified="yes"
+        verification_note="checksum matches manifest"
+        verified_count=$((verified_count + 1))
+        metrics_increment "artifact_verified"
+      else
+        verified="NO (mismatch)"
+        verification_note="checksum mismatch (expected ${expected_hash[$fname]})"
+        mismatch_count=$((mismatch_count + 1))
         log_error "Checksum mismatch for $fname"
         metrics_increment "artifact_mismatch"
       fi
     else
       verified="no-manifest"
+      verification_note="manifest entry missing for basename"
+      no_manifest_count=$((no_manifest_count + 1))
     fi
 
     # Append detailed entry to SBOM
-    printf '%s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" >> "$sbom_file"
+    printf '%s | %s | %s | %s | %s | %s | %s | %s\n' "$f" "$size" "$sha" "$verified" "$mtime" "$src" "$expected_sha" "$verification_note" >> "$sbom_file"
     
     # Report verification status
     if [[ "$verified" == "yes" ]]; then
@@ -7660,8 +9268,27 @@ action_image() {
     echo "# Summary"
     echo "Artifacts discovered: $total_count"
     echo "Artifacts verified against manifest: $verified_count"
+    echo "Artifacts with checksum mismatch: $mismatch_count"
+    echo "Artifacts missing manifest entry: $no_manifest_count"
     echo "SHA256 manifest present: ${manifest_present}" 
     echo "security_score: ${security_score}"
+    echo
+    echo "# Human Review Findings"
+    if [[ $mismatch_count -eq 0 ]]; then
+      echo "- Integrity mismatches: none"
+    else
+      echo "- Integrity mismatches: ${mismatch_count} (investigate immediately)"
+    fi
+    if [[ $no_manifest_count -eq 0 ]]; then
+      echo "- Missing manifest coverage: none"
+    else
+      echo "- Missing manifest coverage: ${no_manifest_count} (review whether each file should be pinned)"
+    fi
+    echo "- Verified coverage: ${verified_count}/${total_count}"
+    echo "- Recommended reviewer checks:"
+    echo "  1. Confirm RKE2_VERSION/HARDENED_CNI_TAG align with approved release bill"
+    echo "  2. Confirm all required artifacts are either verified or intentionally unmanaged"
+    echo "  3. Cross-check SPDX JSON at ${sbom_json_file} for automation workflows"
   } >> "$sbom_file"
 
   log_success "SBOM created successfully"
@@ -7672,13 +9299,14 @@ action_image() {
   metrics_increment "success"
   metrics_increment "sbom_created"
 
-  # Generate machine-friendly JSON SBOM for tooling compatibility
-  local sbom_json_file="$SBOM_DIR/${sbom_name}-sbom.json"
+  # Generate SPDX 2.3 JSON SBOM for tooling compatibility
   if command -v python3 >/dev/null 2>&1; then
-    log_info "Generating JSON SBOM: $sbom_json_file"
+    log_info "Generating SPDX 2.3 JSON SBOM: $sbom_json_file"
     local staged_manifest_json="$STAGE_DIR/sha256sum-${ARCH}.json"
     python3 - "$sbom_file" "$sbom_json_file" "$staged_manifest_json" <<'PY'
-import sys, json
+import sys, json, re, hashlib
+from datetime import datetime, timezone
+
 sbom_txt = sys.argv[1]
 sbom_json = sys.argv[2]
 staged_json = sys.argv[3] if len(sys.argv) > 3 else None
@@ -7736,23 +9364,146 @@ with open(sbom_txt, 'r', encoding='utf-8') as fh:
       except Exception:
         summary['security_score'] = line.split(':',1)[1].strip()
 
-data = {
-  'metadata': header,
-  'artifacts': artifacts,
-  'summary': summary,
-}
+def sanitize_spdx_id(value: str) -> str:
+  v = re.sub(r'[^A-Za-z0-9.-]+', '-', value or 'artifact').strip('-')
+  if not v:
+    v = 'artifact'
+  return v
 
-# If a staged manifest JSON file exists, attempt to include it under 'staged_manifest'
+def package_spdx_id(path: str, name: str, index: int) -> str:
+  base = sanitize_spdx_id(name)
+  digest = hashlib.sha256((path or name or str(index)).encode('utf-8')).hexdigest()[:10]
+  return f"SPDXRef-Package-{base}-{digest}"
+
+def to_iso_utc(v: str) -> str:
+  if not v:
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+  return v
+
+created = to_iso_utc(header.get('generated'))
+doc_name = f"rke2-image-{header.get('rke2_version') or 'auto'}"
+namespace_suffix = created.replace(':', '').replace('-', '')
+doc_namespace = f"https://sbom.rke2-node-init.local/spdx/{doc_name}/{namespace_suffix}"
+
+root_spdx_id = "SPDXRef-RKE2ArtifactBundle"
+root_checksum = hashlib.sha256(''.join(sorted(a.get('sha256','') for a in artifacts)).encode('utf-8')).hexdigest() if artifacts else '0'*64
+
+packages = [
+  {
+    "SPDXID": root_spdx_id,
+    "name": "rke2-offline-artifact-bundle",
+    "versionInfo": header.get('rke2_version') or "NOASSERTION",
+    "supplier": "Organization: rke2-node-init",
+    "downloadLocation": "NOASSERTION",
+    "packageFileName": f"{doc_name}.bundle",
+    "checksums": [
+      {
+        "algorithm": "SHA256",
+        "checksumValue": root_checksum
+      }
+    ],
+    "primaryPackagePurpose": "BINARY",
+    "licenseDeclared": "NOASSERTION",
+    "licenseConcluded": "NOASSERTION",
+    "copyrightText": "NOASSERTION",
+    "attributionTexts": [
+      "Bundle includes offline RKE2 artifacts staged by rke2nodeinit image action."
+    ]
+  }
+]
+
+relationships = [
+  {
+    "spdxElementId": "SPDXRef-DOCUMENT",
+    "relationshipType": "DESCRIBES",
+    "relatedSpdxElement": root_spdx_id
+  }
+]
+
+for index, artifact in enumerate(artifacts):
+  path = artifact.get('path', '')
+  name = path.split('/')[-1] if path else 'artifact'
+  pkg_spdx_id = package_spdx_id(path, name, index)
+  sha = artifact.get('sha256') or "NOASSERTION"
+  source = artifact.get('source') or "NOASSERTION"
+  verified = artifact.get('verified') or "unknown"
+
+  pkg = {
+    "SPDXID": pkg_spdx_id,
+    "name": name,
+    "versionInfo": "NOASSERTION",
+    "supplier": "Organization: rke2-node-init",
+    "downloadLocation": "NOASSERTION",
+    "packageFileName": path,
+    "checksums": [{
+      "algorithm": "SHA256",
+      "checksumValue": sha
+    }] if sha != "NOASSERTION" else [],
+    "primaryPackagePurpose": "BINARY",
+    "licenseDeclared": "NOASSERTION",
+    "licenseConcluded": "NOASSERTION",
+    "copyrightText": "NOASSERTION",
+    "attributionTexts": [
+      f"source={source}; verified={verified}"
+    ]
+  }
+  packages.append(pkg)
+  relationships.append({
+    "spdxElementId": root_spdx_id,
+    "relationshipType": "CONTAINS",
+    "relatedSpdxElement": pkg_spdx_id
+  })
+
+external_document_refs = []
 if staged_json:
   try:
-    with open(staged_json, 'r', encoding='utf-8') as sf:
-      staged = json.load(sf)
-    data['staged_manifest'] = staged
+    with open(staged_json, 'rb') as sf:
+      staged_bytes = sf.read()
+    staged_sha = hashlib.sha256(staged_bytes).hexdigest()
+    external_document_refs.append({
+      "externalDocumentId": "DocumentRef-rke2-stage-manifest",
+      "spdxDocument": f"file://{staged_json}",
+      "checksum": {
+        "algorithm": "SHA256",
+        "checksumValue": staged_sha
+      }
+    })
   except Exception:
-    data['staged_manifest'] = None
+    pass
+
+data = {
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": doc_name,
+  "documentNamespace": doc_namespace,
+  "creationInfo": {
+    "created": created,
+    "creators": [
+      "Tool: rke2nodeinit"
+    ],
+    "comment": f"Generated from image action artifacts; security_score={summary.get('security_score', 'unknown')}"
+  },
+  "documentDescribes": [
+    root_spdx_id
+  ],
+  "packages": packages,
+  "relationships": relationships,
+  "annotations": [
+    {
+      "annotationDate": created,
+      "annotationType": "OTHER",
+      "annotator": "Tool: rke2nodeinit",
+      "comment": f"artifacts_discovered={summary.get('artifacts_discovered', 0)}, artifacts_verified={summary.get('artifacts_verified', 0)}, sha256_manifest_present={summary.get('sha256_manifest_present', 'unknown')}"
+    }
+  ]
+}
+
+if external_document_refs:
+  data["externalDocumentRefs"] = external_document_refs
 
 with open(sbom_json, 'w', encoding='utf-8') as out:
-  json.dump(data, out, indent=2, sort_keys=True)
+  json.dump(data, out, indent=2)
 print(sbom_json)
 PY
     if [[ $? -eq 0 ]]; then
@@ -7812,7 +9563,7 @@ PY
   log_info ""
   
   # Check if boot service is enabled
-  local boot_status="disabled"
+  local boot_status="NOT INSTALLED"
   if systemctl is-enabled rke2-boot.service &>/dev/null; then
     boot_status="ENABLED - will run automatically on next boot"
   elif [[ -f "$BOOT_SERVICE_PATH" ]]; then
@@ -8192,7 +9943,10 @@ action_server() {
   # Phase 7: Token and RKE2 configuration
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion/generation."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
@@ -8273,6 +10027,7 @@ action_server() {
 
   # Phase 8: Install RKE2
   report_progress "Installing RKE2 server" 8 8
+  local exported_node_token=""
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     cleanup_containerd_before_rke2 "rke2-server"
 
@@ -8293,6 +10048,23 @@ action_server() {
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "flannel_fix_installed"
+
+    # Export server node token into outputs for operator convenience when
+    # available at this stage. If the file is not present yet, keep workflow
+    # non-fatal and rely on post-reboot retrieval guidance.
+    local server_node_token="/var/lib/rancher/rke2/server/node-token"
+    local token_export_path="$OUT_DIR/${SPEC_NAME:-server}-node-token.txt"
+    if [[ -f "$server_node_token" ]]; then
+      if cp -f "$server_node_token" "$token_export_path" >>"$LOG_FILE" 2>&1; then
+        chmod 600 "$token_export_path" >>"$LOG_FILE" 2>&1 || true
+        exported_node_token="$token_export_path"
+        log_info "Exported server node token to: $exported_node_token"
+      else
+        log_warn "Failed to export server node token to $token_export_path"
+      fi
+    else
+      log_info "Server node token not present yet; retrieve after reboot from /var/lib/rancher/rke2/server/node-token"
+    fi
 
   else
     log_info "DRY-RUN: Would install RKE2 server from $STAGE_DIR"
@@ -8330,6 +10102,9 @@ action_server() {
   log_info "  2. After reboot, check cluster status: kubectl get nodes"
   log_info "  3. Retrieve node token: cat /var/lib/rancher/rke2/server/node-token"
   log_info "  4. Use token to join additional servers or agents"
+  if [[ -n "$exported_node_token" ]]; then
+    log_info "  5. Exported token copy: $exported_node_token"
+  fi
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -8577,7 +10352,10 @@ action_agent() {
   fi
 
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
@@ -8982,7 +10760,10 @@ action_add_server() {
   [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log_info "Validating/expanding provided token (if any)..."
-  if [[ -n "$TOKEN" ]]; then
+  if [[ -n "$TOKEN_FILE" ]]; then
+    log_info "Token file provided; skipping token expansion."
+    TOKEN=""
+  elif [[ -n "$TOKEN" ]]; then
     local full_token=""
     full_token="$(ensure_full_cluster_token "$TOKEN")"
     if [[ -n "$full_token" ]]; then
@@ -9453,6 +11234,7 @@ while [[ $# -gt 0 ]]; do
     --dry-push) DRY_PUSH=1; shift;;
     --apply-netplan-now) APPLY_NETPLAN_NOW=1; shift;;
     --load-images) LOAD_IMAGES=1; shift;;
+    --fix-cni-permissions) FIX_CNI_PERMISSIONS=1; shift;;
     --verify-layers) VERIFY_LAYERS=1; shift;;
     --node-name)
       if [[ -z "${2:-}" ]]; then
@@ -9538,10 +11320,13 @@ if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
     log ERROR "YAML file not found: $CONFIG_FILE"; exit 5
   fi
+  if [[ "$CONFIG_FILE" != /* ]]; then
+    CONFIG_FILE="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd -P)/$(basename -- "$CONFIG_FILE")"
+  fi
   API="$(yaml_get_api "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  if [[ "$API" != "rkeprep/v1" ]]; then
-    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"; exit 5
+  if [[ "$API" != "rkeprep/v2" ]]; then
+    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v2)"; exit 5
   fi
   if [[ "$PRINT_CONFIG" -eq 1 ]]; then
     echo "----- Sanitized YAML -----"

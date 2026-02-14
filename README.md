@@ -1,6 +1,6 @@
 # rke2nodeinit.sh
 
-`rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without network access.
+`bin/rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without public Internet access.
 
 ---
 
@@ -32,7 +32,9 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
-- **Hardened CNI Alignment** – Fetches the chart-expected `hardened-cni-plugins` tag and stages it into the RKE2 images directory for offline pulls.
+- **Hardened CNI Alignment** – Uses `spec.rke2CNIVersion` when provided (or auto-selects a compatible tag) and stages `hardened-cni-plugins` into the RKE2 images directory for offline pulls.
+- **CNI Image Preflight** – During `image`, validates that staged archives contain required images for configured `spec.cni` plugins (for example Multus/Canal) and fails fast when required images are missing.
+- **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
@@ -51,19 +53,21 @@
 | Connectivity | `image` requires Internet access for artifact acquisition. `push`, `server`, `agent`, `verify`, and `airgap` must run without Internet access |
 | Disk space | Several GB for RKE2 tarballs, images, SBOM data, and logs |
 | Optional tooling | [`syft`](https://github.com/anchore/syft) for SPDX SBOMs. Without it, nerdctl inspect metadata is produced |
-| External dependencies | Private registry endpoint, optional custom CA, and YAML configuration matching `apiVersion: rkeprep/v1` |
+| External dependencies | Private registry endpoint, optional custom CA, and YAML configuration matching `apiVersion: rkeprep/v2` |
 
 ---
 
 ## Workflow Overview
 
-1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, validate CNI-required staged images from `spec.cni`, strictly validate required image:tag references against staged archives, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
-3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
-4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
+3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer. Before install, staged artifacts are revalidated, including strict required image:tag presence checks.
+4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
-Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v1`) that centralizes inputs and secrets.
+Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v2`) that centralizes inputs and secrets.
+
+For strict offline clusters, provide complete image bundles for the selected CNI stack (for example `rke2-images-*.linux-amd64.tar.*` flavor archives in addition to the base `rke2-images.linux-amd64.tar.zst`). Staging only `hardened-cni-plugins` is not sufficient for Multus/Canal.
 
 ---
 
@@ -123,20 +127,6 @@ flowchart TD
     ActionAirgap --> End
     ActionAddServer --> End
 
-    click Start call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1")
-    click CheckBash call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L4")
-    click CheckRoot call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L9")
-    click CheckCRLF call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L15")
-    click ParseArgs call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1012")
-    click SelectAction call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1092")
-    click ActionImage call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L664")
-    click ActionPush call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L563")
-    click ActionServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L828")
-    click ActionAgent call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L944")
-    click ActionVerify call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1102")
-    click ActionAirgap call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1121")
-    click ActionAddServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1057")
-    click End call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh")
 ```
 
 ---
@@ -152,6 +142,9 @@ flowchart TD
 | `agent` | Offline worker node | Configure network, join tokens, CA trust, and install `rke2-agent` |
 | `verify` | Any host | Validate prerequisites without making changes |
 | `airgap` | Offline template | Runs `image` but powers off instead of rebooting, ideal for VM templating |
+| `label-node` | Running cluster node | Apply Kubernetes labels with `kubectl` using YAML or CLI-provided labels |
+| `taint-node` | Running cluster node | Apply Kubernetes taints with `kubectl` using YAML or CLI-provided taints |
+| `list-images` | Any host with staged artifacts | Display effective/staged RKE2 image archives and required image references |
 
 Each action honors both CLI flags and YAML values. When both are provided, YAML values take precedence and are logged accordingly.
 
@@ -167,13 +160,13 @@ The repository includes a STIG helper script and guidance for firewall zoning an
 
 ```bash
 # With a manifest
-sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f clusters/prod-image.yaml image
 
 # Direct action without YAML
-sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
+sudo ./bin/rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
 
 # Print sanitized manifest for auditing
-sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
+sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 ```
 
 ### Common Flags
@@ -188,27 +181,28 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--enable-fips` | Enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds |
+| `--fix-cni-permissions` | During `image`, install/enable timer-based CNI permission remediation |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `12`) to control the entropy, for example `make token TOKEN_SIZE=24`.
+- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `32`) to control entropy, for example `make token TOKEN_SIZE=24`.
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
-- `make token` to print a fresh Base64 token and save it under `outputs/generated-token/token-<timestamp>.txt`. Override the number of random bytes (default `32`) by supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 
 ## YAML Configuration Reference
 
-All manifests must set `apiVersion: rkeprep/v1` and `metadata.name`. The `kind` selects the action. Only relevant fields for each action are consumed; extra keys are ignored safely.
+All manifests must set `apiVersion: rkeprep/v2` and `metadata.name`. The `kind` selects the action. Only relevant fields for each action are consumed; extra keys are ignored safely.
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: prod-image
 spec:
   rke2Version: v1.34.1+rke2r1
+  rke2CNIVersion: v1.9.0-build20260116
   registry: registry.example.local/rke2
   registryUsername: svc
   registryPassword: superSecret123!
@@ -225,6 +219,8 @@ spec:
 - **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
+- **Image prep:** `rke2Version`, `rke2CNIVersion`
+- **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
@@ -273,7 +269,7 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 ├─ downloads/                        # image/push cache (images, tarballs, installers, nerdctl bundles)
 ├─ outputs/
 │  ├─ <metadata.name>/               # run-specific exports (README, configs, CA copies)
-│  └─ sbom/                          # SBOM or inspect metadata per image
+│  └─ sbom/                          # SBOM outputs per image (text inventory + SPDX 2.3 JSON)
 ├─ logs/                             # structured execution logs
 ├─ certs/                            # example CA material consumed by manifests
 ├─ rke2nodeinit.sh                   # the script
@@ -293,10 +289,12 @@ System locations used during installation:
 
 ## Verification & Troubleshooting
 
-- Run `sudo ./rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
+- Run `sudo ./bin/rke2nodeinit.sh verify` to confirm prerequisites (kernel modules, swap state, iptables backend, NetworkManager, UFW rules, staged artifacts).
+- `image`, `server`, and `agent` now fail fast when required chart/release image tags are not present in staged archives under `/var/lib/rancher/rke2/agent/images` and `/opt/rke2/stage`.
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
 - When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.
+- If Multus fails with `cannot find valid master CNI config` while Canal is present, apply the persistent CNI permissions remediation documented in [docs/STIG-README.md](docs/STIG-README.md#persistent-cni-permissions-remediation-canal--multus).
 
 ---
 
@@ -324,4 +322,4 @@ The script honors several environment variables that can be set prior to executi
 
 ---
 
-For more examples, inspect the `examples/` directory or review the inline help via `./rke2nodeinit.sh -h`.
+For more examples, inspect the `examples/` directory or review the inline help via `./bin/rke2nodeinit.sh -h`.

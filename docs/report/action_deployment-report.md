@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
-**Script Version:** rke2nodeinit.sh v0.8b  
+**Script Version:** rke2nodeinit.sh v1.2.0  
 **Actions Covered:** `server`, `agent`, `add-server`  
 **Lines:** 7064-7423 (server), 7424-7765 (agent), 7766-8142 (add-server)
 
@@ -57,7 +57,7 @@ This report provides a comprehensive technical analysis of the three primary RKE
 ### Server Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: dc1manager-ctrl01
@@ -87,7 +87,7 @@ spec:
 ### Agent Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Agent
 metadata:
   name: dc1manager-work01
@@ -108,7 +108,7 @@ spec:
 ### AddServer Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: AddServer
 metadata:
   name: dc1manager-ctrl02

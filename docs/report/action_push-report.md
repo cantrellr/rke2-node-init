@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Report Date:** November 18, 2025  
-**Script Version:** rke2nodeinit.sh v0.8b  
+**Script Version:** rke2nodeinit.sh v1.2.0  
 **Action Function:** action_push()  
 **Lines:** 6325-6516
 
@@ -32,7 +32,7 @@ This report provides a comprehensive technical analysis of the `action_push()` f
 ### YAML Configuration Example
 
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Push
 metadata:
   name: registry-push-operation

@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: rke2-server-01
@@ -56,7 +56,7 @@ spec:
 
 ---
 # Multi-interface server example
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: rke2-server-multi-nic
@@ -113,7 +113,7 @@ spec:
 
 ---
 # Minimal server configuration
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: simple-server
@@ -135,7 +135,7 @@ spec:
 
 ---
 # HA server with load balancer
-apiVersion: rkeprep/v1
+apiVersion: rkeprep/v2
 kind: Server
 metadata:
   name: rke2-server-ha-01
