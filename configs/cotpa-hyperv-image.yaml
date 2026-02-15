@@ -4,6 +4,8 @@ metadata:
   name: cotpa-hyperv-image
 spec:
   rke2Version: v1.35.0+rke2r3
+  rke2CNIVersion: v1.9.0-build20260116
+  rke2MultusVersion: v4.2.3-build20260116
   cni:
    - multus
    - canal
