@@ -6,29 +6,29 @@ spec:
   disable-default-system-registry: true
   hostname: cotpa-ctrl01
   # Bind to cluster communication interface
-  nodeIp: 172.16.15.101
-  bindAddress: 172.16.15.101
-  advertiseAddress: 172.16.15.101
+  nodeIp: 172.16.15.123
+  bindAddress: 172.16.15.123
+  advertiseAddress: 172.16.15.123
   cni:
    - multus
    - canal
   interfaces:
     - name: eth0
-      ip: 172.16.15.101
+      ip: 172.16.15.123
       prefix: 24
       gateway: 172.16.15.255
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan18
     - name: eth1
-      ip: 172.16.69.60
+      ip: 172.16.4.252
       prefix: 24
       gateway:
       dns:
       searchDomains:
     # vlan9
     - name: eth2
-      ip: 172.16.255.240
+      ip: 172.16.5.252
       prefix: 24
       gateway:
       dns: 
@@ -42,7 +42,7 @@ spec:
     - cotpa-ctrl01.cantrellcloud.net
     - cotpa-cluster
     - cotpa-cluster.cantrellcloud.net
-    - 172.16.15.101
+    - 172.16.15.123
   service-cidr: 10.93.0.0/16
   cluster-cidr: 10.243.0.0/16
   cluster-domain: cluster.local
