@@ -3,19 +3,24 @@ kind: Image
 metadata:
   name: cotpa-hyperv-image
 spec:
-  rke2Version: v1.34.1+rke2r1
-  registry: kuberegistry.k8.cantrellcloud.net:8443
-  system-default-registry: kuberegistry.k8.cantrellcloud.net:8443
+  rke2Version: v1.35.0+rke2r3
+  cni:
+   - multus
+   - canal
+  fixCNIPermissions: true
+  registry: kuberegistry.k8.cantrellcloud.net:8443/rke2
+  embedded-registry: true
+  disable-default-registry-endpoint: true
   defaultDns: [172.16.10.11, 172.16.10.12]
   defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net, cantrelloffice.cloud]
   customCA:
-    rootCrt: /rke2-node-init/certs/root-ca.crt
-    rootKey: /rke2-node-init/certs/root-ca-key.pem
-    intermediateCrt: /rke2-node-init/certs/subordinate-ca.crt
-    intermediateKey: /rke2-node-init/certs/subordinate-ca-key.pem
+    rootCrt: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca.crt
+    rootKey: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca-key.pem
+    intermediateCrt:
+    intermediateKey:
     installToOSTrust: true
   bootService:
-    enabled: true
+    enabled: false
   #  yamlPath: /root/server-config.yaml
     mode: oneshot
     platform: hyperv
