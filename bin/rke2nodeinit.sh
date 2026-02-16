@@ -3668,6 +3668,47 @@ append_spec_config_extras() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: append_offline_registry_guard_default
+# Purpose : Ensure config.yaml disables fallback pulls to upstream registries
+#           when staged offline artifacts are present and the operator did not
+#           explicitly set disable-default-registry-endpoint in YAML.
+# Arguments:
+#   $1 - Path to config.yaml being written
+#   $2 - Optional YAML spec path (defaults to CONFIG_FILE)
+# Returns : 0
+# ------------------------------------------------------------------------------
+append_offline_registry_guard_default() {
+  local cfg_path="$1"
+  local spec_file="${2:-$CONFIG_FILE}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local images_tar="${IMAGES_TAR:-rke2-images.linux-${ARCH}.tar.zst}"
+
+  [[ -z "$cfg_path" || ! -f "$cfg_path" ]] && return 0
+
+  # Respect explicit config (already present in generated config file)
+  if grep -Eq '^[[:space:]]*disable-default-registry-endpoint[[:space:]]*:' "$cfg_path" 2>/dev/null; then
+    return 0
+  fi
+
+  # Respect explicit YAML value if provided
+  if [[ -n "$spec_file" && -f "$spec_file" ]]; then
+    local explicit_val
+    explicit_val="$(yaml_spec_get_any "$spec_file" disable-default-registry-endpoint disableDefaultRegistryEndpoint || true)"
+    if [[ -n "$explicit_val" ]]; then
+      return 0
+    fi
+  fi
+
+  # If offline artifacts are staged, enforce strict no-upstream-fallback mode.
+  if [[ -f "$images_dir/$images_tar" || -f "$STAGE_DIR/$images_tar" || -f "$DOWNLOADS_DIR/$images_tar" ]]; then
+    echo "disable-default-registry-endpoint: true" >> "$cfg_path"
+    log_info "Applied offline default: disable-default-registry-endpoint=true"
+  fi
+
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: yaml_meta_get
 # Purpose : Read a value from the YAML metadata section (e.g., metadata.name).
 # Arguments:
@@ -7044,13 +7085,14 @@ except:
 run_rke2_installer() {
   local src="$1"
   local itype="${2:-}"
+  local skip_download="${INSTALL_RKE2_SKIP_DOWNLOAD:-true}"
   set +e
   if [[ -n "$itype" ]]; then
     log INFO "RKE2 installing INSTALL_RKE2_TYPE..."
-    INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+    INSTALL_RKE2_SKIP_DOWNLOAD="$skip_download" INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
   else
     log INFO "RKE2 installing INSTALL_RKE2_ARTIFACT_PATH..."
-    INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+    INSTALL_RKE2_SKIP_DOWNLOAD="$skip_download" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
   fi
   local rc=$?
   set -e
@@ -9249,11 +9291,8 @@ action_image() {
   metrics_increment "success"
   metrics_increment "registry_trust_configured"
 
-  # Collect artifact inventory for SBOM and verification
-  log_info "Collecting artifact inventory for SBOM generation"
-
   # --- Save site defaults (DNS/search) ---------------------------------------
-  report_progress "Saving site defaults" 7 8
+  report_progress "Persisting defaults and automation" 7 8
   local STATE="/etc/rke2image.defaults"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
@@ -9295,7 +9334,7 @@ action_image() {
   if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
     if install_boot_script; then
       if install_boot_service; then
-        log_info "✓ Boot script and service installed successfully"
+        log_info "Boot script and service installed successfully"
         log_info "  Script: $BOOT_SCRIPT_PATH"
         log_info "  Service: $BOOT_SERVICE_PATH"
         log_info "  Mode: $BOOT_SERVICE_MODE"
@@ -9317,7 +9356,7 @@ action_image() {
         fi
 
         if enable_boot_service; then
-          log_info "✓ Boot service ENABLED for next reboot"
+          log_info "Boot service enabled for next reboot"
           log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
           log_info "           Boot service will auto-discover and copy configs on first boot"
         else
@@ -9342,7 +9381,7 @@ action_image() {
   if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
     log_info "Enabling CNI permission remediation (requested by YAML/CLI)"
     if install_cni_permission_remediation; then
-      log_info "✓ CNI permission remediation installed and enabled"
+      log_info "CNI permission remediation installed and enabled"
       metrics_increment "total"
       metrics_increment "success"
       metrics_increment "cni_perm_fix_enabled"
@@ -9360,6 +9399,7 @@ action_image() {
   # --- SBOM and README generation --------------------------------------------
   report_progress "Generating SBOM and documentation" 8 8
   log_info "Generating Software Bill of Materials (SBOM)"
+  log_info "Collecting artifact inventory for SBOM generation"
   
   # Ensure nerdctl archive names are known for reporting
   local full_tgz="${NERDCTL_FULL_TGZ:-}"
@@ -10210,6 +10250,18 @@ action_server() {
     metrics_increment "failed"
     exit 3
   fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before server startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
+    metrics_increment "failed"
+    exit 3
+  fi
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "artifacts_staged"
@@ -10330,6 +10382,7 @@ action_server() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
@@ -10540,7 +10593,7 @@ action_agent() {
     metrics_increment "config_loaded"
   fi
 
-  log INFO "Reading configuration from CLI args (if provided)..."
+  log_info "Reading configuration from CLI args (if provided)..."
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
 
@@ -10549,7 +10602,7 @@ action_agent() {
     yaml_has_interfaces_agent=1
   fi
 
-  log INFO "Merging configuration values..."
+  log_info "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
     HOSTNAME="${agent_cli[hostname]}"
   fi
@@ -10610,40 +10663,16 @@ action_agent() {
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
   metrics_increment "config_validated"
 
-  # Phase 3: Stage artifacts
-  report_progress "Staging RKE2 artifacts" 3 8
-  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
-  if ! ensure_staged_artifacts; then
-    log_error "Failed to ensure staged artifacts"
-    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
-    metrics_increment "failed"
-    exit 3
-  fi
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "artifacts_staged"
-
-  # Phase 4: Configure system
-  report_progress "Configuring system" 4 8
-  log_info "Setting new hostname: $HOSTNAME..."
-  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
-    hostnamectl set-hostname "$HOSTNAME"
-    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-  else
-    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
-  fi
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "hostname_set"
-
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
   local prompt_extra_ifaces_agent=1
   if (( ${#NET_INTERFACES[@]} )); then
     if (( yaml_has_interfaces_agent )); then
       prompt_extra_ifaces_agent=0
-      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+      log_info "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
     elif [[ -n "${agent_cli[interfaces]:-}" ]]; then
       prompt_extra_ifaces_agent=0
-      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+      log_info "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
     fi
   fi
 
@@ -10657,7 +10686,7 @@ action_agent() {
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
       if ! interface_decode_entry "$_encoded" _nic_dbg; then
-        log WARN "Skipping invalid interface entry in summary"
+        log_warn "Skipping invalid interface entry in summary"
         continue
       fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
@@ -10680,6 +10709,44 @@ action_agent() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "interfaces_configured"
+
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before agent startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_staged"
+
+  # Phase 5: Configure system
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "hostname_set"
 
   # Phase 6: Gather cluster join information
   report_progress "Configuring cluster join" 6 8
@@ -10735,6 +10802,7 @@ action_agent() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
@@ -11019,6 +11087,18 @@ action_add_server() {
     metrics_increment "failed"
     exit 3
   fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before add-server startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
+    metrics_increment "failed"
+    exit 3
+  fi
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "artifacts_staged"
@@ -11143,6 +11223,7 @@ action_add_server() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
