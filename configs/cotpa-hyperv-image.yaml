@@ -9,7 +9,7 @@ spec:
   cni:
    - multus
    - canal
-  fixCNIPermissions: true
+  fixCNIPermissions: false
   registry: kuberegistry.k8.cantrellcloud.net:8443/rke2
   embedded-registry: true
   disable-default-registry-endpoint: true
