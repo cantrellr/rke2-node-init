@@ -7916,6 +7916,59 @@ cache_rke2_artifacts() {
     log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
   fi
 
+  # Ensure golden-image-friendly layout: extract CNI binaries and any
+  # available /etc/cni/net.d config snippets into the stage tree so image
+  # builders can bake them into VM templates. This makes the golden image
+  # immediately usable offline (Multus/Canal find master conflists & binaries).
+  ensure_cni_binaries_baked() {
+    local archive dest_root
+    dest_root="$STAGE_DIR"
+    mkdir -p "$dest_root/opt/cni/bin" "$dest_root/etc/cni/net.d" || true
+
+    for archive in "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$STAGE_DIR/$HARDENED_CNI_BN" "$STAGE_DIR/$HARDENED_MULTUS_BN"; do
+      [[ -f "$archive" ]] || continue
+      local tmpd
+      tmpd=$(mktemp -d) || tmpd="/tmp/.rke2nodeinit-extract-$$"
+      # Extract docker-archive contents into tempdir
+      if ! tar -xf "$archive" -C "$tmpd" 2>/dev/null; then
+        rm -rf "$tmpd" || true
+        continue
+      fi
+      # Find layer tars and inspect for opt/cni and etc/cni/net.d
+      shopt -s nullglob
+      for lt in "$tmpd"/*.tar; do
+        mkdir -p "$tmpd/layer"
+        tar -xf "$lt" -C "$tmpd/layer" 2>/dev/null || true
+        if [[ -d "$tmpd/layer/opt/cni/bin" ]]; then
+          mkdir -p "$dest_root/opt/cni/bin"
+          cp -a "$tmpd/layer/opt/cni/bin/." "$dest_root/opt/cni/bin/" 2>/dev/null || true
+        fi
+        if [[ -d "$tmpd/layer/etc/cni/net.d" ]]; then
+          mkdir -p "$dest_root/etc/cni/net.d"
+          cp -a "$tmpd/layer/etc/cni/net.d/." "$dest_root/etc/cni/net.d/" 2>/dev/null || true
+        fi
+        rm -rf "$tmpd/layer"/* || true
+      done
+      shopt -u nullglob
+      rm -rf "$tmpd" || true
+    done
+
+    # If a canal conflist was generated in the agent images staging area,
+    # prefer that copy so golden image contains a ready-to-use master CNI
+    # config. The script may also have staged a 10-canal.conflist previously.
+    if [[ -f "$INSTALL_RKE2_AGENT_IMAGES_DIR/10-canal.conflist" ]]; then
+      mkdir -p "$STAGE_DIR/etc/cni/net.d"
+      cp -a "$INSTALL_RKE2_AGENT_IMAGES_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
+    elif [[ -f "$DOWNLOADS_DIR/10-canal.conflist" ]]; then
+      mkdir -p "$STAGE_DIR/etc/cni/net.d"
+      cp -a "$DOWNLOADS_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
+    fi
+    log INFO "Prepared $STAGE_DIR with CNI binaries and net.d snippets for baking into golden image"
+  }
+
+  # Run the bake step (best-effort)
+  ensure_cni_binaries_baked || true
+
   if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
     local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
     cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
