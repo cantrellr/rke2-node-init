@@ -2,6 +2,7 @@ apiVersion: rkeprep/v2
 kind: Image
 metadata:
   name: preprod-vmware-image
+spec:
   rke2Version: v1.35.0+rke2r3
   cni:
    - multus
