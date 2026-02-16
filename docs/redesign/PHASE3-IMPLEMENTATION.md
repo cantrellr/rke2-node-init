@@ -2,6 +2,7 @@
 
 **Status**: ✅ Complete  
 **Date**: November 16, 2025  
+**Last Updated**: February 16, 2026  
 **Branch**: feat/stage-artifact-path  
 
 ## Executive Summary
@@ -378,6 +379,9 @@ No changes will be made to the system
 [INFO] Starting RKE2 Golden Image Preparation
 [INFO] Configuration:
 [INFO]   RKE2_VERSION: v1.31.4+rke2r1
+[INFO]   HARDENED_CNI_TAG: <auto-detect>
+[INFO]   HARDENED_MULTUS_TAG: <auto-detect>
+[INFO]   HARDENED_FLANNEL_TAG: <auto-detect>
 [INFO]   REGISTRY: registry.example.com/rke2
 [INFO] Validating environment
 [✓] Validation passed

@@ -32,7 +32,7 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
-- **Hardened CNI Alignment** – Uses `spec.rke2CNIVersion` when provided (or auto-selects a compatible tag) and stages `hardened-cni-plugins` into the RKE2 images directory for offline pulls.
+- **Hardened CNI Alignment** – Supports explicit or auto-detected tags for `hardened-cni-plugins`, `hardened-multus-cni`, and `hardened-flannel` (via `spec.rke2CNIVersion`, `spec.rke2MultusVersion`, and `spec.rke2FlannelVersion`) and stages required archives for offline pulls.
 - **CNI Image Preflight** – During `image`, validates that staged archives contain required images for configured `spec.cni` plugins (for example Multus/Canal) and fails fast when required images are missing.
 - **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
@@ -203,6 +203,8 @@ metadata:
 spec:
   rke2Version: v1.34.1+rke2r1
   rke2CNIVersion: v1.9.0-build20260116
+  rke2MultusVersion: v4.2.3-build20260120
+  rke2FlannelVersion: v0.28.0-build20260119
   registry: registry.example.local/rke2
   registryUsername: svc
   registryPassword: superSecret123!
@@ -219,7 +221,7 @@ spec:
 - **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
-- **Image prep:** `rke2Version`, `rke2CNIVersion`
+- **Image prep:** `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 

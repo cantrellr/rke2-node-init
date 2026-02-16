@@ -2,7 +2,7 @@
 
 This directory provides runnable `rkeprep/v2` YAML examples for `bin/rke2nodeinit.sh` actions.
 
-**Last Updated:** February 13, 2026
+**Last Updated:** February 16, 2026
 
 ---
 
@@ -49,7 +49,7 @@ spec: {}
 
 ### Commonly Used `spec` Fields
 
-- `rke2Version`, `rke2CNIVersion`
+- `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - `registry`, `registryUsername`, `registryPassword`
 - `customCA.rootCrt`, `customCA.intermediateCrt`, `customCA.installToOSTrust`
 - `interfaces[]` for multi-NIC declarations

@@ -38,6 +38,8 @@ Environment variables:
 
 - `HARDENED_CNI_URL`: direct HTTP(S) tarball (overrides skopeo fallback).
 - `HARDENED_CNI_TAG`: explicit tag to use when mirroring with skopeo.
+- `HARDENED_MULTUS_TAG`: explicit tag to use when mirroring `rancher/hardened-multus-cni`.
+- `HARDENED_FLANNEL_TAG`: explicit tag to use when mirroring `rancher/hardened-flannel`.
 - `HARDENED_CNI_REQUIRED`: set to `0` to allow skipping hardened-cni acquisition (default: required).
 
 List effective image tags

@@ -1,7 +1,7 @@
 # Technical Report: Image Action Analysis
 
 **Document Version:** 1.0  
-**Report Date:** November 18, 2025  
+**Report Date:** February 16, 2026  
 **Script Version:** rke2nodeinit.sh v1.2.0  
 **Configuration File:** cotpa-image.yaml  
 **RKE2 Version:** v1.34.1+rke2r1
@@ -616,6 +616,9 @@ For worker nodes:
 Configuration:
 -------------
 - Registry: kuberegistry.k8.cantrellcloud.net:8443
+- HARDENED_CNI_TAG: <auto-detect>
+- HARDENED_MULTUS_TAG: <auto-detect>
+- HARDENED_FLANNEL_TAG: <auto-detect>
 - DNS: 172.16.69.71, 172.16.69.72
 - CA Certificates: Installed to /etc/rancher/rke2/ca/
 

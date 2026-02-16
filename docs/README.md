@@ -1,6 +1,6 @@
 # RKE2 Node Init Documentation Index
 
-**Last Updated:** February 13, 2026  
+**Last Updated:** February 16, 2026  
 **Project Status:** Active development (post-Phase 5 hardening/automation)
 
 ---

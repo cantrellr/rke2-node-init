@@ -3035,7 +3035,7 @@ PY
       print("latest")
   else:
       print(sorted(tags, key=score, reverse=True)[0])
-  PY
+PY
   )
       fi
       [[ -n "$chosen" ]] || chosen="latest"
@@ -3079,12 +3079,10 @@ PY
           local mtmp
           mtmp=$(mktemp)
           grep -v -F " $bn" "$manifest" > "$mtmp" || true
-          printf "%s  %s
-  " "$sha" "$bn" >> "$mtmp"
+            printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
           mv "$mtmp" "$manifest"
         else
-          printf "%s  %s
-  " "$sha" "$bn" > "$manifest"
+            printf "%s  %s\n" "$sha" "$bn" > "$manifest"
         fi
         log INFO "Appended hardened-flannel checksum to manifest: $manifest"
       fi
@@ -3446,7 +3444,7 @@ try:
                 # Found exact match at correct depth - extract and return value
                 value = re.sub(r'\s+#.*$', '', value).strip()  # Remove inline comments
                 if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]  # Strip quotes
+                  value = value[1:-1]  # Strip quotes
                 print(value)
                 sys.exit(0)
 except FileNotFoundError:
@@ -9035,6 +9033,7 @@ action_image() {
   local REQ_VER="${RKE2_VERSION:-}"
   local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
   local REQ_MULTUS_VER="${HARDENED_MULTUS_TAG:-}"
+  local REQ_FLANNEL_VER="${HARDENED_FLANNEL_TAG:-}"
   local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
@@ -9057,6 +9056,7 @@ action_image() {
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
     REQ_MULTUS_VER="${REQ_MULTUS_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2MultusVersion rke2MultusCniVersion rke2MultusCNIVersion || true)}"
+    REQ_FLANNEL_VER="${REQ_FLANNEL_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2FlannelVersion rke2FlannelCniVersion rke2FlannelCNIVersion || true)}"
     local fix_cni_permissions_yaml=""
     fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
     if bool_value_is_true "$fix_cni_permissions_yaml"; then
@@ -9110,12 +9110,14 @@ action_image() {
   # Honor explicit hardened-cni tag from env/YAML for artifact mirroring.
   [[ -n "$REQ_CNI_VER" ]] && HARDENED_CNI_TAG="$REQ_CNI_VER"
   [[ -n "$REQ_MULTUS_VER" ]] && HARDENED_MULTUS_TAG="$REQ_MULTUS_VER"
+  [[ -n "$REQ_FLANNEL_VER" ]] && HARDENED_FLANNEL_TAG="$REQ_FLANNEL_VER"
 
   # Log effective configuration after YAML/CLI/env resolution.
   log_info "Configuration:"
   log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
   log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
   log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
+  log_info "  HARDENED_FLANNEL_TAG: ${HARDENED_FLANNEL_TAG:-<auto-detect>}"
   log_info "  CNI_PLUGINS: ${cni_plugins_csv:-<unset>}"
   log_info "  FIX_CNI_PERMISSIONS: ${fix_cni_permissions_enabled}"
   log_info "  REGISTRY: ${REGISTRY:-<none>}"
