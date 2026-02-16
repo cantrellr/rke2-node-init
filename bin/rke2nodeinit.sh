@@ -2077,72 +2077,150 @@ EOF
 # Returns : 0 on success, non-zero on failure (download or write error)
 # ------------------------------------------------------------------------------
 cache_hardened_cni_http() {
-  local url="${1:-$HARDENED_CNI_URL}"
-  if [[ -z "$url" ]]; then
-    log INFO "HARDENED_CNI_URL not set; skipping hardened-cni-plugins download"
-    return 0
-  fi
+  log INFO "Deprecated: direct hardened-cni HTTP download handler is disabled; using hardened-* auto-acquisition"
+  return 2
+}
 
-  mkdir -p "$DOWNLOADS_DIR"
-  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
-  local tmp="$DOWNLOADS_DIR/.tmp-${bn}.$$"
-  log INFO "Downloading hardened-cni-plugins from $url -> $DOWNLOADS_DIR/$bn"
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_artifacts_from_images_txt
+# Purpose : Auto-detect all hardened-* entries in an images list file and
+#           download / mirror them into the downloads dir and stage them for
+#           offline use. Supports HTTP(S) tarballs and container image names
+#           (uses skopeo or nerdctl/docker when available).
+# Arguments:
+#   $1 - Optional path to images list (defaults to $DOWNLOADS_DIR/$IMAGES_TXT)
+# Returns : 0 on success, non-zero on error
+# ------------------------------------------------------------------------------
+cache_hardened_artifacts_from_images_txt() {
+  local images_list="${1:-$DOWNLOADS_DIR/$IMAGES_TXT}"
+  [[ -f "$images_list" ]] || return 0
 
-  if command -v curl >/dev/null 2>&1; then
-    if ! spinner_run "Downloading $bn" curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
-      log ERROR "Failed to download hardened-cni-plugins from $url"
-      rm -f "$tmp" || true
-      return 1
+  mkdir -p "$DOWNLOADS_DIR" "$STAGE_DIR"
+
+  local line url bn outfn img safebn sha manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^# ]] && continue
+    # Only consider lines that mention hardened-
+    if ! printf '%s' "$line" | grep -qi 'hardened-'; then
+      continue
     fi
-  elif command -v wget >/dev/null 2>&1; then
-    if ! spinner_run "Downloading $bn" wget -q -O "$tmp" "$url"; then
-      log ERROR "Failed to download hardened-cni-plugins via wget from $url"
-      rm -f "$tmp" || true
-      return 1
-    fi
-  else
-    log ERROR "Neither curl nor wget available to download hardened-cni-plugins"
-    return 2
-  fi
 
-  # Move into place atomically
-  mv -T "$tmp" "$DOWNLOADS_DIR/$bn"
-  chmod 0644 "$DOWNLOADS_DIR/$bn" || true
-
-  # Write a simple SHA256 file beside the artifact for audit/staging and
-  # also append the checksum to the repository-style manifest used by the
-  # script so the staged manifest `sha256sum-<arch>.txt` includes this
-  # artifact. This keeps hardened-cni entries aligned with other artifacts
-  # and allows `sha256sum -c` verification to work uniformly.
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    log INFO "Wrote checksum: $DOWNLOADS_DIR/${bn}.sha256"
-
-    # Ensure downloads dir manifest exists and is updated idempotently.
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    mkdir -p "$(dirname "$manifest")"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      # Remove any existing line referencing this basename, then append
-      # a single manifest line in the canonical format: "<sha>  <basename>"
-      if [[ -f "$manifest" ]]; then
-        # Use a temp file replacement to avoid races
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
+    if printf '%s' "$line" | grep -qE '^https?://'; then
+      url="$line"
+      bn="$(basename "$url" | sed -e 's/[?].*$//')"
+      outfn="$DOWNLOADS_DIR/$bn"
+      if [[ -f "$outfn" ]]; then
+        log INFO "Already have $bn; skipping download"
       else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+        log INFO "Downloading hardened artifact from $url -> $outfn"
+        if command -v curl >/dev/null 2>&1; then
+          if ! curl -fL --retry 3 --retry-delay 2 -o "$outfn" "$url"; then
+            log WARN "Failed to download $url"
+            rm -f "$outfn" || true
+            continue
+          fi
+        elif command -v wget >/dev/null 2>&1; then
+          if ! wget -q -O "$outfn" "$url"; then
+            log WARN "Failed to download $url"
+            rm -f "$outfn" || true
+            continue
+          fi
+        else
+          log WARN "No HTTP client available to download $url"
+          continue
+        fi
+        chmod 0644 "$outfn" || true
       fi
-      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    else
+      # Treat as container image name (e.g. rancher/hardened-flannel:v1.2.3)
+      img="$line"
+      safebn="$(printf '%s' "$img" | sed -e 's/[/:@]/-/g' -e 's/^-*//')-linux-${ARCH}.tar"
+      outfn="$DOWNLOADS_DIR/$safebn"
+      if [[ -f "$outfn" ]]; then
+        log INFO "Already have image archive $safebn; skipping pull"
+      else
+        if command -v skopeo >/dev/null 2>&1; then
+          log INFO "Using skopeo to mirror image $img -> $outfn"
+          if ! skopeo copy --override-arch "$ARCH" "docker://$img" "docker-archive:$outfn"; then
+            log WARN "skopeo failed for $img"
+            rm -f "$outfn" || true
+            continue
+          fi
+        else
+          if command -v nerdctl >/dev/null 2>&1; then
+            log INFO "Using nerdctl to pull and save $img -> $outfn"
+            if ! nerdctl pull "$img"; then
+              log WARN "nerdctl pull failed for $img"
+              continue
+            fi
+            if ! nerdctl save -o "$outfn" "$img"; then
+              log WARN "nerdctl save failed for $img"
+              rm -f "$outfn" || true
+              continue
+            fi
+          elif command -v docker >/dev/null 2>&1; then
+            log INFO "Using docker to pull and save $img -> $outfn"
+            if ! docker pull "$img"; then
+              log WARN "docker pull failed for $img"
+              continue
+            fi
+            if ! docker save -o "$outfn" "$img"; then
+              log WARN "docker save failed for $img"
+              rm -f "$outfn" || true
+              continue
+            fi
+          else
+            log WARN "No container tool available (skopeo/nerdctl/docker) to mirror image $img"
+            continue
+          fi
+        fi
+        chmod 0644 "$outfn" || true
+      fi
     fi
+
+    # Record checksum and append to manifest (idempotent)
+    if command -v sha256sum >/dev/null 2>&1 && [[ -f "$outfn" ]]; then
+      sha="$(sha256sum "$outfn" | awk '{print $1}' 2>/dev/null || true)"
+      if [[ -n "$sha" ]]; then
+        mkdir -p "$(dirname "$manifest")"
+        if [[ -f "$manifest" ]]; then
+          # Remove existing stanza for this basename
+          tmpm="$(mktemp)"
+          grep -v -F " $(basename "$outfn")" "$manifest" > "$tmpm" || true
+          printf "%s  %s\n" "$sha" "$(basename "$outfn")" >> "$tmpm"
+          mv "$tmpm" "$manifest"
+        else
+          printf "%s  %s\n" "$sha" "$(basename "$outfn")" > "$manifest"
+        fi
+      fi
+    fi
+
+    # Stage artifact for offline use (copy into STAGE_DIR)
+    if [[ -f "$outfn" ]]; then
+      cp -a "$outfn" "$STAGE_DIR/" || true
+      log INFO "Staged hardened artifact: $STAGE_DIR/$(basename "$outfn")"
+    fi
+
+    # Populate known specialized variables if names match
+    case "$(basename "$outfn")" in
+      hardened-cni* ) HARDENED_CNI_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+      hardened-multus* ) HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+      hardened-flannel* ) HARDENED_FLANNEL_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+    esac
+
+  done < "$images_list"
+
+  # After mirroring/staging hardened-* artifacts, emit derived tag info (if any)
+  local _tags=()
+  [[ -n "${HARDENED_CNI_TAG:-}" ]] && _tags+=("HARDENED_CNI_TAG=${HARDENED_CNI_TAG}")
+  [[ -n "${HARDENED_MULTUS_TAG:-}" ]] && _tags+=("HARDENED_MULTUS_TAG=${HARDENED_MULTUS_TAG}")
+  [[ -n "${HARDENED_FLANNEL_TAG:-}" ]] && _tags+=("HARDENED_FLANNEL_TAG=${HARDENED_FLANNEL_TAG}")
+  if [[ ${#_tags[@]} -gt 0 ]]; then
+    log INFO "Derived hardened tags: ${_tags[*]}"
   fi
 
-  local _size
-  _size=$(du -h "$DOWNLOADS_DIR/$bn" 2>/dev/null | awk '{print $1}' || echo "unknown")
-  log INFO "Downloaded hardened-cni-plugins: $DOWNLOADS_DIR/$bn ($_size)"
   return 0
 }
 
@@ -2709,151 +2787,8 @@ reconcile_chart_images_against_downloaded_bundle() {
 # Returns : 0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
 cache_hardened_cni_skopeo() {
-  local explicit_tag="${1:-}"
-  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
-  local repo="docker://rancher/hardened-cni-plugins"
-  if ! command -v skopeo >/dev/null 2>&1; then
-    log WARN "skopeo not available; cannot mirror hardened-cni via skopeo"
-    return 2
-  fi
-
-  mkdir -p "$DOWNLOADS_DIR"
-
-  # Determine desired tag:
-  #   1) explicit_tag (HARDENED_CNI_TAG)
-  #   2) extract the exact tag from the downloaded RKE2 images tarball
-  #   3) RKE2_VERSION (last-resort heuristic)
-  #
-  # The images tarball is the authoritative source for chart-bundled images.
-  local desired_tag=""
-  local desired_tag_source=""
-  if [[ -n "$explicit_tag" ]]; then
-    desired_tag="$explicit_tag"
-    desired_tag_source="explicit"
-  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    desired_tag=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
-  fi
-
-  if [[ -z "$desired_tag" && -n "${RKE2_VERSION:-}" ]]; then
-    desired_tag="${RKE2_VERSION}"
-    desired_tag_source="rke2-version"
-  fi
-
-  # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
-  # tags and Docker Hub API and let a small helper choose the best tag.
-  local tags_json
-  tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
-  local hub_json
-  if command -v curl >/dev/null 2>&1; then
-    hub_json=$(curl -fsSL "https://hub.docker.com/v2/repositories/rancher/hardened-cni-plugins/tags?page_size=100" 2>/dev/null || true)
-  else
-    hub_json=""
-  fi
-
-  local chosen=""
-  if command -v python3 >/dev/null 2>&1; then
-    local _tfile _hfile
-    _tfile=$(mktemp) || _tfile="/tmp/.rke2nodeinit-tags$$"
-    _hfile=$(mktemp) || _hfile="/tmp/.rke2nodeinit-hub$$"
-    printf '%s' "$tags_json" > "$_tfile" || true
-    printf '%s' "$hub_json" > "$_hfile" || true
-    chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
-    rm -f "$_tfile" "$_hfile" || true
-  fi
-  # If we have an authoritative tag from the images tarball (or explicit
-  # operator override), use it directly and skip remote tag selection.
-  # For RKE2_VERSION fallback, only force direct override when the value is a
-  # valid OCI image tag (RKE2 release tags can include '+' which is invalid).
-  if [[ -n "$desired_tag" ]]; then
-    if [[ "$desired_tag_source" == "rke2-version" ]]; then
-      if [[ "$desired_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-        chosen="$desired_tag"
-      else
-        log WARN "RKE2 version '$desired_tag' is not OCI-tag-safe; using discovered hardened-cni tag '${chosen:-latest}'"
-      fi
-    else
-      chosen="$desired_tag"
-    fi
-  elif [[ -z "$chosen" ]]; then
-    chosen="latest"
-  fi
-
-  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag'; source='${desired_tag_source:-none}')"
-
-  local dest="$DOWNLOADS_DIR/$bn"
-  # Use docker-archive format (creates tar with manifest.json compatible with tooling)
-  # Write to a temporary destination first, then atomically move into place.
-  local tmp_dest
-  # create a safe temporary file path under the downloads dir
-  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
-  # we'll remove the tmp file before skopeo so skopeo creates it itself (avoids modify-in-place issues)
-  rm -f "$tmp_dest" || true
-  local skopeo_log
-  skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
-  local dest_ref="rancher/hardened-cni-plugins:${chosen}"
-  log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
-  # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
-    rc=$?
-  else
-    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
-    rc=$?
-  fi
-  if [[ $rc -ne 0 ]]; then
-    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc). See $skopeo_log for raw output"
-    # append the tail of the skopeo log into the main log for quick inspection
-    if [[ -f "$skopeo_log" ]]; then
-      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
-      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
-      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
-    fi
-    rm -f "$tmp_dest" || true
-    return 1
-  fi
-  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest ($dest_ref)"
-  # Move into final location atomically (mv will overwrite existing file)
-  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
-    log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
-    # if move fails, include skopeo log for debugging
-    if [[ -f "$skopeo_log" ]]; then
-      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
-      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
-      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
-    fi
-    rm -f "$tmp_dest" || true
-    return 1
-  }
-  chmod 0644 "$dest" || true
-  # also copy the skopeo raw log alongside named artifact logs for post-mortem
-  if [[ -f "$skopeo_log" ]]; then
-    cp -f "$skopeo_log" "$LOG_DIR/" 2>/dev/null || true
-  fi
-  chmod 0644 "$dest" || true
-
-  # Generate per-file sha and append to downloads manifest (idempotent)
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      if [[ -f "$manifest" ]]; then
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
-      else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
-      fi
-      log INFO "Appended hardened-cni checksum to manifest: $manifest"
-    fi
-  fi
-
-  log INFO "skopeo mirrored hardened-cni -> $dest"
-  return 0
+  log INFO "Deprecated: direct hardened-cni skopeo handler is disabled; using hardened-* auto-acquisition"
+  return 2
 }
 
 # ------------------------------------------------------------------------------
@@ -2865,113 +2800,8 @@ cache_hardened_cni_skopeo() {
 # Returns : 0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
 cache_hardened_multus_skopeo() {
-  local explicit_tag="${1:-}"
-  local bn="${HARDENED_MULTUS_BN:-hardened-multus-cni-${ARCH}.tar}"
-  local repo="docker://rancher/hardened-multus-cni"
-
-  if ! command -v skopeo >/dev/null 2>&1; then
-    log WARN "skopeo not available; cannot mirror hardened-multus-cni"
-    return 2
-  fi
-
-  mkdir -p "$DOWNLOADS_DIR"
-
-  local desired_tag=""
-  local desired_tag_source=""
-  if [[ -n "$explicit_tag" ]]; then
-    desired_tag="$explicit_tag"
-    desired_tag_source="explicit"
-  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    desired_tag=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
-  fi
-
-  local chosen=""
-  if [[ -n "$desired_tag" ]]; then
-    chosen="$desired_tag"
-  else
-    local tags_json
-    tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
-    if command -v python3 >/dev/null 2>&1; then
-      chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
-import json,re,sys
-raw=sys.argv[1]
-tags=[]
-try:
-    doc=json.loads(raw) if raw else {}
-    tags=doc.get("Tags") or []
-except Exception:
-    tags=[]
-
-def score(tag):
-    m=re.search(r'build(\d{8})$', tag)
-    b=int(m.group(1)) if m else -1
-    sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
-    if sv:
-        major,minor,patch=map(int,sv.groups())
-    else:
-        major=minor=patch=-1
-    return (b,major,minor,patch,tag)
-
-if not tags:
-    print("latest")
-else:
-    print(sorted(tags, key=score, reverse=True)[0])
-PY
-)
-    fi
-    [[ -n "$chosen" ]] || chosen="latest"
-  fi
-
-  log INFO "skopeo: chosen hardened-multus tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
-
-  local dest="$DOWNLOADS_DIR/$bn"
-  local tmp_dest
-  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
-  rm -f "$tmp_dest" || true
-
-  local dest_ref="rancher/hardened-multus-cni:${chosen}"
-  local rc=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-  else
-    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-  fi
-
-  if [[ $rc -ne 0 ]]; then
-    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
-    rm -f "$tmp_dest" || true
-    return 1
-  fi
-
-  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
-    log ERROR "Failed to move mirrored hardened-multus into place: $tmp_dest -> $dest"
-    rm -f "$tmp_dest" || true
-    return 1
-  }
-  chmod 0644 "$dest" || true
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      if [[ -f "$manifest" ]]; then
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
-      else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
-      fi
-      log INFO "Appended hardened-multus checksum to manifest: $manifest"
-    fi
-  fi
-
-  log INFO "skopeo mirrored hardened-multus -> $dest"
-  return 0
+  log INFO "Deprecated: direct hardened-multus skopeo handler is disabled; using hardened-* auto-acquisition"
+  return 2
 }
 
   # ----------------------------------------------------------------------------
@@ -2983,113 +2813,8 @@ PY
   # Returns : 0 on success, non-zero on failure
   # ----------------------------------------------------------------------------
   cache_hardened_flannel_skopeo() {
-    local explicit_tag="${1:-}"
-    local bn="${HARDENED_FLANNEL_BN:-hardened-flannel-${ARCH}.tar}"
-    local repo="docker://rancher/hardened-flannel"
-
-    if ! command -v skopeo >/dev/null 2>&1; then
-      log WARN "skopeo not available; cannot mirror hardened-flannel"
-      return 2
-    fi
-
-    mkdir -p "$DOWNLOADS_DIR"
-
-    local desired_tag=""
-    local desired_tag_source=""
-    if [[ -n "$explicit_tag" ]]; then
-      desired_tag="$explicit_tag"
-      desired_tag_source="explicit"
-    elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-      desired_tag=$(extract_hardened_flannel_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-      [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
-    fi
-
-    local chosen=""
-    if [[ -n "$desired_tag" ]]; then
-      chosen="$desired_tag"
-    else
-      local tags_json
-      tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
-      if command -v python3 >/dev/null 2>&1; then
-        chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
-  import json,re,sys
-  raw=sys.argv[1]
-  tags=[]
-  try:
-      doc=json.loads(raw) if raw else {}
-      tags=doc.get("Tags") or []
-  except Exception:
-      tags=[]
-
-  def score(tag):
-      m=re.search(r'build(\d{8})$', tag)
-      b=int(m.group(1)) if m else -1
-      sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
-      if sv:
-          major,minor,patch=map(int,sv.groups())
-      else:
-          major=minor=patch=-1
-      return (b,major,minor,patch,tag)
-
-  if not tags:
-      print("latest")
-  else:
-      print(sorted(tags, key=score, reverse=True)[0])
-PY
-  )
-      fi
-      [[ -n "$chosen" ]] || chosen="latest"
-    fi
-
-    log INFO "skopeo: chosen hardened-flannel tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
-
-    local dest="$DOWNLOADS_DIR/$bn"
-    local tmp_dest
-    tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
-    rm -f "$tmp_dest" || true
-
-    local dest_ref="rancher/hardened-flannel:${chosen}"
-    local rc=0
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-    else
-      skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-    fi
-
-    if [[ $rc -ne 0 ]]; then
-      log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
-      rm -f "$tmp_dest" || true
-      return 1
-    fi
-
-    mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
-      log ERROR "Failed to move mirrored hardened-flannel into place: $tmp_dest -> $dest"
-      rm -f "$tmp_dest" || true
-      return 1
-    }
-    chmod 0644 "$dest" || true
-
-    if command -v sha256sum >/dev/null 2>&1; then
-      (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-      local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-      local sha
-      sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-      if [[ -n "$sha" ]]; then
-        if [[ -f "$manifest" ]]; then
-          local mtmp
-          mtmp=$(mktemp)
-          grep -v -F " $bn" "$manifest" > "$mtmp" || true
-            printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-          mv "$mtmp" "$manifest"
-        else
-            printf "%s  %s\n" "$sha" "$bn" > "$manifest"
-        fi
-        log INFO "Appended hardened-flannel checksum to manifest: $manifest"
-      fi
-    fi
-
-    log INFO "skopeo mirrored hardened-flannel -> $dest"
-    return 0
+    log INFO "Deprecated: direct hardened-flannel skopeo handler is disabled; using hardened-* auto-acquisition"
+    return 2
   }
 
 # ------------------------------------------------------------------------------
@@ -6667,8 +6392,32 @@ verify_required_cni_images_staged() {
           ;;
       esac
       if [[ -n "$separate_bn" ]] && [[ -f "$images_dir/$separate_bn" || -f "$STAGE_DIR/$separate_bn" || -f "$DOWNLOADS_DIR/$separate_bn" ]]; then
-        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $separate_bn"
+        log_info "  ✓ ${labels[$pattern]} found in $separate_bn"
         found=1
+      else
+        case "$pattern" in
+          rancher/hardened-cni-plugins:)
+            # prefer images_dir then stage then downloads
+            local _match
+            _match=$(ls "$images_dir"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)
+            _match=${_match:-$(ls "$STAGE_DIR"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)}
+            _match=${_match:-$(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)}
+            if [[ -n "$_match" ]]; then
+              log_info "  ✓ ${labels[$pattern]} found in $(basename "$_match")"
+              found=1
+            fi
+            ;;
+          rancher/hardened-multus-cni:)
+            local _match
+            _match=$(ls "$images_dir"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)
+            _match=${_match:-$(ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)}
+            _match=${_match:-$(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)}
+            if [[ -n "$_match" ]]; then
+              log_info "  ✓ ${labels[$pattern]} found in $(basename "$_match")"
+              found=1
+            fi
+            ;;
+        esac
       fi
     fi
 
@@ -7473,13 +7222,12 @@ ensure_staged_artifacts() {
                 _fline=$(grep -E 'hardened-flannel' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
                 if [[ -n "$_fline" ]]; then
                   HARDENED_FLANNEL_TAG="${_fline##*:}"
-                  log INFO "Derived HARDENED_FLANNEL_TAG from images list: ${HARDENED_FLANNEL_TAG}"
                 fi
               fi
               if [[ -z "${HARDENED_FLANNEL_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
                 HARDENED_FLANNEL_TAG=$(extract_hardened_flannel_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
                 if [[ -n "${HARDENED_FLANNEL_TAG:-}" ]]; then
-                  log INFO "Derived HARDENED_FLANNEL_TAG from images tarball: ${HARDENED_FLANNEL_TAG}"
+                  :
                 else
                   if [[ -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
                     log INFO "Unable to derive HARDENED_FLANNEL_TAG from images list/tarball, but existing hardened-flannel artifact found at $DOWNLOADS_DIR/$HARDENED_FLANNEL_BN"
@@ -7981,14 +7729,13 @@ cache_rke2_artifacts() {
       _line=$(grep -E 'hardened-cni-plugins' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
       if [[ -n "$_line" ]]; then
         HARDENED_CNI_TAG="${_line##*:}"
-        log INFO "Derived HARDENED_CNI_TAG from images list: ${HARDENED_CNI_TAG}"
       fi
     fi
     # Fallback: extract from images tarball if text list not available
     if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
       HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
       if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
-        log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
+        :
       else
         if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
           log INFO "Unable to derive HARDENED_CNI_TAG from images list/tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
@@ -8006,13 +7753,12 @@ cache_rke2_artifacts() {
       _mline=$(grep -E 'hardened-multus-cni|multus' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | grep -E 'multus|hardened-multus-cni' | head -n1 || true)
       if [[ -n "$_mline" ]]; then
         HARDENED_MULTUS_TAG="${_mline##*:}"
-        log INFO "Derived HARDENED_MULTUS_TAG from images list: ${HARDENED_MULTUS_TAG}"
       fi
     fi
     if [[ -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
       HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
       if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
-        log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
+        :
       else
         if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
           log INFO "Unable to derive HARDENED_MULTUS_TAG from images list/tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
@@ -8023,78 +7769,85 @@ cache_rke2_artifacts() {
     fi
   fi
 
-  # Optionally download hardened-cni-plugins when configured. Prefer skopeo
-  # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
-  if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
-    # If the artifact already exists in downloads, skip acquisition.
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_CNI_BN; skipping hardened-cni acquisition"
-    else
-      if command -v skopeo >/dev/null 2>&1; then
-        log INFO "skopeo detected; attempting to mirror hardened-cni from Docker Hub"
-        if ! cache_hardened_cni_skopeo "${HARDENED_CNI_TAG:-}"; then
-          log WARN "skopeo hardened-cni mirror failed; attempting HTTP fallback"
-          if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
-            cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
-          fi
-        fi
-      else
-        if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
-          log INFO "Configured HARDENED_CNI_URL detected; attempting HTTP download"
-          cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
-        else
-          log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
-        fi
-      fi
+    # Auto-detect and cache any hardened-* artifacts listed in images manifest
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      log INFO "Scanning $DOWNLOADS_DIR/$IMAGES_TXT for hardened-* artifacts"
+      cache_hardened_artifacts_from_images_txt "$DOWNLOADS_DIR/$IMAGES_TXT" || log WARN "Auto-acquire of hardened-* artifacts encountered errors"
     fi
-  fi
+
+    # Consolidated info: staged hardened artifacts. Derived tags are logged by the
+    # hardened-* auto-acquisition function after mirroring/staging completes.
+    local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+
+    # Emit deduped INFO lines for all staged hardened artifacts (collect unique basenames and their locations)
+    declare -A _staged_locs=()
+    for f in "$STAGE_DIR"/docker.io-rancher-hardened-* "$STAGE_DIR"/hardened-* "$IMAGES_DIR"/docker.io-rancher-hardened-* "$IMAGES_DIR"/hardened-*; do
+      [[ -f "$f" ]] || continue
+      local bn
+      bn="$(basename "$f")"
+      local loc
+      if [[ "$f" == "$STAGE_DIR"/* ]]; then
+        loc="$STAGE_DIR"
+      elif [[ "$f" == "$IMAGES_DIR"/* ]]; then
+        loc="$IMAGES_DIR"
+      else
+        loc="$(dirname "$f")"
+      fi
+      if [[ -n "${_staged_locs[$bn]:-}" ]]; then
+        case ",${_staged_locs[$bn]}," in
+          *",$loc,"*) : ;;
+          *) _staged_locs[$bn]="${_staged_locs[$bn]},$loc" ;;
+        esac
+      else
+        _staged_locs[$bn]="$loc"
+      fi
+    done
+
+    for _bn in "${!_staged_locs[@]}"; do
+      IFS=, read -r -a _locs <<< "${_staged_locs[$_bn]}"
+      if [[ ${#_locs[@]} -eq 1 ]]; then
+        log INFO "Staged ${_bn} into ${_locs[0]}"
+      else
+        # join multiple locations with ' and '
+        local _joined
+        _joined="${_locs[0]}"
+        for ((i=1; i<${#_locs[@]}; i++)); do
+          _joined="${_joined} and ${_locs[i]}"
+        done
+        log INFO "Staged ${_bn} into ${_joined}"
+      fi
+    done
+
+  # Dedicated hardened-cni/multus/flannel mirroring handlers have been
+  # deprecated in favor of the unified hardened-* auto-acquisition that
+  # scans the release images list and mirrors/stages any matching
+  # 'hardened-*' artifacts. At this point those artifacts should already
+  # be present in $DOWNLOADS_DIR or $STAGE_DIR.
 
   # Enforce hardened-cni availability when required (ensures offline Multus/CNI dependencies).
   if [[ "${HARDENED_CNI_REQUIRED:-0}" != "0" ]]; then
-    if [[ ! -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-      log ERROR "Required hardened-cni-plugins artifact missing: $DOWNLOADS_DIR/$HARDENED_CNI_BN"
-      log ERROR "Remediation: install 'skopeo' for auto-mirroring or set HARDENED_CNI_URL to a direct tarball"
+    if ! (ls "$DOWNLOADS_DIR"/hardened-cni* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-cni* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-cni* 1>/dev/null 2>&1); then
+      log ERROR "Required hardened-cni-plugins artifact missing in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a machine with network access to mirror hardened-* artifacts, or pre-stage hardened-cni archives in $DOWNLOADS_DIR"
       popd >/dev/null || true
       return 4
     fi
   fi
 
   if [[ $requires_multus -eq 1 ]]; then
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_MULTUS_BN; skipping hardened-multus acquisition"
-    else
-      if command -v skopeo >/dev/null 2>&1; then
-        log INFO "Multus requested; attempting to mirror hardened-multus from Docker Hub"
-        if ! cache_hardened_multus_skopeo "${HARDENED_MULTUS_TAG:-}"; then
-          log ERROR "Failed to mirror hardened-multus-cni required for spec.cni=multus"
-          popd >/dev/null || true
-          return 6
-        fi
-      else
-        log ERROR "Multus requested but skopeo is not available to mirror hardened-multus-cni"
-        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_MULTUS_BN in $DOWNLOADS_DIR"
-        popd >/dev/null || true
-        return 6
-      fi
+    if ! (ls "$DOWNLOADS_DIR"/hardened-multus* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-multus* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 1>/dev/null 2>&1); then
+      log ERROR "Multus requested but hardened-multus artifacts not found in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a networked host to mirror hardened-* artifacts or pre-stage hardened-multus archives in $DOWNLOADS_DIR"
+      popd >/dev/null || true
+      return 6
     fi
   fi
   if [[ $requires_canal -eq 1 ]]; then
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
-      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_FLANNEL_BN; skipping hardened-flannel acquisition"
-    else
-      if command -v skopeo >/dev/null 2>&1; then
-        log INFO "Canal requested; attempting to mirror hardened-flannel from Docker Hub"
-        if ! cache_hardened_flannel_skopeo "${HARDENED_FLANNEL_TAG:-}"; then
-          log ERROR "Failed to mirror hardened-flannel required for spec.cni=canal"
-          popd >/dev/null || true
-          return 7
-        fi
-      else
-        log ERROR "Canal requested but skopeo is not available to mirror hardened-flannel"
-        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_FLANNEL_BN in $DOWNLOADS_DIR"
-        popd >/dev/null || true
-        return 7
-      fi
+    if ! (ls "$DOWNLOADS_DIR"/hardened-flannel* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-flannel* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-flannel* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-flannel* 1>/dev/null 2>&1); then
+      log ERROR "Canal requested but hardened-flannel artifacts not found in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a networked host to mirror hardened-* artifacts or pre-stage hardened-flannel archives in $DOWNLOADS_DIR"
+      popd >/dev/null || true
+      return 7
     fi
   fi
 
@@ -8180,18 +7933,22 @@ cache_rke2_artifacts() {
     log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
   fi
 
-  # Stage hardened-cni-plugins tarball if present in downloads
-  if [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-    local tmpc="$STAGE_DIR/.tmp-${HARDENED_CNI_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
-    mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
-    log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
+  # Stage any per-image mirrored hardened-cni artifacts (docker-archive names)
+  # Do not auto-stage the legacy consolidated tarball (e.g. hardened-cni-plugins-amd64.tar)
+  for _hc in "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* "$STAGE_DIR"/docker.io-rancher-hardened-cni*; do
+    [[ -f "$_hc" ]] || continue
+    local bn
+    bn="$(basename "$_hc")"
+    local tmpc="$STAGE_DIR/.tmp-${bn}.$$"
+    cp -f "$_hc" "$tmpc"
+    mv -T "$tmpc" "$STAGE_DIR/$bn"
+    log INFO "Staged $bn into $STAGE_DIR"
 
-    local tmpc_img="$IMAGES_DIR/.tmp-${HARDENED_CNI_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
-    mv -T "$tmpc_img" "$IMAGES_DIR/$HARDENED_CNI_BN"
-    log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
-  fi
+    local tmpc_img="$IMAGES_DIR/.tmp-${bn}.$$"
+    cp -f "$_hc" "$tmpc_img"
+    mv -T "$tmpc_img" "$IMAGES_DIR/$bn"
+    log INFO "Staged $bn into $IMAGES_DIR"
+  done
 
   # Ensure golden-image-friendly layout: extract CNI binaries and any
   # available /etc/cni/net.d config snippets into the stage tree so image
@@ -8203,7 +7960,7 @@ cache_rke2_artifacts() {
     local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
     mkdir -p "$dest_root/opt/cni/bin" "$dest_root/etc/cni/net.d" || true
 
-    for archive in "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$STAGE_DIR/$HARDENED_CNI_BN" "$STAGE_DIR/$HARDENED_MULTUS_BN" "$STAGE_DIR/$HARDENED_FLANNEL_BN"; do
+    for archive in "$DOWNLOADS_DIR"/hardened-cni* "$DOWNLOADS_DIR"/hardened-multus* "$DOWNLOADS_DIR"/hardened-flannel* "$STAGE_DIR"/hardened-cni* "$STAGE_DIR"/hardened-multus* "$STAGE_DIR"/hardened-flannel*; do
       [[ -f "$archive" ]] || continue
       local tmpd
       tmpd=$(mktemp -d) || tmpd="/tmp/.rke2nodeinit-extract-$$"
@@ -8247,28 +8004,34 @@ cache_rke2_artifacts() {
   # Run the bake step (best-effort)
   ensure_cni_binaries_baked || true
 
-  if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-    local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
-    mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
-    log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
+  # Only stage the legacy hardened-multus tarball if no per-image mirrored multus archive exists
+  if [[ -z $(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null) && -z $(ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null) ]]; then
+    if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+      local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
+      mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
+      log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
 
-    local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
-    mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
-    log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
+      local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
+      mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
+      log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
+    fi
   fi
 
-  if [[ -n "${HARDENED_FLANNEL_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
-    local tmpf="$STAGE_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf"
-    mv -T "$tmpf" "$STAGE_DIR/$HARDENED_FLANNEL_BN"
-    log INFO "Staged $HARDENED_FLANNEL_BN into $STAGE_DIR"
+  # Only stage the legacy hardened-flannel tarball if no per-image mirrored flannel archive exists
+  if [[ -z $(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-flannel* 2>/dev/null) && -z $(ls "$STAGE_DIR"/docker.io-rancher-hardened-flannel* 2>/dev/null) ]]; then
+    if [[ -n "${HARDENED_FLANNEL_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+      local tmpf="$STAGE_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf"
+      mv -T "$tmpf" "$STAGE_DIR/$HARDENED_FLANNEL_BN"
+      log INFO "Staged $HARDENED_FLANNEL_BN into $STAGE_DIR"
 
-    local tmpf_img="$IMAGES_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf_img"
-    mv -T "$tmpf_img" "$IMAGES_DIR/$HARDENED_FLANNEL_BN"
-    log INFO "Staged $HARDENED_FLANNEL_BN into $IMAGES_DIR"
+      local tmpf_img="$IMAGES_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf_img"
+      mv -T "$tmpf_img" "$IMAGES_DIR/$HARDENED_FLANNEL_BN"
+      log INFO "Staged $HARDENED_FLANNEL_BN into $IMAGES_DIR"
+    fi
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
