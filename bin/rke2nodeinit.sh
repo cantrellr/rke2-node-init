@@ -7632,8 +7632,11 @@ cache_rke2_artifacts() {
 
   normalize_rke2_fips_version
 
-  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
+  # URL-encode '+' in version (GitHub releases use %2B for plus signs)
+  local url_version="${RKE2_VERSION//+/%2B}"
+  local BASE_URL="https://github.com/rancher/rke2/releases/download/${url_version}"
   local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local IMAGES_TXT="rke2-images-all.linux-${ARCH}.txt"
   local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
   local SHA256_FILE="sha256sum-${ARCH}.txt"
 
@@ -7697,32 +7700,67 @@ cache_rke2_artifacts() {
     done < <(collect_requested_cni_plugins "$CONFIG_FILE")
   fi
 
-  # If operator didn't set HARDENED_CNI_TAG, attempt to extract the exact
-  # `rancher/hardened-cni-plugins` tag from the downloaded RKE2 images tarball.
-  # This makes hardened-cni staging deterministic and aligned with the RKE2
-  # release (no "latest" drift).
-  if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
-      log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
+  # Prefer parsing the release images list text file for explicit hardened-* tags
+  # Download the images list txt first (idempotent) so we can extract exact
+  # `hardened-cni-plugins` and `hardened-multus-cni` tags used by the release.
+  if [[ -f "$IMAGES_TXT" ]]; then
+    log INFO "Already present: $IMAGES_TXT (skipping download)"
+  else
+    log INFO "Downloading $IMAGES_TXT from $BASE_URL/$IMAGES_TXT"
+    spinner_run "Downloading $IMAGES_TXT" curl -Lf "$BASE_URL/$IMAGES_TXT" -o "$IMAGES_TXT" || true
+    if [[ -f "$IMAGES_TXT" ]]; then
+      log INFO "Downloaded: $DOWNLOADS_DIR/$IMAGES_TXT from $BASE_URL/$IMAGES_TXT"
     else
-      if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-        log INFO "Unable to derive HARDENED_CNI_TAG from images tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
+      log WARN "Images list not found: $IMAGES_TXT; continuing and falling back to tarball parsing"
+    fi
+  fi
+
+  # If operator didn't set HARDENED_CNI_TAG, try to derive it from the images list
+  if [[ -z "${HARDENED_CNI_TAG:-}" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      # Prefer entries without digests (@sha256) and take the first matching line
+      local _line
+      _line=$(grep -E 'hardened-cni-plugins' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
+      if [[ -n "$_line" ]]; then
+        HARDENED_CNI_TAG="${_line##*:}"
+        log INFO "Derived HARDENED_CNI_TAG from images list: ${HARDENED_CNI_TAG}"
+      fi
+    fi
+    # Fallback: extract from images tarball if text list not available
+    if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+      if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
+        log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
       else
-        log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
+        if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+          log INFO "Unable to derive HARDENED_CNI_TAG from images list/tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
+        else
+          log WARN "Unable to derive HARDENED_CNI_TAG from release artifacts; hardened-cni mirroring may fall back to heuristics"
+        fi
       fi
     fi
   fi
 
-  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
-      log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
-    else
-      if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-        log INFO "Unable to derive HARDENED_MULTUS_TAG from images tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+  # If Multus is required, derive hardened-multus tag similarly
+  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      local _mline
+      _mline=$(grep -E 'hardened-multus-cni|multus' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | grep -E 'multus|hardened-multus-cni' | head -n1 || true)
+      if [[ -n "$_mline" ]]; then
+        HARDENED_MULTUS_TAG="${_mline##*:}"
+        log INFO "Derived HARDENED_MULTUS_TAG from images list: ${HARDENED_MULTUS_TAG}"
+      fi
+    fi
+    if [[ -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+      if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
+        log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
       else
-        log WARN "Unable to derive HARDENED_MULTUS_TAG from images tarball; hardened-multus mirroring will auto-select a tag"
+        if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+          log INFO "Unable to derive HARDENED_MULTUS_TAG from images list/tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+        else
+          log WARN "Unable to derive HARDENED_MULTUS_TAG from release artifacts; hardened-multus mirroring will auto-select a tag"
+        fi
       fi
     fi
   fi
