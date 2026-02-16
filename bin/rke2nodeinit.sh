@@ -3702,7 +3702,7 @@ append_offline_registry_guard_default() {
   # If offline artifacts are staged, enforce strict no-upstream-fallback mode.
   if [[ -f "$images_dir/$images_tar" || -f "$STAGE_DIR/$images_tar" || -f "$DOWNLOADS_DIR/$images_tar" ]]; then
     echo "disable-default-registry-endpoint: true" >> "$cfg_path"
-    log_info "Applied offline default: disable-default-registry-endpoint=true"
+    log_info "Applied offline default: disable-default-registry-endpoint=true" >&2
   fi
 
   return 0
