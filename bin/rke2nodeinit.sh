@@ -10156,6 +10156,7 @@ action_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Get token..." >&2
       if [[ -n "$TOKEN" ]]; then
@@ -10573,6 +10574,7 @@ action_agent() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
@@ -10994,6 +10996,7 @@ action_add_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
