@@ -12,36 +12,33 @@ spec:
    - multus
    - canal
   interfaces:
-    # vlan118
     - name: ens33
       ip: 10.1.1.215
       prefix: 24
-      gateway: 
+      gateway: 10.1.1.255
       dns: ["4.2.2.2"]
-      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
-    # vlan18
+      searchDomains: [dev.kube, dev.local]
     - name: ens35
       ip: 172.16.69.60
       prefix: 24
       gateway:
-      dns: ["172.16.10.11", "172.16.10.12"]
-      searchDomains: ["cantrellcloud.net", "cantrelloffice.cloud"]
-    # vlan9
+      dns: 
+      searchDomains: 
     - name: ens36
       ip: 172.16.255.240
       prefix: 24
       gateway:
-      dns: ["10.0.69.41"]
-      searchDomains: ["cantrell.cloud"]
+      dns: 
+      searchDomains: 
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
   - "env=preprod"
   tls-san:
     - dc1manager-ctrl01
-    - dc1manager-ctrl01.cantrellcloud.net
+    - dc1manager-ctrl01.dev.kube
     - dc1manager-cluster
-    - dc1manager-cluster.cantrellcloud.net
+    - dc1manager-cluster.dev.kube
     - 10.1.1.215
   service-cidr: 10.93.0.0/16
   cluster-cidr: 10.243.0.0/16
