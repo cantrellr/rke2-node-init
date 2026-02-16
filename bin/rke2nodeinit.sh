@@ -7375,8 +7375,7 @@ ensure_staged_artifacts() {
       elif [[ -n "$hardened_cni_tar" ]]; then
         log INFO "  ✓ Tarball verification: hardened-cni-plugins provided via separate archive $(basename "$hardened_cni_tar")"
       else
-        log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
-        log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
+        log INFO "  Tarball does not list 'hardened-cni-plugins' in Docker manifest; relying on staged per-image archives if present"
       fi
     else
       # Docker manifest not found, try OCI image index format as fallback
@@ -8038,6 +8037,30 @@ cache_rke2_artifacts() {
   if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
     local out_manifest="$STAGE_DIR/$SHA256_FILE"
     : > "$out_manifest"
+
+  # Ensure all staged tarball artifacts are also present in the RKE2 images
+  # directory so the RKE2 installer can consume them directly without
+  # contacting external registries. Copy any staged archives (*.tar, *.tgz,
+  # *.tar.zst) into the images dir if they are missing or differ in size.
+  mkdir -p "$IMAGES_DIR"
+  shopt -s nullglob
+  for _stagef in "$STAGE_DIR"/*.tar "$STAGE_DIR"/*.tgz "$STAGE_DIR"/*.tar.zst; do
+    [[ -f "$_stagef" ]] || continue
+    _bn="$(basename "$_stagef")"
+    _dst="$IMAGES_DIR/$_bn"
+    if [[ -f "$_dst" ]]; then
+      # Skip identical-size copies to avoid unnecessary writes
+      _srcsz=$(stat -c%s "$_stagef" 2>/dev/null || true)
+      _dstsz=$(stat -c%s "$_dst" 2>/dev/null || true)
+      if [[ -n "$_srcsz" && "$_srcsz" -eq "$_dstsz" ]]; then
+        continue
+      fi
+    fi
+    _tmp="$IMAGES_DIR/.tmp-$_bn.$$"
+    cp -f "$_stagef" "$_tmp" && mv -T "$_tmp" "$_dst" || { rm -f "$_tmp" || true; continue; }
+    log INFO "Copied staged artifact $_bn into $IMAGES_DIR"
+  done
+  shopt -u nullglob
     # Iterate over each line in the downloaded manifest and include only
     # entries whose basename is a tar archive and which exist in the
     # staging or images directories. Also produce a JSON metadata file
