@@ -218,6 +218,12 @@ HARDENED_MULTUS_TAG="${HARDENED_MULTUS_TAG:-}"
 HARDENED_MULTUS_BN="hardened-multus-cni-${ARCH}.tar"
 HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
 
+# Optional explicit tag for rancher/hardened-flannel when Canal is used.
+HARDENED_FLANNEL_TAG="${HARDENED_FLANNEL_TAG:-}"
+# Basename used for saved hardened-flannel archive.
+HARDENED_FLANNEL_BN="hardened-flannel-${ARCH}.tar"
+HARDENED_FLANNEL_FILE="$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN"
+
 # Logging - LOG_FILE will be set by initialize_action_context or defaults to timestamped name
 LOG_FILE=""
 
@@ -255,6 +261,65 @@ Repository: cantrellcloud/rke2-node-init
 Branch: feat/stage-artifact-path
 EOF
   exit 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_hardened_flannel_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-flannel`.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_flannel_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            if re.search(r'(^|/)rancher/hardened-flannel:', rt):
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    tag=$(grep -oE 'rancher/hardened-flannel:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-flannel:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
 }
 
 #-----------------------------------------------------------------------------
@@ -2908,6 +2973,126 @@ PY
   log INFO "skopeo mirrored hardened-multus -> $dest"
   return 0
 }
+
+  # ----------------------------------------------------------------------------
+  # Function: cache_hardened_flannel_skopeo
+  # Purpose : Mirror `rancher/hardened-flannel` into a local docker-archive
+  #           tarball for offline Canal (flannel) deployments.
+  # Arguments:
+  #   $1 - Optional explicit tag to use
+  # Returns : 0 on success, non-zero on failure
+  # ----------------------------------------------------------------------------
+  cache_hardened_flannel_skopeo() {
+    local explicit_tag="${1:-}"
+    local bn="${HARDENED_FLANNEL_BN:-hardened-flannel-${ARCH}.tar}"
+    local repo="docker://rancher/hardened-flannel"
+
+    if ! command -v skopeo >/dev/null 2>&1; then
+      log WARN "skopeo not available; cannot mirror hardened-flannel"
+      return 2
+    fi
+
+    mkdir -p "$DOWNLOADS_DIR"
+
+    local desired_tag=""
+    local desired_tag_source=""
+    if [[ -n "$explicit_tag" ]]; then
+      desired_tag="$explicit_tag"
+      desired_tag_source="explicit"
+    elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      desired_tag=$(extract_hardened_flannel_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+      [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
+    fi
+
+    local chosen=""
+    if [[ -n "$desired_tag" ]]; then
+      chosen="$desired_tag"
+    else
+      local tags_json
+      tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
+      if command -v python3 >/dev/null 2>&1; then
+        chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
+  import json,re,sys
+  raw=sys.argv[1]
+  tags=[]
+  try:
+      doc=json.loads(raw) if raw else {}
+      tags=doc.get("Tags") or []
+  except Exception:
+      tags=[]
+
+  def score(tag):
+      m=re.search(r'build(\d{8})$', tag)
+      b=int(m.group(1)) if m else -1
+      sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
+      if sv:
+          major,minor,patch=map(int,sv.groups())
+      else:
+          major=minor=patch=-1
+      return (b,major,minor,patch,tag)
+
+  if not tags:
+      print("latest")
+  else:
+      print(sorted(tags, key=score, reverse=True)[0])
+  PY
+  )
+      fi
+      [[ -n "$chosen" ]] || chosen="latest"
+    fi
+
+    log INFO "skopeo: chosen hardened-flannel tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
+
+    local dest="$DOWNLOADS_DIR/$bn"
+    local tmp_dest
+    tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
+    rm -f "$tmp_dest" || true
+
+    local dest_ref="rancher/hardened-flannel:${chosen}"
+    local rc=0
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+    else
+      skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
+    fi
+
+    if [[ $rc -ne 0 ]]; then
+      log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
+      rm -f "$tmp_dest" || true
+      return 1
+    fi
+
+    mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
+      log ERROR "Failed to move mirrored hardened-flannel into place: $tmp_dest -> $dest"
+      rm -f "$tmp_dest" || true
+      return 1
+    }
+    chmod 0644 "$dest" || true
+
+    if command -v sha256sum >/dev/null 2>&1; then
+      (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
+      local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+      local sha
+      sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
+      if [[ -n "$sha" ]]; then
+        if [[ -f "$manifest" ]]; then
+          local mtmp
+          mtmp=$(mktemp)
+          grep -v -F " $bn" "$manifest" > "$mtmp" || true
+          printf "%s  %s
+  " "$sha" "$bn" >> "$mtmp"
+          mv "$mtmp" "$manifest"
+        else
+          printf "%s  %s
+  " "$sha" "$bn" > "$manifest"
+        fi
+        log INFO "Appended hardened-flannel checksum to manifest: $manifest"
+      fi
+    fi
+
+    log INFO "skopeo mirrored hardened-flannel -> $dest"
+    return 0
+  }
 
 # ------------------------------------------------------------------------------
 # Function: log
@@ -7234,6 +7419,38 @@ ensure_staged_artifacts() {
         fi
       fi
 
+            # If Canal (flannel) is required, derive hardened-flannel tag similarly
+            if [[ $requires_multus -ne 1 && -z "${HARDENED_FLANNEL_TAG:-}" ]]; then
+              # detect canal usage by inspecting the config file if we haven't already
+              if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+                if grep -q "spec.cni: *canal" "$CONFIG_FILE" 2>/dev/null || grep -q "canal" "$CONFIG_FILE" 2>/dev/null; then
+                  requires_canal=1
+                fi
+              fi
+            fi
+            if [[ ${requires_canal:-0} -eq 1 && -z "${HARDENED_FLANNEL_TAG:-}" ]]; then
+              if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+                local _fline
+                _fline=$(grep -E 'hardened-flannel' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
+                if [[ -n "$_fline" ]]; then
+                  HARDENED_FLANNEL_TAG="${_fline##*:}"
+                  log INFO "Derived HARDENED_FLANNEL_TAG from images list: ${HARDENED_FLANNEL_TAG}"
+                fi
+              fi
+              if [[ -z "${HARDENED_FLANNEL_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+                HARDENED_FLANNEL_TAG=$(extract_hardened_flannel_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+                if [[ -n "${HARDENED_FLANNEL_TAG:-}" ]]; then
+                  log INFO "Derived HARDENED_FLANNEL_TAG from images tarball: ${HARDENED_FLANNEL_TAG}"
+                else
+                  if [[ -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+                    log INFO "Unable to derive HARDENED_FLANNEL_TAG from images list/tarball, but existing hardened-flannel artifact found at $DOWNLOADS_DIR/$HARDENED_FLANNEL_BN"
+                  else
+                    log WARN "Unable to derive HARDENED_FLANNEL_TAG from release artifacts; hardened-flannel mirroring will auto-select a tag"
+                  fi
+                fi
+              fi
+            fi
+
       # Build the temporary manifest to validate with sha256sum: include mapped lines
       # and any missing_entries that are not image-like (or image-like but not covered).
       local line
@@ -7612,6 +7829,7 @@ fetch_rke2_ca_generator() {
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
   local requires_multus=0
+  local requires_canal=0
 
   # If operator provided a local artifact path, prefer it and stage from there
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
@@ -7697,6 +7915,7 @@ cache_rke2_artifacts() {
     local _cni
     while IFS= read -r _cni; do
       [[ "$_cni" == "multus" ]] && requires_multus=1
+      [[ "$_cni" == "canal" ]] && requires_canal=1
     done < <(collect_requested_cni_plugins "$CONFIG_FILE")
   fi
 
@@ -7820,6 +8039,25 @@ cache_rke2_artifacts() {
       fi
     fi
   fi
+  if [[ $requires_canal -eq 1 ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_FLANNEL_BN; skipping hardened-flannel acquisition"
+    else
+      if command -v skopeo >/dev/null 2>&1; then
+        log INFO "Canal requested; attempting to mirror hardened-flannel from Docker Hub"
+        if ! cache_hardened_flannel_skopeo "${HARDENED_FLANNEL_TAG:-}"; then
+          log ERROR "Failed to mirror hardened-flannel required for spec.cni=canal"
+          popd >/dev/null || true
+          return 7
+        fi
+      else
+        log ERROR "Canal requested but skopeo is not available to mirror hardened-flannel"
+        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_FLANNEL_BN in $DOWNLOADS_DIR"
+        popd >/dev/null || true
+        return 7
+      fi
+    fi
+  fi
 
   # Verify checksums when possible (strict: fail on mismatch or missing entries)
   if command -v sha256sum >/dev/null 2>&1; then
@@ -7923,9 +8161,10 @@ cache_rke2_artifacts() {
   ensure_cni_binaries_baked() {
     local archive dest_root
     dest_root="$STAGE_DIR"
+    local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
     mkdir -p "$dest_root/opt/cni/bin" "$dest_root/etc/cni/net.d" || true
 
-    for archive in "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$STAGE_DIR/$HARDENED_CNI_BN" "$STAGE_DIR/$HARDENED_MULTUS_BN"; do
+    for archive in "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$STAGE_DIR/$HARDENED_CNI_BN" "$STAGE_DIR/$HARDENED_MULTUS_BN" "$STAGE_DIR/$HARDENED_FLANNEL_BN"; do
       [[ -f "$archive" ]] || continue
       local tmpd
       tmpd=$(mktemp -d) || tmpd="/tmp/.rke2nodeinit-extract-$$"
@@ -7956,9 +8195,9 @@ cache_rke2_artifacts() {
     # If a canal conflist was generated in the agent images staging area,
     # prefer that copy so golden image contains a ready-to-use master CNI
     # config. The script may also have staged a 10-canal.conflist previously.
-    if [[ -f "$INSTALL_RKE2_AGENT_IMAGES_DIR/10-canal.conflist" ]]; then
+    if [[ -f "$IMAGES_DIR/10-canal.conflist" ]]; then
       mkdir -p "$STAGE_DIR/etc/cni/net.d"
-      cp -a "$INSTALL_RKE2_AGENT_IMAGES_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
+      cp -a "$IMAGES_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
     elif [[ -f "$DOWNLOADS_DIR/10-canal.conflist" ]]; then
       mkdir -p "$STAGE_DIR/etc/cni/net.d"
       cp -a "$DOWNLOADS_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
@@ -7979,6 +8218,18 @@ cache_rke2_artifacts() {
     cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
     mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
     log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
+  fi
+
+  if [[ -n "${HARDENED_FLANNEL_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+    local tmpf="$STAGE_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf"
+    mv -T "$tmpf" "$STAGE_DIR/$HARDENED_FLANNEL_BN"
+    log INFO "Staged $HARDENED_FLANNEL_BN into $STAGE_DIR"
+
+    local tmpf_img="$IMAGES_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+    cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf_img"
+    mv -T "$tmpf_img" "$IMAGES_DIR/$HARDENED_FLANNEL_BN"
+    log INFO "Staged $HARDENED_FLANNEL_BN into $IMAGES_DIR"
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
