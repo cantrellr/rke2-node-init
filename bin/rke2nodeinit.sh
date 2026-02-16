@@ -2082,6 +2082,53 @@ cache_hardened_cni_http() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: archive_has_repotags
+# Purpose : Validate docker-archive payloads include at least one RepoTags entry
+#           in manifest.json. This prevents importing tagless images that cannot
+#           satisfy Kubernetes image references offline.
+# Arguments:
+#   $1 - Path to docker-archive tar file
+# Returns :
+#   0 when at least one RepoTags entry exists; non-zero otherwise.
+# ------------------------------------------------------------------------------
+archive_has_repotags() {
+  local archive="$1"
+  [[ -f "$archive" ]] || return 1
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not found; skipping RepoTags validation for $archive"
+    return 0
+  fi
+
+  python3 - "$archive" <<'PY'
+import json
+import sys
+import tarfile
+
+archive = sys.argv[1]
+
+try:
+    with tarfile.open(archive, "r:*") as tar:
+        manifest_fh = tar.extractfile("manifest.json")
+        if manifest_fh is None:
+            sys.exit(2)
+        manifest = json.load(manifest_fh)
+except Exception:
+    sys.exit(2)
+
+if not isinstance(manifest, list):
+    sys.exit(2)
+
+for entry in manifest:
+    tags = entry.get("RepoTags") if isinstance(entry, dict) else None
+    if isinstance(tags, list) and len(tags) > 0:
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+# ------------------------------------------------------------------------------
 # Function: cache_hardened_artifacts_from_images_txt
 # Purpose : Auto-detect all hardened-* entries in an images list file and
 #           download / mirror them into the downloads dir and stage them for
@@ -2139,11 +2186,17 @@ cache_hardened_artifacts_from_images_txt() {
       safebn="$(printf '%s' "$img" | sed -e 's/[/:@]/-/g' -e 's/^-*//')-linux-${ARCH}.tar"
       outfn="$DOWNLOADS_DIR/$safebn"
       if [[ -f "$outfn" ]]; then
-        log INFO "Already have image archive $safebn; skipping pull"
-      else
+        if archive_has_repotags "$outfn"; then
+          log INFO "Already have image archive $safebn; skipping pull"
+        else
+          log WARN "Existing image archive missing RepoTags; re-pulling: $safebn"
+          rm -f "$outfn" || true
+        fi
+      fi
+      if [[ ! -f "$outfn" ]]; then
         if command -v skopeo >/dev/null 2>&1; then
           log INFO "Using skopeo to mirror image $img -> $outfn"
-          if ! skopeo copy --override-arch "$ARCH" "docker://$img" "docker-archive:$outfn"; then
+          if ! skopeo copy --override-arch "$ARCH" "docker://$img" "docker-archive:$outfn:$img"; then
             log WARN "skopeo failed for $img"
             rm -f "$outfn" || true
             continue
@@ -2177,6 +2230,12 @@ cache_hardened_artifacts_from_images_txt() {
           fi
         fi
         chmod 0644 "$outfn" || true
+        if ! archive_has_repotags "$outfn"; then
+          log ERROR "Mirrored archive has empty RepoTags and is invalid for offline pulls: $outfn"
+          log ERROR "Remediation: verify source reference and skopeo export syntax includes destination image name"
+          rm -f "$outfn" || true
+          return 1
+        fi
       fi
     fi
 
