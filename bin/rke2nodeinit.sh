@@ -7351,6 +7351,8 @@ ensure_staged_artifacts() {
       # their actual staged locations (STAGE_DIR or IMAGES_DIR) so sha256sum
       # can validate them regardless of which staging target holds the file.
       local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+      local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+      local IMAGES_TXT="rke2-images-all.linux-${ARCH}.txt"
       log INFO "Verifying staged artifacts checksums in $STAGE_DIR (including $IMAGES_DIR)"
       local tmp_manifest
       tmp_manifest=$(mktemp)
@@ -7418,12 +7420,9 @@ ensure_staged_artifacts() {
       fi
 
             # If Canal (flannel) is required, derive hardened-flannel tag similarly
-            if [[ $requires_multus -ne 1 && -z "${HARDENED_FLANNEL_TAG:-}" ]]; then
-              # detect canal usage by inspecting the config file if we haven't already
-              if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
-                if grep -q "spec.cni: *canal" "$CONFIG_FILE" 2>/dev/null || grep -q "canal" "$CONFIG_FILE" 2>/dev/null; then
-                  requires_canal=1
-                fi
+            if [[ ${requires_canal:-0} -ne 1 && -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+              if grep -q "spec.cni: *canal" "$CONFIG_FILE" 2>/dev/null || grep -q "canal" "$CONFIG_FILE" 2>/dev/null; then
+                requires_canal=1
               fi
             fi
             if [[ ${requires_canal:-0} -eq 1 && -z "${HARDENED_FLANNEL_TAG:-}" ]]; then
