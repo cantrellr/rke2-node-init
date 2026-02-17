@@ -7634,6 +7634,15 @@ write_registries_yaml_with_fallbacks() {
       echo "    tls:"
       echo "      ca_file: \"${ca_file}\""
     fi
+
+    # For truly air‑gapped environments, disable containerd's default
+    # registry endpoint so it never falls back to upstream registries.  See
+    # https://docs.rke2.io/install/private_registry#default-endpoint-fallback
+    # for details.  Adding a global section here ensures that all mirror
+    # configurations honour this setting.  Without this, containerd will
+    # try the default registry endpoint as a last resort.
+    echo "global:"
+    echo "  disable-default-registry-endpoint: true"
   } > /etc/rancher/rke2/registries.yaml
 
   chmod 600 /etc/rancher/rke2/registries.yaml
@@ -9091,6 +9100,32 @@ action_image() {
   metrics_increment "success"
   metrics_increment "required_image_tags_validated"
 
+  # Copy the RKE2 binary and checksum into an offline artifacts directory for
+  # install.sh to consume without internet.  Operators can set
+  # INSTALL_RKE2_ARTIFACT_PATH to this directory during installation.  This
+  # directory mirrors the layout recommended in the RKE2 air‑gap docs.
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    local artifact_dir="/opt/rke2/artifacts"
+    mkdir -p "$artifact_dir"
+    # Copy tarball and checksum if present in the stage directory
+    if [[ -f "$STAGE_DIR/$RKE2_TARBALL" ]]; then
+      cp -f "$STAGE_DIR/$RKE2_TARBALL" "$artifact_dir/" || true
+    elif [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+      cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$artifact_dir/" || true
+    fi
+    if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+      cp -f "$STAGE_DIR/$SHA256_FILE" "$artifact_dir/" || true
+    elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+      cp -f "$DOWNLOADS_DIR/$SHA256_FILE" "$artifact_dir/" || true
+    fi
+    if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
+      cp -f "$DOWNLOADS_DIR/install.sh" "$artifact_dir/" || true
+    fi
+    log_info "Offline installer artifacts copied to $artifact_dir"
+  else
+    log_info "DRY-RUN: Would copy RKE2 artifacts into /opt/rke2/artifacts"
+  fi
+
   # --- Optional: Load images into local runtime ------------------------------
   report_progress "Processing container images" 5 8
   if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
@@ -9135,6 +9170,34 @@ action_image() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "registry_trust_configured"
+
+  # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
+  # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
+  # when the `import-images: true` flag is present.  The configuration also
+  # carries an optional embedded registry toggle if the YAML spec requests it
+  # (spec.embeddedRegistry or spec.embedded-registry).  Finally, ensure
+  # disable-default-registry-endpoint is appended so that containerd never
+  # contacts upstream registries on air‑gapped nodes.
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
+    : > /etc/rancher/rke2/config.yaml
+    echo "import-images: true" >> /etc/rancher/rke2/config.yaml
+    # Honour embedded-registry setting from YAML spec if provided
+    local _emb=""
+    if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+      _emb="$(yaml_spec_get_any "$CONFIG_FILE" embedded-registry embeddedRegistry || true)"
+      if bool_value_is_true "$_emb"; then
+        echo "embedded-registry: true" >> /etc/rancher/rke2/config.yaml
+      fi
+    fi
+    # Always append the offline registry guard.  This helper writes
+    # disable-default-registry-endpoint: true when images are staged.
+    append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
+    chmod 600 /etc/rancher/rke2/config.yaml || true
+    log_info "Wrote /etc/rancher/rke2/config.yaml with offline defaults"
+  else
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml with import-images and offline defaults"
+  fi
 
   # --- Save site defaults (DNS/search) ---------------------------------------
   report_progress "Persisting defaults and automation" 7 8
@@ -9762,14 +9825,20 @@ PY
       echo "Custom CA: ${CA_ROOT:-<none>} (installed to OS trust: ${CA_INSTALL})"
       echo "Staged:"
       echo "  - /var/lib/rancher/rke2/agent/images/${IMAGES_TAR}"
-      echo "  - $STAGE_DIR/${RKE2_TARBALL}, $STAGE_DIR/${SHA256_FILE}, $STAGE_DIR/install.sh"
+      echo "  - ${STAGE_DIR}/${RKE2_TARBALL}, ${STAGE_DIR}/${SHA256_FILE}, ${STAGE_DIR}/install.sh"
+      echo "  - /opt/rke2/artifacts/${RKE2_TARBALL}"
+      echo "  - /opt/rke2/artifacts/${SHA256_FILE}"
+      echo "  - /opt/rke2/artifacts/install.sh"
       echo "Defaults:"
       echo "  - DNS: ${defaultDnsCsv}"
       echo "  - Search Domains: ${defaultSearchCsv:-<none>}"
       echo
       echo "Next Steps:"
-      echo "  - Shut down this VM and clone it for use in the air-gapped environment"
-      echo "  - Run this script in 'server' or 'agent' mode on the clone(s)"
+      echo "  - Power off this VM and clone it for use in your air‑gapped environment.  Do not connect the cloned node(s) to the Internet."
+      echo "  - Do not configure any external package repositories or remote container registries on the cloned node(s); all images are already present locally."
+      echo "  - When the clone boots, run this script in \"server\" or \"agent\" mode on the node(s) to apply the RKE2 configuration.  The script will import the images from /var/lib/rancher/rke2/agent/images and use the offline artifacts stored in /opt/rke2/artifacts."
+      echo "  - Alternatively, you can manually install RKE2 offline by setting INSTALL_RKE2_ARTIFACT_PATH=/opt/rke2/artifacts and running ./install.sh from that directory."
+      echo "  - Ensure that /etc/rancher/rke2/registries.yaml exists with a \"global: disable-default-registry-endpoint: true\" section so that containerd never falls back to public registries."
     } > "$RUN_OUT_DIR/README.txt"
     log_info "README written to: $RUN_OUT_DIR/README.txt"
     metrics_increment "total"
@@ -10350,6 +10419,10 @@ action_server() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-server installed. Reboot to initialize the control plane."
     echo "        First server token: /var/lib/rancher/rke2/server/node-token"
   else
@@ -10749,6 +10822,10 @@ action_agent() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
   else
     echo "[DRY-RUN] Agent configuration validated. No changes made."
@@ -11167,6 +11244,10 @@ action_add_server() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-server installed. Reboot to join the control plane."
   else
     echo "[DRY-RUN] Add-server configuration validated. No changes made."
