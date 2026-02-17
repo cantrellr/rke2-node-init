@@ -7,7 +7,7 @@ spec:
   cni:
    - multus
    - canal
-  fixCNIPermissions: true
+  fixCNIPermissions: false
   registry: altregistry.dev.kube:8443/rke2
   embedded-registry: true
   disable-default-registry-endpoint: true

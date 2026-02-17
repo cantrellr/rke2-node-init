@@ -44,6 +44,8 @@ spec:
   cluster-cidr: 10.243.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
+  embedded-registry: true
+  disable-default-registry-endpoint: true
   kube-apiserver-arg:
     - "audit-log-maxage=15"
   tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
