@@ -6637,6 +6637,28 @@ verify_required_image_tags_staged() {
   fi
 
   comm -23 "$required_tmp" "$present_tmp" > "$missing_tmp" || true
+
+  # Safety check: ensure the sandbox pause image is explicitly present in the
+  # staged archives for disconnected bootstrap. Some workflows may derive
+  # required refs from chart lists that can omit this critical runtime image.
+  local pause_expected=""
+  local pause_src
+  for pause_src in \
+    "$DOWNLOADS_DIR/rke2-images.linux-${ARCH}.txt" \
+    "$DOWNLOADS_DIR/rke2-images-all.linux-${ARCH}.txt" \
+    "$STAGE_DIR/rke2-images.linux-${ARCH}.txt" \
+    "$STAGE_DIR/rke2-images-all.linux-${ARCH}.txt"
+  do
+    [[ -s "$pause_src" ]] || continue
+    pause_expected="$(grep -E '(^|/)rancher/mirrored-pause:' "$pause_src" | head -n1 | awk '{$1=$1;print}')"
+    [[ -n "$pause_expected" ]] || continue
+    pause_expected="$(normalize_image_reference "$pause_expected")"
+    [[ -n "$pause_expected" ]] && break
+  done
+  if [[ -n "$pause_expected" ]] && ! grep -Fxq "$pause_expected" "$present_tmp"; then
+    printf '%s\n' "$pause_expected" >> "$missing_tmp"
+  fi
+
   local missing_count
   missing_count=$(wc -l < "$missing_tmp" | awk '{print $1}')
 
@@ -7556,6 +7578,19 @@ write_registries_yaml_with_fallbacks() {
   local prefix=""
   [[ -n "$project" ]] && prefix="${project}/"
 
+  # Always include local Spegel endpoint first so disconnected nodes can boot
+  # entirely from local/peer cache. Only include the configured registry
+  # endpoint when its hostname resolves at generation time.
+  local primary_host="${primary%%:*}"
+  primary_host="${primary_host#[}"
+  primary_host="${primary_host%]}"
+  local -a mirror_endpoints=("https://127.0.0.1:9345")
+  if [[ -n "$primary_host" ]] && getent hosts "$primary_host" >/dev/null 2>&1; then
+    mirror_endpoints+=("https://${primary}")
+  else
+    log WARN "Registry host '${primary}' is not resolvable at generation time; using local Spegel-only mirror endpoints for offline bootstrap."
+  fi
+
   # Discover registries from release image list files when available.
   # This keeps registries.yaml aligned with the exact images staged/downloaded.
   local -a regs=()
@@ -7614,7 +7649,10 @@ write_registries_yaml_with_fallbacks() {
     for reg in "${regs[@]}"; do
       echo "  \"${reg}\":"
       echo "    endpoint:"
-      echo "      - \"https://${primary}\""
+      local ep
+      for ep in "${mirror_endpoints[@]}"; do
+        echo "      - \"${ep}\""
+      done
       echo "    rewrite:"
       # Rewrite upstream image path into <project>/<upstream-registry>/<repo>
       # Example: docker.io/rancher/pause -> altregistry/<project>/docker.io/rancher/pause

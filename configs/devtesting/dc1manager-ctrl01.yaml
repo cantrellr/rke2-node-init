@@ -15,7 +15,7 @@ spec:
     - name: ens33
       ip: 10.1.1.215
       prefix: 24
-      gateway: 10.1.1.255
+      gateway: 10.1.1.1
       dns: ["4.2.2.2"]
       searchDomains: [dev.kube, dev.local]
     - name: ens35
