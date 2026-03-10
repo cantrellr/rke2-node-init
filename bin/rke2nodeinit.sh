@@ -168,7 +168,7 @@ APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately in
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
-FIX_CNI_PERMISSIONS=0       # --fix-cni-permissions installs/enables CNI permission remediation (image)
+FIX_CNI_PERMISSIONS=1       # Install/enable CNI permission remediation by default (set spec.fixCNIPermissions: false to disable)
 BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
 BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
 BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
@@ -8954,8 +8954,12 @@ action_image() {
     REQ_FLANNEL_VER="${REQ_FLANNEL_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2FlannelVersion rke2FlannelCniVersion rke2FlannelCNIVersion || true)}"
     local fix_cni_permissions_yaml=""
     fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
-    if bool_value_is_true "$fix_cni_permissions_yaml"; then
-      fix_cni_permissions_enabled=1
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
     fi
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
@@ -10038,6 +10042,7 @@ action_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local -a NET_INTERFACES=()
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -10058,6 +10063,15 @@ action_server() {
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "total"
     metrics_increment "success"
@@ -10322,6 +10336,23 @@ action_server() {
   metrics_increment "success"
   metrics_increment "config_written"
 
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
+
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     if (( ${#NET_INTERFACES[@]} )); then
@@ -10489,6 +10520,7 @@ action_agent() {
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -10508,6 +10540,15 @@ action_agent() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "config_loaded"
   fi
@@ -10747,6 +10788,23 @@ action_agent() {
   metrics_increment "success"
   metrics_increment "config_written"
 
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
+
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     if (( ${#NET_INTERFACES[@]} )); then
@@ -10888,6 +10946,7 @@ action_add_server() {
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -10908,6 +10967,15 @@ action_add_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "config_loaded"
   fi
@@ -11172,6 +11240,23 @@ action_add_server() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "config_written"
+
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
 
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then

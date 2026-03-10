@@ -1,9 +1,9 @@
 apiVersion: rkeprep/v2
 kind: Image
 metadata:
-  name: preprod-vmware-v1.35.1+rke2r3-image
+  name: preprod-vmware-v1.35.2+rke2r1-image
 spec:
-  rke2Version: v1.35.1+rke2r3
+  rke2Version: v1.35.2+rke2r1
   cni:
    - multus
    - canal
