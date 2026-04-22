@@ -144,22 +144,22 @@ Phase 3 CLI patterns match industry standards:
 
 ```bash
 # Help system
-./rke2nodeinit.sh --help                    # ✅ Works
-./rke2nodeinit.sh verify --help             # ✅ Works
-./rke2nodeinit.sh --help image              # ✅ Works
+./bin/rke2nodeinit.sh --help                    # ✅ Works
+./bin/rke2nodeinit.sh verify --help             # ✅ Works
+./bin/rke2nodeinit.sh --help image              # ✅ Works
 
 # Version
-./rke2nodeinit.sh --version                 # ✅ Works
+./bin/rke2nodeinit.sh --version                 # ✅ Works
 
 # Verbosity
-./rke2nodeinit.sh --verbose verify          # ✅ Shows debug
-./rke2nodeinit.sh --quiet verify            # ✅ Minimal output
+./bin/rke2nodeinit.sh --verbose verify          # ✅ Shows debug
+./bin/rke2nodeinit.sh --quiet verify            # ✅ Minimal output
 
 # Dry-run
-./rke2nodeinit.sh --dry-run -f image.yaml   # ✅ No changes
+./bin/rke2nodeinit.sh --dry-run -f image.yaml   # ✅ No changes
 
 # Combined
-./rke2nodeinit.sh --dry-run --verbose -f cfg.yaml  # ✅ Works
+./bin/rke2nodeinit.sh --dry-run --verbose -f cfg.yaml  # ✅ Works
 ```
 
 ## Metrics and Statistics
@@ -276,9 +276,9 @@ Phase 3 CLI patterns match industry standards:
 deploy:
   script:
     # Validate configuration
-    - ./rke2nodeinit.sh --dry-run --quiet -f $CONFIG_FILE
+    - ./bin/rke2nodeinit.sh --dry-run --quiet -f $CONFIG_FILE
     # Deploy if validation passes
-    - ./rke2nodeinit.sh --quiet -f $CONFIG_FILE
+    - ./bin/rke2nodeinit.sh --quiet -f $CONFIG_FILE
   only:
     - main
 ```
@@ -289,7 +289,7 @@ deploy:
 #!/bin/bash
 # Health check with quiet mode
 
-if ! ./rke2nodeinit.sh --quiet verify; then
+if ! ./bin/rke2nodeinit.sh --quiet verify; then
   echo "RKE2 prerequisites check failed" | mail -s "Alert" ops@example.com
   exit 1
 fi
@@ -299,9 +299,9 @@ fi
 
 ```bash
 # Interactive learning session
-./rke2nodeinit.sh --help
-./rke2nodeinit.sh image --help
-./rke2nodeinit.sh --dry-run --verbose -f training.yaml
+./bin/rke2nodeinit.sh --help
+./bin/rke2nodeinit.sh image --help
+./bin/rke2nodeinit.sh --dry-run --verbose -f training.yaml
 ```
 
 ## Known Limitations

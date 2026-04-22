@@ -1,13 +1,13 @@
 # RKE2 Node Init Documentation Index
 
-**Last Updated:** February 16, 2026  
+**Last Updated:** April 22, 2026  
 **Project Status:** Active development (post-Phase 5 hardening/automation)
 
 ---
 
 ## Documentation Scope
 
-This directory contains technical references for RKE2 node bootstrap, air-gapped image preparation, STIG hardening, VM naming/bootstrap workflows, and historical redesign records.
+This directory contains technical references for RKE2 node bootstrap, air-gapped image preparation, STIG hardening, first-boot ISO workflows, and historical redesign records.
 
 For operational entrypoints, start with:
 
@@ -25,7 +25,7 @@ For operational entrypoints, start with:
 | [RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md](RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md) | Golden image build flow for disconnected environments |
 | [STIG-README.md](STIG-README.md) | STIG helper execution model and persistent CNI permissions remediation |
 | [STIG-CHECKLIST.md](STIG-CHECKLIST.md) | STIG checklist references and operational checks |
-| [HYPERV-VM-NAME-SETUP.md](HYPERV-VM-NAME-SETUP.md) | VM-name based first-boot configuration discovery patterns |
+| [HYPERV-VM-NAME-SETUP.md](HYPERV-VM-NAME-SETUP.md) | Hyper-V first-boot ISO workflow using virtual CD payloads (`/config/<yaml>`) |
 | [CONFIG-YAML-TRANSFER-ANALYSIS.md](CONFIG-YAML-TRANSFER-ANALYSIS.md) | YAML schema and migration analysis notes |
 | [GITOPS-IMPLEMENTATION-SUMMARY.md](GITOPS-IMPLEMENTATION-SUMMARY.md) | VM GitOps workflow implementation summary |
 
@@ -34,6 +34,8 @@ For operational entrypoints, start with:
 ## Historical Redesign Archive
 
 The redesign phase documentation lives under [docs/redesign](redesign/) and is intentionally retained as implementation history.
+
+- See [redesign/README.md](redesign/README.md) for archive usage guidance and current-behavior mapping notes.
 
 - Phase implementation, summary, and completion artifacts (`PHASE1` through `PHASE5`)
 - Quick references and progress reports
@@ -48,6 +50,7 @@ Use these documents for historical decisions and architecture evolution, not as 
 | Location | Purpose |
 | --- | --- |
 | [report](report/) | Action-level implementation and behavior reports |
+| [report/README.md](report/README.md) | Notes on interpreting historical report snippets versus current behavior |
 | [validation-report.md](validation-report.md) | Consolidated validation notes and output snapshots |
 | [stigs](stigs/) | STIG-related resources and supporting material |
 

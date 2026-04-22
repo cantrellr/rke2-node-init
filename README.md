@@ -17,6 +17,7 @@
     - [Common Flags](#common-flags)
     - [Makefile Helpers](#makefile-helpers)
   - [YAML Configuration Reference](#yaml-configuration-reference)
+  - [Boot Service ISO Workflow](#boot-service-iso-workflow)
   - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
   - [Network Configuration Strategy](#network-configuration-strategy)
   - [Logging \& Observability](#logging--observability)
@@ -37,6 +38,7 @@
 - **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
+- **First-Boot ISO Automation** – Optional boot service mode builds one ISO per node YAML (`metadata.name.iso`) and executes `rke2nodeinit.sh -f` from YAML discovered under `/config` on attached virtual CD media.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
 - **Operational Transparency** – Streams all steps to `logs/` with timestamps and hostnames. Long-running tasks show CLI spinners while stdout remains concise.
@@ -64,6 +66,8 @@
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer. Before install, staged artifacts are revalidated, including strict required image:tag presence checks.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
+
+When `image`/`airgap` is run with boot service enabled, the script also generates per-node boot ISOs from a YAML directory (`bootService.yamlPath` or `--boot-yaml-path`). At first boot, the service mounts attached ISO media, selects the first YAML under `/config`, copies it into `/root/server-config`, and executes `rke2nodeinit.sh -f <copied-yaml> -y`.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v2`) that centralizes inputs and secrets.
 
@@ -182,6 +186,9 @@ sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--enable-fips` | Enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds |
 | `--fix-cni-permissions` | During `image`, install/enable timer-based CNI permission remediation |
+| `--enable-boot-service` | Install and enable first-boot automation for VM template workflows (`image`/`airgap` actions) |
+| `--boot-yaml-path PATH` | Directory containing per-node YAML files used to build boot ISOs |
+| `--boot-mode MODE` | Boot service mode: `oneshot` (run once) or `persistent` (rerun only when ISO YAML hash changes) |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
@@ -190,6 +197,8 @@ sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
+- `make boot-isos` builds one ISO per YAML from `BOOT_ISO_YAML_DIR` (default `configs/preprod/nodes`) and writes a manifest to `BOOT_ISO_MANIFEST`.
+- `make boot-isos-clean` removes generated boot ISO artifacts under `BOOT_ISO_OUTPUT_DIR`.
 
 ## YAML Configuration Reference
 
@@ -214,6 +223,11 @@ spec:
     rootCrt: certs/root.crt
     intermediateCrt: certs/intermediate.crt
     installToOSTrust: true
+  bootService:
+    enabled: true
+    yamlPath: configs/preprod/nodes
+    mode: oneshot
+    platform: vmware
 ```
 
 **Supported spec keys (highlights):**
@@ -224,8 +238,27 @@ spec:
 - **Image prep:** `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
+- **Boot service:** `bootService.enabled`, `bootService.yamlPath` (directory), `bootService.mode`, `bootService.platform`
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
+
+---
+
+## Boot Service ISO Workflow
+
+1. Enable boot service in an `Image`/`Airgap` run (`bootService.enabled: true` or `--enable-boot-service`).
+2. Provide a YAML directory via `bootService.yamlPath` or `--boot-yaml-path`.
+3. The image workflow generates `metadata.name.iso` artifacts and a TSV manifest.
+4. During VM provisioning, attach one generated ISO as virtual CD media.
+5. On first boot, `rke2-boot.service` mounts ISO9660 media and finds the first `*.yaml`/`*.yml` under `/config`.
+6. The selected YAML is copied to `/root/server-config/<yaml-filename>` with `0600` permissions.
+7. The service executes `rke2nodeinit.sh -f <copied-yaml> -y`.
+8. In `persistent` mode, reruns occur only when the selected YAML hash changes.
+
+Notes:
+- Hostname matching is not required by the boot service.
+- ISO payload contract is `/config/<yaml>`.
+- The source YAML content is copied as-is into the ISO payload.
 
 ---
 

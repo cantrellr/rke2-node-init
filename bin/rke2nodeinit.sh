@@ -170,12 +170,15 @@ VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verif
 ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
 FIX_CNI_PERMISSIONS=1       # Install/enable CNI permission remediation by default (set spec.fixCNIPermissions: false to disable)
 BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
-BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
-BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
+BOOT_YAML_PATH=""           # Directory containing node YAML configs used to build boot ISOs
+BOOT_CONFIG_SEARCH_PATHS=() # Legacy YAML search paths (deprecated by ISO-only boot service)
 BOOT_TARGET_DIR="/root/server-config" # Target directory for discovered configs
 VM_PLATFORM="auto"          # auto-detect or specify: vmware, hyperv, virtualbox, generic
 BOOT_SCRIPT_PATH="/usr/local/bin/rke2-boot.sh"
 BOOT_SERVICE_PATH="/etc/systemd/system/rke2-boot.service"
+BOOT_ISO_OUTPUT_DIR=""
+BOOT_ISO_MANIFEST=""
+BOOT_ISO_COUNT=0
 NODE_NAME=""
 ACTION_ARGS=()
 ENABLE_FIPS=0               # --enable-fips turns on OS FIPS (Ubuntu Pro) and uses FIPS RKE2 builds
@@ -1960,8 +1963,9 @@ OPTIONS:
                Service auto-runs appropriate action on first boot after template clone
                Must be used with 'image' or 'airgap' action
   --boot-yaml-path PATH
-               YAML config path for boot service to execute (default: /root/config.yaml)
-               Use with --enable-boot-service
+               Directory containing per-node YAML configs used to build boot ISOs
+               Generates metadata.name.iso for each YAML file in the directory
+               Required when --enable-boot-service (or bootService.enabled: true)
   --boot-mode MODE
                Boot service mode: 'oneshot' or 'persistent' (default: oneshot)
                oneshot: Run once on first boot, then disable service
@@ -2019,7 +2023,7 @@ BOOT SERVICE YAML EXAMPLE:
     rke2CNIVersion: v1.9.0-build20260116
     bootService:
       enabled: true
-      yamlPath: /root/server-config.yaml  # Config to run on first boot
+      yamlPath: configs/preprod/nodes      # Directory of node YAML files
       mode: oneshot                        # Run once, then disable
       platform: vmware                     # vmware, hyperv, virtualbox, or generic
 
@@ -2029,7 +2033,7 @@ WORKFLOW EXAMPLES:
 
   2. Prepare base image with boot service for automated server deployment:
      sudo ./rke2nodeinit.sh -f examples/image.yaml --enable-boot-service \\
-       --boot-yaml-path /root/server.yaml --boot-mode oneshot
+       --boot-yaml-path configs/preprod/nodes --boot-mode oneshot
 
   3. Initialize first control-plane with multi-interface networking:
      sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
@@ -4669,17 +4673,102 @@ detect_vm_platform() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: resolve_boot_yaml_dir
+# Purpose : Resolve bootService.yamlPath/--boot-yaml-path to an absolute
+#           directory path. Relative paths are resolved against the config file
+#           directory first, then REPO_ROOT.
+# Arguments:
+#   $1 - Raw directory path from CLI/YAML
+# Returns :
+#   Prints resolved path on stdout.
+# ------------------------------------------------------------------------------
+resolve_boot_yaml_dir() {
+  local raw_path="$1"
+
+  [[ -z "$raw_path" ]] && return 1
+
+  if [[ "$raw_path" == /* ]]; then
+    if [[ -d "$raw_path" ]]; then
+      (cd -- "$raw_path" && pwd -P)
+    else
+      printf '%s\n' "$raw_path"
+    fi
+    return 0
+  fi
+
+  local cfg_dir=""
+  if [[ -n "${CONFIG_FILE:-}" ]]; then
+    cfg_dir="$(dirname -- "$CONFIG_FILE")"
+    if [[ -d "$cfg_dir/$raw_path" ]]; then
+      (cd -- "$cfg_dir/$raw_path" && pwd -P)
+      return 0
+    fi
+  fi
+
+  if [[ -d "$REPO_ROOT/$raw_path" ]]; then
+    (cd -- "$REPO_ROOT/$raw_path" && pwd -P)
+    return 0
+  fi
+
+  printf '%s\n' "$REPO_ROOT/$raw_path"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: generate_bootservice_isos
+# Purpose : Build one ISO per YAML config from a source directory using
+#           scripts/build-boot-isos.sh. ISO names are metadata.name.iso.
+# Arguments:
+#   $1 - Source YAML directory
+#   $2 - Output directory for ISO files
+#   $3 - Manifest path
+# Returns :
+#   0 on success, non-zero on failure.
+# ------------------------------------------------------------------------------
+generate_bootservice_isos() {
+  local yaml_dir="$1"
+  local out_dir="$2"
+  local manifest_file="$3"
+  local builder_script="$REPO_ROOT/scripts/build-boot-isos.sh"
+
+  if [[ ! -f "$builder_script" ]]; then
+    log ERROR "Boot ISO builder script not found: $builder_script"
+    return 1
+  fi
+
+  local log_target="${LOG_FILE:-/dev/null}"
+  if ! bash "$builder_script" \
+    --yaml-dir "$yaml_dir" \
+    --output-dir "$out_dir" \
+    --manifest "$manifest_file" \
+    >>"$log_target" 2>&1; then
+    log ERROR "Failed to build boot-service ISOs from directory: $yaml_dir"
+    log ERROR "See logs for details: $log_target"
+    return 1
+  fi
+
+  BOOT_ISO_OUTPUT_DIR="$out_dir"
+  BOOT_ISO_MANIFEST="$manifest_file"
+  BOOT_ISO_COUNT="$(awk 'NR>1 {c++} END {print c+0}' "$manifest_file" 2>/dev/null || echo 0)"
+
+  if [[ "${BOOT_ISO_COUNT:-0}" -eq 0 ]]; then
+    log ERROR "Boot ISO manifest was created but no ISO entries were found: $manifest_file"
+    return 1
+  fi
+
+  log INFO "Boot-service ISO build completed: $BOOT_ISO_COUNT file(s)"
+  log INFO "Boot-service ISO manifest: $BOOT_ISO_MANIFEST"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: install_boot_script
-# Purpose : Generate and install the first-boot automation script that queries
-#           VM hostname, discovers matching config file, copies it to target
-#           directory, and executes rke2nodeinit with the configuration.
-# 
-# Note for Hyper-V: The VM name must be set from the Hyper-V host using:
-#   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
-#   Otherwise, the guest OS hostname will be used as fallback.
+# Purpose : Generate and install the first-boot automation script that
+#           discovers attached ISO config media, copies config to target
+#           directory, and executes rke2nodeinit with that configuration.
 #
 # Arguments:
-#   None (uses global BOOT_SCRIPT_PATH, BOOT_CONFIG_SEARCH_PATHS, BOOT_TARGET_DIR)
+#   None (uses global BOOT_SCRIPT_PATH, BOOT_TARGET_DIR, BOOT_SERVICE_MODE)
 # Returns :
 #   0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
@@ -4696,75 +4785,40 @@ install_boot_script() {
     log ERROR "Failed to create directory for boot script: $script_dir"
     return 1
   }
-  
-  # Set default config search paths if not specified
-  if [[ ${#BOOT_CONFIG_SEARCH_PATHS[@]} -eq 0 ]]; then
-    BOOT_CONFIG_SEARCH_PATHS=(
-      "$REPO_ROOT/configs"
-      "/opt/rke2/configs"
-      "/root/configs"
-    )
-  fi
-  
-  # Generate platform-specific hostname query command
-  local hostname_query_cmd=""
-  case "$platform" in
-    vmware)
-      hostname_query_cmd='VM_HOSTNAME=$(vmtoolsd --cmd "info-get guestinfo.hostname" 2>/dev/null || hostname)'
-      ;;
-    hyperv)
-      # Hyper-V: Query VM name from KVP pool (requires host-side configuration)
-      # Preferred method: Host admin sets custom KVP item via PowerShell:
-      #   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
-      # 
-      # Alternative: Use PowerShell to read VirtualMachineName from KVP pool_0
-      # Fallback: Use guest hostname if not found
-      hostname_query_cmd='
-if command -v pwsh >/dev/null 2>&1; then
-  # Try PowerShell to read KVP VirtualMachineName
-  VM_HOSTNAME=$(pwsh -NoProfile -Command '\''
-    try {
-      $kvp0 = [System.IO.File]::ReadAllBytes("/var/lib/hyperv/.kvp_pool_0")
-      $text = [System.Text.Encoding]::ASCII.GetString($kvp0)
-      $lines = $text -split "\x00" | Where-Object {$_.Trim()}
-      for($i=0; $i -lt $lines.Count; $i++) {
-        if($lines[$i] -eq "VirtualMachineName" -and $i+1 -lt $lines.Count) {
-          Write-Output $lines[$i+1].Trim()
-          exit 0
-        }
-      }
-    } catch {}
-  '\'' 2>/dev/null)
-fi
-# Fallback to bash method if PowerShell fails or not available
-[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | tr "\\0" "\\n" | grep -A1 "^VirtualMachineName$" | tail -1 | xargs 2>/dev/null)
-# Final fallback to hostname
-[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(hostname)'
-      ;;
-    virtualbox)
-      hostname_query_cmd='VM_HOSTNAME=$(VBoxControl guestproperty get /VirtualBox/HostInfo/VBoxVer 2>/dev/null | cut -d: -f2 | xargs 2>/dev/null || hostname)'
-      ;;
-    generic|*)
-      # Generic: use system hostname
-      hostname_query_cmd='VM_HOSTNAME=$(hostnamectl --static 2>/dev/null || hostname)'
+
+  local boot_mode="${BOOT_SERVICE_MODE:-oneshot}"
+  case "$boot_mode" in
+    oneshot|persistent) ;;
+    *)
+      log WARN "Invalid BOOT_SERVICE_MODE '$boot_mode'; defaulting to oneshot"
+      boot_mode="oneshot"
       ;;
   esac
-  
-  # Generate boot script with config discovery
+
+  # Generate boot script with ISO-only config discovery.
   cat > "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
 #!/usr/bin/env bash
 #
 # rke2-boot.sh - First-boot automation for RKE2 node initialization
-# This script automatically discovers node configs by VM hostname, copies them
-# to the target directory, and executes rke2nodeinit.sh for automatic setup.
+# This script discovers an attached configuration ISO, selects a YAML file
+# from /config, then executes rke2nodeinit.sh with that config.
 #
 # Workflow:
-#   1. Query VM hostname from hypervisor (platform-specific)
-#   2. Search for matching config file: {hostname}.yaml
-#   3. Copy found config to /root/server-config/{hostname}.yaml
-#   4. Execute rke2nodeinit.sh with the discovered config
+#   1. Scan attached ISO media and locate /config/*.yaml|*.yml
+#   2. Copy selected YAML to /root/server-config/
+#   3. Execute rke2nodeinit.sh with copied config
+#   4. In persistent mode, rerun only if config hash changes
 
 set -euo pipefail
+EOF_BOOT_SCRIPT
+  echo "BOOT_MODE=\"$boot_mode\"" >> "$BOOT_SCRIPT_PATH"
+  echo "TARGET_DIR=\"$BOOT_TARGET_DIR\"" >> "$BOOT_SCRIPT_PATH"
+  echo "SCRIPT_PATH=\"$REPO_ROOT/bin/rke2nodeinit.sh\"" >> "$BOOT_SCRIPT_PATH"
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+LAST_HASH_FILE="/var/lib/rke2-boot-last-iso.sha256"
+MOUNT_ROOT="/run/rke2-boot-iso"
+MOUNT_POINT=""
+TARGET_FILE=""
 
 # Logging helper
 log() {
@@ -4773,83 +4827,89 @@ log() {
   echo "[$level] $*"
 }
 
-# Cleanup on error
+cleanup_mount() {
+  if [[ -n "$MOUNT_POINT" ]] && mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    umount "$MOUNT_POINT" >/dev/null 2>&1 || true
+  fi
+  [[ -n "$MOUNT_POINT" ]] && rm -rf "$MOUNT_POINT" >/dev/null 2>&1 || true
+  MOUNT_POINT=""
+}
+
+# Cleanup on error.
 cleanup_on_error() {
   log ERROR "Boot service failed - cleaning up"
+  cleanup_mount
   [[ -n "${TARGET_FILE:-}" && -f "$TARGET_FILE" ]] && rm -f "$TARGET_FILE"
   exit 1
 }
 trap cleanup_on_error ERR
+trap cleanup_mount EXIT
 
 log INFO "========================================"
 log INFO "RKE2 First-Boot Automation Starting"
 log INFO "========================================"
 
-# Query VM hostname (platform-specific)
-log INFO "Step 1: Query VM hostname from hypervisor"
-EOF_BOOT_SCRIPT
-  echo "$hostname_query_cmd" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+log INFO "Step 1: Discover attached configuration ISO"
+ISO_DEVICES=()
+while IFS= read -r dev; do
+  [[ -n "$dev" ]] && ISO_DEVICES+=("$dev")
+done < <(lsblk -pnro NAME,FSTYPE,TYPE 2>/dev/null | awk '$2 == "iso9660" {print $1}' | sort -u)
 
-if [[ -z "$VM_HOSTNAME" ]]; then
-  log ERROR "Unable to retrieve VM hostname from platform"
+if (( ${#ISO_DEVICES[@]} == 0 )) && command -v blkid >/dev/null 2>&1; then
+  while IFS= read -r dev; do
+    [[ -n "$dev" ]] && ISO_DEVICES+=("$dev")
+  done < <(blkid -t TYPE=iso9660 -o device 2>/dev/null | sort -u)
+fi
+
+if (( ${#ISO_DEVICES[@]} == 0 )); then
+  log ERROR "No attached ISO media detected (type iso9660)."
+  log ERROR "Attach a boot config ISO as a virtual CD before booting."
   exit 1
 fi
 
-log INFO "  Result: $VM_HOSTNAME"
-export VM_HOSTNAME
-
-# Define config search paths
-log INFO "Step 2: Search for matching configuration file"
-EOF_BOOT_SCRIPT
-  # Embed search paths from global variable
-  echo "CONFIG_SEARCH_PATHS=(" >> "$BOOT_SCRIPT_PATH"
-  for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-    echo "  \"$search_path\"" >> "$BOOT_SCRIPT_PATH"
-  done
-  echo ")" >> "$BOOT_SCRIPT_PATH"
-  
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
-
-# Search for matching config file
 FOUND_CONFIG=""
-for search_path in "${CONFIG_SEARCH_PATHS[@]}"; do
-  log INFO "  Searching: $search_path"
-  candidate="$search_path/${VM_HOSTNAME}.yaml"
-  
-  if [[ -f "$candidate" ]]; then
-    FOUND_CONFIG="$candidate"
-    log INFO "  ✓ Found: $candidate"
-    break
+FOUND_HASH=""
+FOUND_DEVICE=""
+for dev in "${ISO_DEVICES[@]}"; do
+  MOUNT_POINT="$MOUNT_ROOT/$(basename "$dev")"
+  mkdir -p "$MOUNT_POINT"
+
+  if ! mount -o ro "$dev" "$MOUNT_POINT" >/dev/null 2>&1; then
+    log WARN "Unable to mount ISO device: $dev"
+    cleanup_mount
+    continue
   fi
-  
-  # Try case-insensitive search as fallback
-  if [[ -d "$search_path" ]]; then
-    candidate_ci=$(find "$search_path" -maxdepth 1 -type f -iname "${VM_HOSTNAME}.yaml" -print -quit 2>/dev/null || true)
-    if [[ -n "$candidate_ci" && -f "$candidate_ci" ]]; then
-      FOUND_CONFIG="$candidate_ci"
-      log INFO "  ✓ Found (case-insensitive): $candidate_ci"
-      break
-    fi
+
+  candidate="$(find "$MOUNT_POINT/config" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print -quit 2>/dev/null || true)"
+  if [[ ! -f "$candidate" ]]; then
+    log WARN "ISO on $dev does not contain a YAML file under /config"
+    cleanup_mount
+    continue
   fi
+
+  FOUND_CONFIG="$candidate"
+  FOUND_HASH="$(sha256sum "$candidate" | awk '{print $1}')"
+  FOUND_DEVICE="$dev"
+  break
 done
 
 if [[ -z "$FOUND_CONFIG" ]]; then
-  log ERROR "No configuration file found for hostname: $VM_HOSTNAME"
-  log ERROR "Searched paths:"
-  for path in "${CONFIG_SEARCH_PATHS[@]}"; do
-    log ERROR "  - $path/${VM_HOSTNAME}.yaml"
-  done
-  log ERROR "Ensure the config file exists with exact hostname match"
+  log ERROR "No attached ISO provided /config/<yaml>"
   exit 1
 fi
 
-# Validate config file
-log INFO "Step 3: Validate configuration file"
-if [[ ! -r "$FOUND_CONFIG" ]]; then
-  log ERROR "Config file not readable: $FOUND_CONFIG"
-  exit 1
+log INFO "  Selected ISO device: $FOUND_DEVICE"
+log INFO "  Config path: ${FOUND_CONFIG#"$MOUNT_POINT"}"
+
+if [[ "$BOOT_MODE" == "persistent" && -f "$LAST_HASH_FILE" ]]; then
+  last_hash="$(tr -d '\r\n' < "$LAST_HASH_FILE" 2>/dev/null || true)"
+  if [[ -n "$last_hash" && "$last_hash" == "$FOUND_HASH" ]]; then
+    log INFO "Persistent mode: ISO config hash unchanged; skipping bootstrap"
+    exit 0
+  fi
 fi
+
+log INFO "Step 2: Copy configuration to target directory"
 
 # Basic YAML syntax validation (if yq available)
 if command -v yq >/dev/null 2>&1; then
@@ -4857,7 +4917,7 @@ if command -v yq >/dev/null 2>&1; then
     log ERROR "YAML syntax validation failed: $FOUND_CONFIG"
     exit 1
   fi
-  log INFO "  ✓ YAML syntax valid"
+  log INFO "  YAML syntax valid"
 fi
 
 # Check for required fields
@@ -4868,17 +4928,12 @@ if ! grep -q "kind" "$FOUND_CONFIG" 2>/dev/null; then
   log WARN "  Missing 'kind' field (recommended)"
 fi
 
-# Copy config to target directory
-log INFO "Step 4: Copy configuration to target directory"
-EOF_BOOT_SCRIPT
-  echo "TARGET_DIR=\"$BOOT_TARGET_DIR\"" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
 mkdir -p "$TARGET_DIR" || {
   log ERROR "Failed to create target directory: $TARGET_DIR"
   exit 1
 }
 
-TARGET_FILE="$TARGET_DIR/${VM_HOSTNAME}.yaml"
+TARGET_FILE="$TARGET_DIR/$(basename "$FOUND_CONFIG")"
 if ! cp "$FOUND_CONFIG" "$TARGET_FILE"; then
   log ERROR "Failed to copy config to: $TARGET_FILE"
   exit 1
@@ -4890,17 +4945,13 @@ chmod 600 "$TARGET_FILE" || {
   exit 1
 }
 
-log INFO "  ✓ Config copied to: $TARGET_FILE"
-log INFO "  ✓ Permissions set: 600 (root only)"
+log INFO "  Config copied to: $TARGET_FILE"
+log INFO "  Permissions set: 600 (root only)"
 
-# Set YAML_FILE for rke2nodeinit execution
-YAML_FILE="$TARGET_FILE"
+# No further access to media required after config copy.
+cleanup_mount
 
-# Locate rke2nodeinit.sh script
-log INFO "Step 5: Locate rke2nodeinit.sh script"
-EOF_BOOT_SCRIPT
-  echo "SCRIPT_PATH=\"$REPO_ROOT/bin/rke2nodeinit.sh\"" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+log INFO "Step 3: Locate rke2nodeinit.sh script"
 
 if [[ ! -x "$SCRIPT_PATH" ]]; then
   # Try alternate locations
@@ -4918,25 +4969,29 @@ if [[ ! -x "$SCRIPT_PATH" ]]; then
   exit 1
 fi
 
-log INFO "  ✓ Script found: $SCRIPT_PATH"
+log INFO "  Script found: $SCRIPT_PATH"
 
 # Set environment variable to signal execution via boot service
 export RKE2_BOOT_SERVICE=true
 
 # Execute rke2nodeinit with the discovered YAML file
-log INFO "Step 6: Execute RKE2 node initialization"
-log INFO "  Command: $SCRIPT_PATH -f $YAML_FILE -y"
+log INFO "Step 4: Execute RKE2 node initialization"
+log INFO "  Command: $SCRIPT_PATH -f $TARGET_FILE -y"
 log INFO "========================================"
 
-if "$SCRIPT_PATH" -f "$YAML_FILE" -y; then
+if "$SCRIPT_PATH" -f "$TARGET_FILE" -y; then
+  mkdir -p "$(dirname "$LAST_HASH_FILE")"
+  printf '%s\n' "$FOUND_HASH" > "$LAST_HASH_FILE"
+  chmod 600 "$LAST_HASH_FILE" || true
+
   log INFO "========================================"
-  log INFO "✓ RKE2 node initialization completed"
+  log INFO "RKE2 node initialization completed"
   log INFO "========================================"
   exit 0
 else
   rc=$?
   log ERROR "========================================"
-  log ERROR "✗ RKE2 node initialization failed"
+  log ERROR "RKE2 node initialization failed"
   log ERROR "  Exit code: $rc"
   log ERROR "========================================"
   exit $rc
@@ -4949,7 +5004,7 @@ EOF_BOOT_SCRIPT
     return 1
   }
   
-  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform)"
+  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform, mode: $boot_mode)"
   return 0
 }
 
@@ -4970,23 +5025,29 @@ install_boot_service() {
     log ERROR "Failed to create systemd service directory: $service_dir"
     return 1
   }
+
+  local run_once_condition=""
+  local run_once_post=""
+  if [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    run_once_condition="ConditionPathExists=!/var/lib/rke2-boot-complete"
+    run_once_post="ExecStartPost=/bin/touch /var/lib/rke2-boot-complete"
+  fi
   
   # Generate systemd service unit
   cat > "$BOOT_SERVICE_PATH" <<EOF
 [Unit]
-Description=RKE2 First-Boot Automation with Config Discovery
+Description=RKE2 Boot Automation with ISO Config Discovery
 Documentation=https://github.com/cantrellcloud/rke2-node-init
 After=network-online.target systemd-hostnamed.service
 Wants=network-online.target
 Requires=systemd-hostnamed.service
 ConditionPathExists=$BOOT_SCRIPT_PATH
-# Only run once on first boot (unless marker removed)
-ConditionPathExists=!/var/lib/rke2-boot-complete
+$run_once_condition
 
 [Service]
 Type=oneshot
 ExecStart=$BOOT_SCRIPT_PATH
-ExecStartPost=/bin/touch /var/lib/rke2-boot-complete
+$run_once_post
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rke2-boot
@@ -5104,6 +5165,7 @@ uninstall_boot_service_artifacts() {
   fi
 
   rm -f /var/lib/rke2-boot-complete || true
+  rm -f /var/lib/rke2-boot-last-iso.sha256 || true
 
   if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
     log WARN "systemctl daemon-reload failed after boot artifact removal"
@@ -9044,6 +9106,9 @@ action_image() {
   local boot_yaml_path_cfg=""
   local boot_mode_cfg=""
   local boot_platform_cfg=""
+  local boot_yaml_dir=""
+  local boot_iso_output_dir=""
+  local boot_iso_manifest=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
   
@@ -9344,12 +9409,47 @@ action_image() {
     [[ -n "$boot_mode_yaml" ]] && BOOT_SERVICE_MODE="$boot_mode_yaml"
     [[ -n "$boot_platform_yaml" ]] && VM_PLATFORM="$boot_platform_yaml"
   fi
+
+  if [[ "$BOOT_SERVICE_MODE" != "oneshot" && "$BOOT_SERVICE_MODE" != "persistent" ]]; then
+    log_error "Invalid boot service mode: $BOOT_SERVICE_MODE"
+    log_error "Valid values are: oneshot, persistent"
+    exit 1
+  fi
   
   # Normalize boolean value
   boot_enabled="$(normalize_bool_value "$boot_enabled")"
   
   # Install and enable boot service only when explicitly requested.
   if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+    if [[ -z "${BOOT_YAML_PATH:-}" ]]; then
+      log_error "bootService.yamlPath (or --boot-yaml-path) is required when boot service is enabled"
+      log_error "Expected a directory containing per-node YAML configs"
+      exit 1
+    fi
+
+    boot_yaml_dir="$(resolve_boot_yaml_dir "$BOOT_YAML_PATH")"
+    if [[ ! -d "$boot_yaml_dir" ]]; then
+      log_error "bootService.yamlPath must point to an existing directory"
+      log_error "Resolved path: $boot_yaml_dir"
+      exit 1
+    fi
+
+    boot_iso_output_dir="${RUN_OUT_DIR:-$OUT_DIR}/boot-isos"
+    boot_iso_manifest="$boot_iso_output_dir/manifest.tsv"
+
+    if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+      log_info "Generating per-node boot ISOs from: $boot_yaml_dir"
+      if ! generate_bootservice_isos "$boot_yaml_dir" "$boot_iso_output_dir" "$boot_iso_manifest"; then
+        log_error "Boot service requested, but ISO generation failed"
+        exit 1
+      fi
+      log_info "Boot-service ISO output directory: $boot_iso_output_dir"
+      log_info "Boot-service ISO manifest: $boot_iso_manifest"
+    else
+      log_info "DRY-RUN: Would generate per-node boot ISOs from: $boot_yaml_dir"
+      log_info "DRY-RUN: Would write ISO artifacts under: $boot_iso_output_dir"
+    fi
+
     if install_boot_script; then
       if install_boot_service; then
         log_info "Boot script and service installed successfully"
@@ -9357,26 +9457,18 @@ action_image() {
         log_info "  Service: $BOOT_SERVICE_PATH"
         log_info "  Mode: $BOOT_SERVICE_MODE"
         log_info "  Platform: $(detect_vm_platform)"
-        log_info "  Config search paths:"
-        for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-          log_info "    - $search_path"
-        done
+        log_info "  YAML source directory: $boot_yaml_dir"
+        if [[ -n "$boot_iso_output_dir" ]]; then
+          log_info "  ISO output directory: $boot_iso_output_dir"
+          log_info "  ISO manifest: $boot_iso_manifest"
+          log_info "  ISO files generated: ${BOOT_ISO_COUNT:-0}"
+        fi
         log_info "  Target directory: $BOOT_TARGET_DIR"
         
-        # Display Hyper-V specific requirements
-        if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-          log_info ""
-          log_info "Hyper-V Configuration Required:"
-          log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
-          log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-          log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
-          log_info "  Without this, the guest hostname will be used as fallback."
-        fi
-
         if enable_boot_service; then
           log_info "Boot service enabled for next reboot"
-          log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
-          log_info "           Boot service will auto-discover and copy configs on first boot"
+          log_info "IMPORTANT: Attach a boot config ISO (with /config/<yaml>) as a virtual CD at provisioning time"
+          log_info "           Boot service is ISO-only and uses the first YAML found under /config"
         else
           log_warn "Failed to enable boot service; install completed but service not active"
         fi
@@ -9980,31 +10072,26 @@ PY
   log_info "Next steps:"
   log_info "  1. Review SBOM and verify all artifacts"
   if [[ "$boot_status" == "ENABLED"* ]]; then
-    log_info "  2. Place node-specific YAML configs in: $REPO_ROOT/configs/"
-    log_info "     - Naming pattern: {hostname}.yaml (e.g., node01.yaml)"
-    log_info "     - Boot service will auto-discover configs by VM hostname"
-    
-    # Add Hyper-V specific instructions
-    if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-      log_info "  3. Configure VM names on Hyper-V host (PowerShell on host):"
-      log_info "     Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-      log_info "     (Without this, guest hostname will be used as fallback)"
-      log_info "  4. Clone/template this VM for deployment"
-      log_info "  5. First boot will automatically:"
+    if [[ -n "$boot_iso_output_dir" ]]; then
+      log_info "  2. Collect generated boot ISOs from: $boot_iso_output_dir"
+      log_info "     - One ISO per node named metadata.name.iso"
+      log_info "     - Manifest: $boot_iso_manifest"
     else
-      log_info "  3. Clone/template this VM for deployment"
-      log_info "  4. First boot will automatically:"
+      log_info "  2. Build per-node metadata.name.iso artifacts from your YAML directory"
     fi
-    log_info "     - Query VM hostname from hypervisor"
-    log_info "     - Search for matching config: {hostname}.yaml"
-    log_info "     - Copy config to: $BOOT_TARGET_DIR/{hostname}.yaml"
+    log_info "  3. Attach a boot config ISO (containing /config/<yaml>) as virtual CD during provisioning"
+    log_info "  4. Clone/template this VM for deployment"
+    log_info "  5. First boot will automatically:"
+    log_info "     - Scan attached ISO media for /config/*.yaml"
+    log_info "     - Select the first YAML file found"
+    log_info "     - Copy config to: $BOOT_TARGET_DIR/{yaml-filename}"
     log_info "     - Execute: rke2nodeinit.sh -f {config} -y"
+    if [[ "$BOOT_SERVICE_MODE" == "persistent" ]]; then
+      log_info "     - Rerun only when attached ISO config hash changes"
+    fi
     log_info ""
     log_info "Boot service status: $boot_status"
-    log_info "Config search paths:"
-    for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-      log_info "  - $search_path"
-    done
+    log_info "Boot service mode: $BOOT_SERVICE_MODE"
   else
     log_info "  2. Clone this VM for air-gapped deployment"
     log_info "  3. Run 'server' or 'agent' action on cloned nodes"

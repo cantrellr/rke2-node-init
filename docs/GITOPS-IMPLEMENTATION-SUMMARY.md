@@ -2,7 +2,8 @@
 
 **Branch**: `feature/gitops-vm-config-workflow`  
 **Date**: November 22, 2025  
-**Status**: ✅ Initial Implementation Complete
+**Status**: ✅ Initial Implementation Complete  
+**Boot Service Notes Updated**: April 22, 2026
 
 ## Overview
 
@@ -52,7 +53,7 @@ python3 scripts/vm-config/config_validator.py vm-configs/ --all --strict
 
 **Key Methods**:
 - `create_vm_from_template()` - Clone VM with configuration overrides
-- `set_kvp_data_bulk()` - Inject guest variables (VM name, cluster, role)
+- `set_kvp_data_bulk()` - Inject optional guest metadata (for example cluster and role)
 - `get_vm_info()` - Query VM state and configuration
 
 ### 3. Orchestration Engine
@@ -71,7 +72,7 @@ python3 scripts/vm-config/config_validator.py vm-configs/ --all --strict
 **Workflow**:
 ```
 1. Load YAML config → 2. Validate → 3. Connect to hypervisor →
-4. Check if VM exists → 5. Create or Update → 6. Set KVP data →
+4. Check if VM exists → 5. Create or Update → 6. Set optional metadata / attach boot ISO →
 7. Start VM (if autoStart) → 8. Run lifecycle hooks
 ```
 
@@ -185,30 +186,29 @@ python3 scripts/vm-config/config_validator.py vm-configs/ --all --strict
 ├──────────────────────────────────────────────────────────────┤
 │  1. Clone VM from template                                    │
 │  2. Configure resources (CPU, memory, network)                │
-│  3. Inject KVP data:                                          │
-│     - VirtualMachineName (hostname)                           │
+│  3. Inject metadata as needed (optional KVP):                 │
 │     - ClusterName                                             │
 │     - NodeRole (server/agent)                                 │
-│     - RKE2ConfigPath                                          │
-│  4. Start VM                                                  │
+│  4. Attach node boot ISO as virtual DVD                       │
+│  5. Start VM                                                  │
 └────────────────────────┬─────────────────────────────────────┘
                          │
                          ▼ (VM boots)
 ┌──────────────────────────────────────────────────────────────┐
 │                   Guest VM - First Boot                       │
 ├──────────────────────────────────────────────────────────────┤
-│  systemd starts rke2-boot.service (oneshot)                   │
+│  systemd starts rke2-boot.service                              │
 │  └─> /usr/local/bin/rke2-boot.sh executes:                   │
-│      1. Read VM hostname from KVP (PowerShell)                │
-│      2. Search config paths for {hostname}.yaml               │
+│      1. Discover attached ISO9660 config media                │
+│      2. Find first YAML in /config                            │
 │      3. Validate YAML syntax (if yq available)                │
 │      4. Copy config to /root/server-config/                   │
 │      5. Locate rke2nodeinit.sh script                         │
 │      6. Execute: rke2nodeinit.sh -f {config} -y              │
 │         └─> Configure network, hostname, install RKE2        │
 │             └─> Join RKE2 cluster                            │
-│  7. Create marker: /var/lib/rke2-boot-complete               │
-│  8. Service exits (run-once)                                  │
+│  7. oneshot: marker file prevents rerun                       │
+│     persistent: rerun only when ISO YAML hash changes         │
 └──────────────────────────────────────────────────────────────┘
                          │
                          ▼
@@ -218,7 +218,7 @@ python3 scripts/vm-config/config_validator.py vm-configs/ --all --strict
 │  • Hostname set                                               │
 │  • RKE2 installed and running                                 │
 │  • Node joined to cluster                                     │
-│  • Boot service disabled (marker file exists)                 │
+│  • Boot service gated by mode/hash semantics                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -229,35 +229,26 @@ python3 scripts/vm-config/config_validator.py vm-configs/ --all --strict
 The GitOps workflow seamlessly integrates with the existing boot service infrastructure:
 
 **Existing Components**:
-- `install_boot_script()` in rke2nodeinit.sh (lines 3800-4065)
-- `install_boot_service()` in rke2nodeinit.sh (lines 4070-4110)
+- `install_boot_script()` in rke2nodeinit.sh
+- `install_boot_service()` in rke2nodeinit.sh
 - rke2-boot.service systemd unit
-- PowerShell KVP reading for Hyper-V
+- ISO builder (`scripts/build-boot-isos.sh`) and manifest output
 
 **GitOps Enhancement**:
-- **Before**: Manual PowerShell commands required on hypervisor host
-  ```powershell
-  Set-VMKeyValuePairItem -VMName "vm01" -Key "VirtualMachineName" -Value "vm01"
-  ```
-
-- **After**: Automated via GitHub Actions workflow
-  ```python
-  client.set_kvp_data('vm01', 'VirtualMachineName', 'vm01')
-  client.set_kvp_data('vm01', 'ClusterName', 'cotpa')
-  client.set_kvp_data('vm01', 'NodeRole', 'server')
-  ```
+- **Before**: Hostname/KVP-driven config discovery and search-path placement assumptions.
+- **After**: ISO-driven boot config handoff where guest bootstrap reads the first YAML under `/config` from attached virtual CD media.
 
 ### Configuration File Management
 
 **Existing Behavior**:
-- Boot script searches: `/rke2-node-init/configs/`, `/opt/rke2/configs/`, `/root/configs/`
-- Matches filename to hostname: `{hostname}.yaml`
-- Copies to `/root/server-config/{hostname}.yaml`
+- Boot script scans attached ISO9660 media.
+- Selects first `*.yaml` / `*.yml` under `/config`.
+- Copies to `/root/server-config/{yaml-filename}`.
 
 **GitOps Enhancement**:
 - VM configs reference RKE2 configs via `rke2Config.configPath`
 - Configs stored in Git: `vm-configs/clusters/{cluster}/rke2-configs/{node}.yaml`
-- Future enhancement: Auto-copy configs to VM search paths via cloud-init or SSH
+- Future enhancement: Auto-generate and attach per-node boot ISOs during VM provisioning.
 
 ## Testing
 
@@ -338,7 +329,7 @@ pywinrm>=0.4.3      # Hyper-V WinRM connection
 2. **No VM Deletion**: Must be done manually (safety measure)
 3. **Single Region**: No multi-datacenter orchestration yet
 4. **No Rollback**: Automated rollback not implemented
-5. **Config Distribution**: RKE2 configs not automatically copied to VMs yet
+5. **ISO Attachment Automation**: Boot ISO generation/attachment is not yet fully automated in GitOps workflows
 
 ## Next Steps
 
@@ -361,9 +352,9 @@ pywinrm>=0.4.3      # Hyper-V WinRM connection
 
 ### Short-Term (Week 3-4)
 1. **Config Distribution**:
-   - Implement cloud-init integration
-   - Auto-copy RKE2 configs to VM search paths
-   - Add SSH-based config injection fallback
+   - Implement boot ISO generation from RKE2 config directories
+   - Attach selected node ISO to VM virtual DVD during provisioning
+   - Add fallback transfer method for environments without virtual media workflows
 
 2. **Enhanced Validation**:
    - Add network connectivity checks

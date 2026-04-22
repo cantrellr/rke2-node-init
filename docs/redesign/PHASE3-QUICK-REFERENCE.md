@@ -8,39 +8,39 @@
 ### Help System
 ```bash
 # General help
-sudo ./rke2nodeinit.sh --help
+sudo ./bin/rke2nodeinit.sh --help
 
 # Action-specific help
-sudo ./rke2nodeinit.sh verify --help
-sudo ./rke2nodeinit.sh image --help
-sudo ./rke2nodeinit.sh --help push
+sudo ./bin/rke2nodeinit.sh verify --help
+sudo ./bin/rke2nodeinit.sh image --help
+sudo ./bin/rke2nodeinit.sh --help push
 
 # Version info
-sudo ./rke2nodeinit.sh --version
+sudo ./bin/rke2nodeinit.sh --version
 ```
 
 ### Verbosity Control
 ```bash
 # Verbose (detailed debug output)
-sudo ./rke2nodeinit.sh --verbose -f config.yaml
+sudo ./bin/rke2nodeinit.sh --verbose -f config.yaml
 
 # Quiet (errors/warnings only)
-sudo ./rke2nodeinit.sh --quiet -f config.yaml
+sudo ./bin/rke2nodeinit.sh --quiet -f config.yaml
 
 # Normal (default - balanced output)
-sudo ./rke2nodeinit.sh -f config.yaml
+sudo ./bin/rke2nodeinit.sh -f config.yaml
 ```
 
 ### Dry-Run Mode
 ```bash
 # Test without changes
-sudo ./rke2nodeinit.sh --dry-run -f config.yaml
+sudo ./bin/rke2nodeinit.sh --dry-run -f config.yaml
 
 # Combine with verbose for detailed preview
-sudo ./rke2nodeinit.sh --dry-run --verbose -f config.yaml
+sudo ./bin/rke2nodeinit.sh --dry-run --verbose -f config.yaml
 
 # Combine with quiet for minimal simulation
-sudo ./rke2nodeinit.sh --dry-run --quiet -f config.yaml
+sudo ./bin/rke2nodeinit.sh --dry-run --quiet -f config.yaml
 ```
 
 ## Documentation
@@ -65,9 +65,9 @@ sudo ./rke2nodeinit.sh --dry-run --quiet -f config.yaml
 ./examples/phase3-cli-demo.sh
 
 # Quick validation
-sudo ./rke2nodeinit.sh --version
-sudo ./rke2nodeinit.sh --help
-sudo ./rke2nodeinit.sh verify --help
+sudo ./bin/rke2nodeinit.sh --version
+sudo ./bin/rke2nodeinit.sh --help
+sudo ./bin/rke2nodeinit.sh verify --help
 ```
 
 ## Benefits

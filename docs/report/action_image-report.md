@@ -605,13 +605,13 @@ Next Steps - Deploying RKE2:
 On cloned VMs from this template, run:
 
 For first control plane node:
-  sudo ./rke2nodeinit.sh -f server-config.yaml
+  sudo ./bin/rke2nodeinit.sh -f server-config.yaml
 
 For additional control plane nodes:
-  sudo ./rke2nodeinit.sh -f add-server-config.yaml
+  sudo ./bin/rke2nodeinit.sh -f add-server-config.yaml
 
 For worker nodes:
-  sudo ./rke2nodeinit.sh -f agent-config.yaml
+  sudo ./bin/rke2nodeinit.sh -f agent-config.yaml
 
 Configuration:
 -------------
@@ -923,7 +923,7 @@ Actual:   789ghi012jkl...
 rm -f /opt/rke2/downloads/rke2-images.linux-amd64.tar.zst
 
 # Rerun script
-sudo ./rke2nodeinit.sh -f cotpa-image.yaml
+sudo ./bin/rke2nodeinit.sh -f cotpa-image.yaml
 ```
 
 **Prevention:**
@@ -1042,7 +1042,7 @@ virt-clone --original rke2-golden --auto-clone --name rke2-template
 ```bash
 # Clone from template
 # Deploy Server action to verify functionality
-sudo ./rke2nodeinit.sh -f test-server.yaml
+sudo ./bin/rke2nodeinit.sh -f test-server.yaml
 ```
 
 ### 5. Deploy Production Cluster
@@ -1077,7 +1077,7 @@ serverURL: https://control-plane:9345
 
 ### Input Files (Required Before Execution)
 ```
-/rke2-node-init/configs/cotpa-image.yaml - Configuration file
+configs/cotpa-hyperv-image.yaml - Configuration file
 /rke2-node-init/certs/rke2ca-cert.crt - Root CA certificate
 /rke2-node-init/certs/rke2registry-ca.crt - Subordinate CA certificate
 ```

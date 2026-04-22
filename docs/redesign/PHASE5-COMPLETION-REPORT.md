@@ -445,7 +445,7 @@ bash -c 'source rke2nodeinit.sh; \
 #!/bin/bash
 source /rke2/rke2-node-init/bin/rke2nodeinit.sh
 enable_error_handling
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 ```
 
 **Features Used:**
@@ -463,7 +463,7 @@ source /rke2/rke2-node-init/bin/rke2nodeinit.sh
 enable_error_handling
 metrics_dashboard_init "deployment"
 
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 
 metrics_dashboard_display "Deployment Complete"
 metrics_export_all

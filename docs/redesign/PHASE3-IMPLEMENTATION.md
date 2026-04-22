@@ -68,8 +68,8 @@ Phase 3 Components (bin/rke2nodeinit.sh):
 
 #### Global Help
 ```bash
-./rke2nodeinit.sh --help
-./rke2nodeinit.sh -h
+./bin/rke2nodeinit.sh --help
+./bin/rke2nodeinit.sh -h
 ```
 
 **Provides**:
@@ -82,9 +82,9 @@ Phase 3 Components (bin/rke2nodeinit.sh):
 
 #### Action-Specific Help
 ```bash
-./rke2nodeinit.sh verify --help
-./rke2nodeinit.sh image --help
-./rke2nodeinit.sh --help push
+./bin/rke2nodeinit.sh verify --help
+./bin/rke2nodeinit.sh image --help
+./bin/rke2nodeinit.sh --help push
 ```
 
 **Each action help includes**:
@@ -132,8 +132,8 @@ PURPOSE:
   Validates dependencies, network configuration, and disk space.
 
 USAGE:
-  sudo ./rke2nodeinit.sh verify [--verbose] [--quiet]
-  sudo ./rke2nodeinit.sh -f config.yaml
+  sudo ./bin/rke2nodeinit.sh verify [--verbose] [--quiet]
+  sudo ./bin/rke2nodeinit.sh -f config.yaml
 
 # ... comprehensive documentation
 EOF
@@ -170,7 +170,7 @@ fi
 
 #### Usage
 ```bash
-./rke2nodeinit.sh --version
+./bin/rke2nodeinit.sh --version
 ```
 
 #### Output Example
@@ -205,8 +205,8 @@ For detailed documentation, see:
 
 **Usage**:
 ```bash
-./rke2nodeinit.sh --verbose -f config.yaml
-./rke2nodeinit.sh --verbose verify
+./bin/rke2nodeinit.sh --verbose -f config.yaml
+./bin/rke2nodeinit.sh --verbose verify
 ```
 
 **Behavior**:
@@ -230,8 +230,8 @@ For detailed documentation, see:
 
 **Usage**:
 ```bash
-./rke2nodeinit.sh --quiet -f config.yaml
-./rke2nodeinit.sh --quiet push
+./bin/rke2nodeinit.sh --quiet -f config.yaml
+./bin/rke2nodeinit.sh --quiet push
 ```
 
 **Behavior**:
@@ -326,16 +326,16 @@ log_error "Failed to download artifact"    # Always shown
 #### Usage
 ```bash
 # Test image preparation
-./rke2nodeinit.sh --dry-run -f examples/image.yaml
+./bin/rke2nodeinit.sh --dry-run -f examples/image.yaml
 
 # Test server initialization
-./rke2nodeinit.sh --dry-run -f clusters/dc1/ctrl01.yaml
+./bin/rke2nodeinit.sh --dry-run -f clusters/dc1/ctrl01.yaml
 
 # Combine with verbose for detailed preview
-./rke2nodeinit.sh --dry-run --verbose -f config.yaml
+./bin/rke2nodeinit.sh --dry-run --verbose -f config.yaml
 
 # Combine with quiet for minimal output
-./rke2nodeinit.sh --dry-run --quiet -f config.yaml
+./bin/rke2nodeinit.sh --dry-run --quiet -f config.yaml
 ```
 
 #### Supported Actions
@@ -433,14 +433,14 @@ action_image() {
 
 ```bash
 # Discover available actions
-./rke2nodeinit.sh --help
+./bin/rke2nodeinit.sh --help
 
 # Learn about specific action
-./rke2nodeinit.sh verify --help
-./rke2nodeinit.sh image --help
+./bin/rke2nodeinit.sh verify --help
+./bin/rke2nodeinit.sh image --help
 
 # Test configuration safely
-./rke2nodeinit.sh --dry-run -f examples/image.yaml
+./bin/rke2nodeinit.sh --dry-run -f examples/image.yaml
 ```
 
 ### 2. Troubleshooting
@@ -449,10 +449,10 @@ action_image() {
 
 ```bash
 # Run with verbose output
-./rke2nodeinit.sh --verbose -f config.yaml
+./bin/rke2nodeinit.sh --verbose -f config.yaml
 
 # Check for specific issues
-./rke2nodeinit.sh --verbose verify
+./bin/rke2nodeinit.sh --verbose verify
 
 # Review log file for full details
 cat logs/rke2nodeinit-<timestamp>.log
@@ -464,10 +464,10 @@ cat logs/rke2nodeinit-<timestamp>.log
 
 ```bash
 # Quiet mode for minimal output
-./rke2nodeinit.sh --quiet -f production.yaml
+./bin/rke2nodeinit.sh --quiet -f production.yaml
 
 # Check exit code for success/failure
-if ./rke2nodeinit.sh --quiet verify; then
+if ./bin/rke2nodeinit.sh --quiet verify; then
   echo "Prerequisites met"
 else
   echo "Prerequisites check failed" >&2
@@ -475,7 +475,7 @@ else
 fi
 
 # Validation in CI pipeline
-./rke2nodeinit.sh --dry-run --quiet -f $CONFIG_FILE
+./bin/rke2nodeinit.sh --dry-run --quiet -f $CONFIG_FILE
 ```
 
 ### 4. Safe Testing
@@ -484,13 +484,13 @@ fi
 
 ```bash
 # Test configuration syntax and logic
-./rke2nodeinit.sh --dry-run -f new-cluster.yaml
+./bin/rke2nodeinit.sh --dry-run -f new-cluster.yaml
 
 # Detailed preview with verbose
-./rke2nodeinit.sh --dry-run --verbose -f new-cluster.yaml
+./bin/rke2nodeinit.sh --dry-run --verbose -f new-cluster.yaml
 
 # After validation, run for real
-./rke2nodeinit.sh -f new-cluster.yaml
+./bin/rke2nodeinit.sh -f new-cluster.yaml
 ```
 
 ### 5. Documentation and Training
@@ -499,14 +499,14 @@ fi
 
 ```bash
 # Show version and capabilities
-./rke2nodeinit.sh --version
+./bin/rke2nodeinit.sh --version
 
 # Generate help content for docs
-./rke2nodeinit.sh --help > cli-reference.txt
-./rke2nodeinit.sh image --help > image-action.txt
+./bin/rke2nodeinit.sh --help > cli-reference.txt
+./bin/rke2nodeinit.sh image --help > image-action.txt
 
 # Demonstrate workflow safely
-./rke2nodeinit.sh --dry-run --verbose -f training.yaml
+./bin/rke2nodeinit.sh --dry-run --verbose -f training.yaml
 ```
 
 ## Benefits Analysis

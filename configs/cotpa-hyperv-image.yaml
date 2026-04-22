@@ -23,6 +23,6 @@ spec:
     installToOSTrust: true
   bootService:
     enabled: false
-  #  yamlPath: /root/server-config.yaml
+  #  yamlPath: configs/cotpa/nodes
     mode: oneshot
     platform: hyperv

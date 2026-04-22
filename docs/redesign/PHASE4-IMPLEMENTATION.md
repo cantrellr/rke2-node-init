@@ -160,13 +160,13 @@ Each phase includes:
 
 ```bash
 # Standard deployment
-sudo ./rke2nodeinit.sh server
+sudo ./bin/rke2nodeinit.sh server
 
 # Dry-run validation
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Verbose output
-sudo ./rke2nodeinit.sh --verbose server
+sudo ./bin/rke2nodeinit.sh --verbose server
 ```
 
 **Sample Output:**
@@ -175,8 +175,8 @@ sudo ./rke2nodeinit.sh --verbose server
 [INFO] Dry-run mode enabled - no changes will be made
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [PROGRESS] [1/8] Loading configuration...
-[DEBUG] Loading site defaults from: /configs/site-defaults.yaml
-[DEBUG] Loading server config from: /configs/server.yaml
+[DEBUG] Loading site defaults from: configs/site-defaults.yaml
+[DEBUG] Loading server config from: configs/server.yaml
 ✓ Configuration loaded successfully
 
 [PROGRESS] [2/8] Validating configuration...
@@ -278,10 +278,10 @@ flannel_fix_installed       0 (dry-run)
 
 ```bash
 # Deploy agent node
-sudo ./rke2nodeinit.sh agent
+sudo ./bin/rke2nodeinit.sh agent
 
 # Dry-run with verbose output
-sudo ./rke2nodeinit.sh --dry-run --verbose agent
+sudo ./bin/rke2nodeinit.sh --dry-run --verbose agent
 ```
 
 ---
@@ -334,10 +334,10 @@ sudo ./rke2nodeinit.sh --dry-run --verbose agent
 
 ```bash
 # Add control plane node
-sudo ./rke2nodeinit.sh add-server
+sudo ./bin/rke2nodeinit.sh add-server
 
 # Validation only
-sudo ./rke2nodeinit.sh --dry-run add-server
+sudo ./bin/rke2nodeinit.sh --dry-run add-server
 ```
 
 ---
@@ -370,10 +370,10 @@ sudo ./rke2nodeinit.sh --dry-run add-server
 
 ```bash
 # Create airgap template
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 
 # Test without poweroff
-sudo ./rke2nodeinit.sh --dry-run airgap
+sudo ./bin/rke2nodeinit.sh --dry-run airgap
 ```
 
 **Sample Output:**
@@ -647,13 +647,13 @@ fi
 
 ```bash
 # Validate configuration before deployment
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Review output, then deploy
-sudo ./rke2nodeinit.sh server
+sudo ./bin/rke2nodeinit.sh server
 
 # Verbose deployment with full logging
-sudo ./rke2nodeinit.sh --verbose server
+sudo ./bin/rke2nodeinit.sh --verbose server
 ```
 
 ### Example 2: Agent Deployment Pipeline
@@ -672,13 +672,13 @@ for config in "${AGENT_CONFIGS[@]}"; do
     echo "Deploying agent: $config"
     
     # Validate first
-    sudo ./rke2nodeinit.sh --dry-run agent --config "$config" || {
+    sudo ./bin/rke2nodeinit.sh --dry-run -f "$config" agent || {
         echo "Validation failed for $config"
         exit 1
     }
     
     # Deploy
-    sudo ./rke2nodeinit.sh agent --config "$config" || {
+    sudo ./bin/rke2nodeinit.sh -f "$config" agent || {
         echo "Deployment failed for $config"
         exit 1
     }
@@ -695,7 +695,7 @@ done
 
 # Step 1: Deploy first server (cluster initialization)
 echo "Deploying first control plane node..."
-sudo ./rke2nodeinit.sh server --config configs/server01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server01.yaml server
 
 # Wait for cluster initialization
 sleep 30
@@ -703,7 +703,7 @@ sleep 30
 # Step 2: Deploy additional servers
 for server_config in configs/server02.yaml configs/server03.yaml; do
     echo "Adding control plane node: $server_config"
-    sudo ./rke2nodeinit.sh add-server --config "$server_config"
+    sudo ./bin/rke2nodeinit.sh -f "$server_config" add-server
     sleep 15
 done
 
@@ -717,10 +717,10 @@ echo "HA control plane deployment complete"
 # create-airgap-template.sh - Create VM template with pre-staged images
 
 # Validate airgap preparation
-sudo ./rke2nodeinit.sh --dry-run airgap
+sudo ./bin/rke2nodeinit.sh --dry-run airgap
 
 # Create template (will poweroff VM)
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 
 # VM will be powered off and ready for template conversion
 ```
@@ -744,16 +744,16 @@ Test all actions in dry-run mode:
 
 ```bash
 # Test server action
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Test agent action
-sudo ./rke2nodeinit.sh --dry-run agent
+sudo ./bin/rke2nodeinit.sh --dry-run agent
 
 # Test add-server action
-sudo ./rke2nodeinit.sh --dry-run add-server
+sudo ./bin/rke2nodeinit.sh --dry-run add-server
 
 # Test airgap action
-sudo ./rke2nodeinit.sh --dry-run airgap
+sudo ./bin/rke2nodeinit.sh --dry-run airgap
 ```
 
 ### Metrics Validation
@@ -762,7 +762,7 @@ Verify metrics tracking:
 
 ```bash
 # Run action and check metrics output
-sudo ./rke2nodeinit.sh --verbose server | grep -A 20 "DEPLOYMENT SUMMARY"
+sudo ./bin/rke2nodeinit.sh --verbose server | grep -A 20 "DEPLOYMENT SUMMARY"
 ```
 
 Expected output should show all metrics with values:
@@ -784,7 +784,7 @@ config_loaded               1
 Verify 8-phase progress display:
 
 ```bash
-sudo ./rke2nodeinit.sh server 2>&1 | grep "^\[PROGRESS\]"
+sudo ./bin/rke2nodeinit.sh server 2>&1 | grep "^\[PROGRESS\]"
 ```
 
 Expected output:
@@ -852,10 +852,10 @@ Expected output:
 
 **Action Commands:**
 ```bash
-./rke2nodeinit.sh server          # Initialize first control plane
-./rke2nodeinit.sh agent           # Deploy worker node
-./rke2nodeinit.sh add-server      # Add control plane node
-./rke2nodeinit.sh airgap          # Create airgap template
+./bin/rke2nodeinit.sh server          # Initialize first control plane
+./bin/rke2nodeinit.sh agent           # Deploy worker node
+./bin/rke2nodeinit.sh add-server      # Add control plane node
+./bin/rke2nodeinit.sh airgap          # Create airgap template
 ```
 
 **Global Flags:**

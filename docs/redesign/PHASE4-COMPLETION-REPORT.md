@@ -179,7 +179,7 @@ config_validated            1
 **Actionable error messages:**
 ```bash
 [ERROR] CLUSTER_TOKEN is not set
-[ERROR] Remediation: Add 'CLUSTER_TOKEN: <token>' to /configs/agent.yaml
+[ERROR] Remediation: Add 'token: <token>' or 'tokenFile: <path>' to configs/agent.yaml
 [ERROR] Get token from first server: cat /var/lib/rancher/rke2/server/node-token
 ```
 
@@ -187,7 +187,7 @@ config_validated            1
 
 **Safe validation:**
 ```bash
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 # Output:
 [INFO] Dry-run mode enabled - no changes will be made
 [DRY-RUN] Would set hostname to: server01
@@ -263,35 +263,35 @@ chmod +x /rke2/rke2-node-init/examples/phase4-demo.sh
 ### Server Deployment
 ```bash
 # Validate configuration
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Deploy with verbose output
-sudo ./rke2nodeinit.sh --verbose server
+sudo ./bin/rke2nodeinit.sh --verbose server
 ```
 
 ### Agent Deployment
 ```bash
 # Deploy worker node
-sudo ./rke2nodeinit.sh agent
+sudo ./bin/rke2nodeinit.sh agent
 
 # Quiet mode for automation
-sudo ./rke2nodeinit.sh --quiet agent
+sudo ./bin/rke2nodeinit.sh --quiet agent
 ```
 
 ### HA Control Plane
 ```bash
 # First server
-sudo ./rke2nodeinit.sh server --config configs/server01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server01.yaml server
 
 # Additional servers
-sudo ./rke2nodeinit.sh add-server --config configs/server02.yaml
-sudo ./rke2nodeinit.sh add-server --config configs/server03.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server02.yaml add-server
+sudo ./bin/rke2nodeinit.sh -f configs/server03.yaml add-server
 ```
 
 ### Airgap Template
 ```bash
 # Create VM template
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 ```
 
 ---
