@@ -264,7 +264,9 @@ Notes:
 
 ## Offline Registry & CA Handling
 
-- Custom CA bundles can be referenced by relative or absolute paths. They are installed into `/usr/local/share/ca-certificates` when `installToOSTrust: true`.
+- During the `image` action, `spec.customCA` paths can be relative or absolute and are resolved before trust/registry processing.
+- When `customCA.installToOSTrust: true`, both `customCA.rootCrt` and `customCA.intermediateCrt` (when present) are copied into `/usr/local/share/ca-certificates` as `*.crt`, then refreshed with `update-ca-certificates --verbose --fresh`.
+- When `spec.customCA` is present, `image` generates a bootstrap token file at `outputs/<metadata.name>-bootstrap-token.txt` using the same CA-hash token logic as the `custom-ca` action.
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.
@@ -328,7 +330,7 @@ System locations used during installation:
 - `image`, `server`, and `agent` now fail fast when required chart/release image tags are not present in staged archives under `/var/lib/rancher/rke2/agent/images` and `/opt/rke2/stage`.
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
-- When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.
+- When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates --verbose --fresh` manually.
 - If Multus fails with `cannot find valid master CNI config` while Canal is present, apply the persistent CNI permissions remediation documented in [docs/STIG-README.md](docs/STIG-README.md#persistent-cni-permissions-remediation-canal--multus).
 
 ---

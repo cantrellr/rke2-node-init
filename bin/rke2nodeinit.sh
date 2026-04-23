@@ -8487,30 +8487,66 @@ cache_rke2_artifacts() {
 # ------------------------------------------------------------------------------
 ca_trust_registries() {
   # --- Optional: CA trust + registries mirrors -------------------------------
+  local CA_ROOT_EFFECTIVE="${CA_ROOT:-${CUSTOM_CA_ROOT_CRT:-}}"
+  local CA_KEY_EFFECTIVE="${CA_KEY:-${CUSTOM_CA_ROOT_KEY:-}}"
+  local CA_INTCRT_EFFECTIVE="${CA_INTCRT:-${CUSTOM_CA_INT_CRT:-}}"
+  local CA_INTKEY_EFFECTIVE="${CA_INTKEY:-${CUSTOM_CA_INT_KEY:-}}"
+  local CA_INSTALL_EFFECTIVE="${CA_INSTALL:-${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}}"
+  local install_os_trust=0
   local CA_BN=""
-  if [[ -n "$CA_ROOT" && -f "$CA_ROOT" ]]; then
-    CA_BN="$(basename "$CA_ROOT")"
-    if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-      mkdir -p /usr/local/share/ca-certificates
-      cp -f "$CA_ROOT" "/usr/local/share/ca-certificates/$CA_BN"
-      update-ca-certificates >>"$LOG_FILE" 2>&1 || true
+  local installed_ca_path=""
+
+  if [[ "$CA_INSTALL_EFFECTIVE" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
+    install_os_trust=1
+  fi
+
+  if [[ $install_os_trust -eq 1 ]]; then
+    mkdir -p /usr/local/share/ca-certificates
+
+    if [[ -n "$CA_ROOT_EFFECTIVE" && -f "$CA_ROOT_EFFECTIVE" ]]; then
+      CA_BN="$(basename "$CA_ROOT_EFFECTIVE")"
+      [[ "$CA_BN" != *.crt ]] && CA_BN="${CA_BN%.*}.crt"
+      cp -f "$CA_ROOT_EFFECTIVE" "/usr/local/share/ca-certificates/$CA_BN"
+      installed_ca_path="/usr/local/share/ca-certificates/$CA_BN"
       log INFO "Installed $CA_BN into OS trust store."
     fi
-    # Persist to site defaults for server phase
-    local STATE="/etc/rke2image.defaults"
-    {
-      echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT\""
-      [[ -n "$CA_KEY"    ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY\""
-      [[ -n "$CA_INTCRT" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT\""
-      [[ -n "$CA_INTKEY" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY\""
-      if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=1"
-      else
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=0"
-      fi
-    } >> "$STATE"
-    chmod 600 "$STATE"
+
+    if [[ -n "$CA_INTCRT_EFFECTIVE" && -f "$CA_INTCRT_EFFECTIVE" ]]; then
+      local CA_INT_BN
+      CA_INT_BN="$(basename "$CA_INTCRT_EFFECTIVE")"
+      [[ "$CA_INT_BN" != *.crt ]] && CA_INT_BN="${CA_INT_BN%.*}.crt"
+      cp -f "$CA_INTCRT_EFFECTIVE" "/usr/local/share/ca-certificates/$CA_INT_BN"
+      [[ -z "$installed_ca_path" ]] && installed_ca_path="/usr/local/share/ca-certificates/$CA_INT_BN"
+      log INFO "Installed $CA_INT_BN into OS trust store."
+    fi
+
+    if [[ -n "$installed_ca_path" ]]; then
+      update-ca-certificates --verbose --fresh >>"$LOG_FILE" 2>&1 || true
+      log INFO "Refreshed OS trust store with update-ca-certificates --verbose --fresh."
+    fi
   fi
+
+  # Persist to site defaults for server/agent phases while preserving defaults
+  local STATE="/etc/rke2image.defaults"
+  touch "$STATE"
+  sed -i \
+    -e '/^CUSTOM_CA_ROOT_CRT=/d' \
+    -e '/^CUSTOM_CA_ROOT_KEY=/d' \
+    -e '/^CUSTOM_CA_INT_CRT=/d' \
+    -e '/^CUSTOM_CA_INT_KEY=/d' \
+    -e '/^CUSTOM_CA_INSTALL_TO_OS_TRUST=/d' \
+    "$STATE"
+
+  if [[ -n "$CA_ROOT_EFFECTIVE" || -n "$CA_INTCRT_EFFECTIVE" || -n "$CA_KEY_EFFECTIVE" || -n "$CA_INTKEY_EFFECTIVE" ]]; then
+    {
+      [[ -n "$CA_ROOT_EFFECTIVE" ]] && echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT_EFFECTIVE\""
+      [[ -n "$CA_KEY_EFFECTIVE"  ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY_EFFECTIVE\""
+      [[ -n "$CA_INTCRT_EFFECTIVE" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT_EFFECTIVE\""
+      [[ -n "$CA_INTKEY_EFFECTIVE" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY_EFFECTIVE\""
+      echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=$install_os_trust"
+    } >> "$STATE"
+  fi
+  chmod 600 "$STATE" || true
 
   # If a registry is configured, write registries.yaml with mirrors + auth + CA
   mkdir -p /etc/rancher/rke2
@@ -8520,7 +8556,7 @@ ca_trust_registries() {
       _REG_HOST="${REGISTRY%%/*}"
       [[ "$REGISTRY" == */* ]] && _REG_NS="${REGISTRY#*/}"
     fi
-    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
+    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "${installed_ca_path:-}"
   else
     rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
   fi
@@ -9237,12 +9273,16 @@ action_image() {
     boot_mode_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
     boot_platform_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
     
-    # Optional custom CA for registry/cluster
-    CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
-    CA_KEY="$(yaml_spec_get "$CONFIG_FILE" customCA.rootKey || true)"
-    CA_INTCRT="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateCrt || true)"
-    CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
-    CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
+    # Optional custom CA for registry/cluster from spec.customCA if present.
+    load_custom_ca_from_config "$CONFIG_FILE" "" 1
+    CA_ROOT="${CUSTOM_CA_ROOT_CRT:-}"
+    CA_KEY="${CUSTOM_CA_ROOT_KEY:-}"
+    CA_INTCRT="${CUSTOM_CA_INT_CRT:-}"
+    CA_INTKEY="${CUSTOM_CA_INT_KEY:-}"
+    case "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" in
+      0|[Ff]alse|[Nn]o) CA_INSTALL="false" ;;
+      *) CA_INSTALL="true" ;;
+    esac
     
     metrics_increment "total"
     metrics_increment "success"
@@ -9274,16 +9314,13 @@ action_image() {
   log_info "  REG_USER: ${REG_USER:-<none>}"
   log_info "  DEFAULT_DNS: ${defaultDnsCsv:-<unset>}"
   log_info "  DEFAULT_SEARCH_DOMAINS: ${defaultSearchCsv:-<unset>}"
+  log_info "  CUSTOM_CA_ROOT_CRT: ${CA_ROOT:-<unset>}"
+  log_info "  CUSTOM_CA_INTERMEDIATE_CRT: ${CA_INTCRT:-<unset>}"
+  log_info "  CUSTOM_CA_INSTALL_TO_OS_TRUST: ${CA_INSTALL:-<unset>}"
   log_info "  BOOT_SERVICE_ENABLED: ${boot_enabled_cfg}"
   log_info "  BOOT_SERVICE_MODE: ${boot_mode_cfg:-<unset>}"
   log_info "  BOOT_SERVICE_PLATFORM: ${boot_platform_cfg:-<unset>}"
   log_info "  BOOT_SERVICE_YAML_PATH: ${boot_yaml_path_cfg:-<unset>}"
-
-  # Resolve cert paths relative to script dir if not absolute
-  [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
-  [[ -n "$CA_KEY"    && "${CA_KEY:0:1}"    != "/" ]] && CA_KEY="$SCRIPT_DIR/$CA_KEY"
-  [[ -n "$CA_INTCRT" && "${CA_INTCRT:0:1}" != "/" ]] && CA_INTCRT="$SCRIPT_DIR/$CA_INTCRT"
-  [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
   # --- Install OS prerequisites ----------------------------------------------
   report_progress "Installing OS prerequisites" 3 8
@@ -9425,6 +9462,23 @@ action_image() {
   metrics_increment "success"
   metrics_increment "registry_trust_configured"
 
+  # Generate a custom-CA bootstrap token file in image outputs when custom CA exists.
+  if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
+    local image_token=""
+    local image_token_file="${OUT_DIR}/${SPEC_NAME:-image}-bootstrap-token.txt"
+    generate_bootstrap_token
+    image_token="$token"
+    if [[ -n "$image_token" ]]; then
+      printf '%s\n' "$image_token" > "$image_token_file"
+      chmod 600 "$image_token_file"
+      log_info "Custom CA bootstrap token generated: $image_token_file"
+    else
+      log_warn "Custom CA detected, but bootstrap token generation returned empty output."
+    fi
+  else
+    log_info "No customCA stanza detected; skipping custom CA bootstrap token generation."
+  fi
+
   # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
   # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
   # when the `import-images: true` flag is present.  The configuration also
@@ -9456,11 +9510,13 @@ action_image() {
   # --- Save site defaults (DNS/search) ---------------------------------------
   report_progress "Persisting defaults and automation" 7 8
   local STATE="/etc/rke2image.defaults"
+  touch "$STATE"
+  sed -i -e '/^DEFAULT_DNS=/d' -e '/^DEFAULT_SEARCH=/d' "$STATE"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
     echo "DEFAULT_SEARCH=\"$defaultSearchCsv\""
-  } > "$STATE"
-  chmod 600 "$STATE"
+  } >> "$STATE"
+  chmod 600 "$STATE" || true
   log_info "Site defaults saved to: $STATE"
   log_info "  DNS servers: $defaultDnsCsv"
   log_info "  Search domains: $defaultSearchCsv"
