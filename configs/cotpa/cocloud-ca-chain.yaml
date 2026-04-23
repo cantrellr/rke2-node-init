@@ -1,7 +1,7 @@
 apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
-  name: cotpa-k8admin-ca
+  name: cocloud-ca-chain
 spec:
   customCA:
     rootCrt: /rke2-node-init/certs/cocloud/cocloud-ca.crt

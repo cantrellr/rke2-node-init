@@ -13,16 +13,31 @@ spec:
    - multus
    - canal
   interfaces:
+    # vlan9
     - name: eth0
       ip: 172.16.15.102
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan12
+    - name: eth1
+      ip: 172.16.4.252
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains:
+    # vlan17
+    - name: eth2
+      ip: 172.16.5.252
+      prefix: 24
+      gateway:
+      dns: 
+      searchDomains: 
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
-  - "env=preprod"
+  - "env=development"
   tls-san:
     - cotpa-ctrl02
     - cotpa-ctrl02.cantrellcloud.net
@@ -39,3 +54,9 @@ spec:
   tokenFile: /rke2-node-init/configs/cotpa-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
+  customCA:
+    rootCrt: /rke2-node-init/certs/cocloud/cocloud-ca.crt
+    rootKey: /rke2-node-init/certs/cocloud/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/certs/cocloud/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/certs/cocloud/cocloud-issue-ca2-key.pem
+    installToOSTrust: true
