@@ -4736,6 +4736,11 @@ generate_bootservice_isos() {
     return 1
   fi
 
+  if ! ensure_iso_builder_available; then
+    log ERROR "Boot service requested, but no ISO builder is available"
+    return 1
+  fi
+
   local log_target="${LOG_FILE:-/dev/null}"
   if ! bash "$builder_script" \
     --yaml-dir "$yaml_dir" \
@@ -4759,6 +4764,57 @@ generate_bootservice_isos() {
   log INFO "Boot-service ISO build completed: $BOOT_ISO_COUNT file(s)"
   log INFO "Boot-service ISO manifest: $BOOT_ISO_MANIFEST"
   return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_iso_builder_available
+# Purpose : Ensure at least one supported ISO builder command is present for
+#           boot-service ISO generation. Attempts APT installation when absent.
+# Arguments:
+#   None
+# Returns :
+#   0 when an ISO builder is available, non-zero otherwise.
+# ------------------------------------------------------------------------------
+ensure_iso_builder_available() {
+  if command -v xorriso >/dev/null 2>&1 || \
+     command -v genisoimage >/dev/null 2>&1 || \
+     command -v mkisofs >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log INFO "No ISO builder detected; attempting to install one (xorriso, genisoimage)."
+
+  local pkg=""
+  local candidate
+  for candidate in xorriso genisoimage; do
+    if apt-cache show "$candidate" >/dev/null 2>&1; then
+      pkg="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$pkg" ]]; then
+    log ERROR "No ISO builder found and no installable package detected in APT cache"
+    log ERROR "Install one of: xorriso, genisoimage, mkisofs"
+    return 1
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  log INFO "Installing ISO builder package: $pkg"
+  if ! apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1; then
+    log ERROR "Failed to install ISO builder package: $pkg"
+    return 1
+  fi
+
+  if command -v xorriso >/dev/null 2>&1 || \
+     command -v genisoimage >/dev/null 2>&1 || \
+     command -v mkisofs >/dev/null 2>&1; then
+    log INFO "ISO builder is now available"
+    return 0
+  fi
+
+  log ERROR "ISO builder command still unavailable after package install"
+  return 1
 }
 
 # ------------------------------------------------------------------------------
