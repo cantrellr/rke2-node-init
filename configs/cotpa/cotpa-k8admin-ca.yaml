@@ -1,0 +1,11 @@
+apiVersion: rkeprep/v2
+kind: CustomCA
+metadata:
+  name: cotpa-k8admin-ca
+spec:
+  customCA:
+    rootCrt: /rke2-node-init/certs/cocloud/cocloud-ca.crt
+    rootKey: /rke2-node-init/certs/cocloud/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/certs/cocloud/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/certs/cocloud/cocloud-issue-ca2-key.pem
+    installToOSTrust: true
