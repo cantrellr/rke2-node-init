@@ -7297,6 +7297,12 @@ verify_custom_cluster_ca() {
 # ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
+  local artifact_dir="/opt/rke2/artifacts"
+
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    artifact_dir="${INSTALL_RKE2_ARTIFACT_PATH}"
+  fi
+
   # If operator provided a local artifact path, attempt to stage from it into STAGE_DIR
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
     log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; attempting to stage artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}' into '$STAGE_DIR'"
@@ -7309,6 +7315,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
       log INFO "Staged install.sh"
+    elif [[ -f "$artifact_dir/install.sh" ]]; then
+      cp "$artifact_dir/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
+      log INFO "Staged install.sh from $artifact_dir"
     else
       log ERROR "Missing install.sh. Run 'image' first."; missing=1
     fi
@@ -7317,6 +7326,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
       cp "$DOWNLOADS_DIR/$RKE2_TARBALL" "$STAGE_DIR/"
       log INFO "Staged RKE2 tarball"
+    elif [[ -f "$artifact_dir/$RKE2_TARBALL" ]]; then
+      cp "$artifact_dir/$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged RKE2 tarball from $artifact_dir"
     else
       log ERROR "Missing $RKE2_TARBALL. Run 'image' first."; missing=1
     fi
@@ -7325,6 +7337,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
       cp "$DOWNLOADS_DIR/$SHA256_FILE" "$STAGE_DIR/"
       log INFO "Staged SHA256 file"
+    elif [[ -f "$artifact_dir/$SHA256_FILE" ]]; then
+      cp "$artifact_dir/$SHA256_FILE" "$STAGE_DIR/"
+      log INFO "Staged SHA256 file from $artifact_dir"
     else
       log ERROR "Missing $SHA256_FILE. Run 'image' first."; missing=1
     fi
@@ -8217,6 +8232,14 @@ cache_rke2_artifacts() {
   # checksum manifest that contains only tarball entries that were actually
   # staged/cached (images tarball(s) and RKE2 tarball). This avoids shipping
   # a manifest containing many unrelated files.
+  if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
+    local tmp_install="$STAGE_DIR/.tmp-install.sh.$$"
+    cp -f "$DOWNLOADS_DIR/install.sh" "$tmp_install"
+    mv -T "$tmp_install" "$STAGE_DIR/install.sh"
+    chmod +x "$STAGE_DIR/install.sh" || true
+    log INFO "Staged install.sh into $STAGE_DIR"
+  fi
+
   if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
     local tmpf="$STAGE_DIR/.tmp-${RKE2_TARBALL}.$$"
     cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"

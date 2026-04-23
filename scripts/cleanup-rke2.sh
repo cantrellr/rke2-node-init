@@ -6,6 +6,7 @@ set -Eeuo pipefail
 
 FORCE=0
 DRY_RUN=0
+PURGE_OFFLINE_ARTIFACTS=0
 
 while (( $# )); do
   case "$1" in
@@ -17,6 +18,10 @@ while (( $# )); do
       DRY_RUN=1
       shift
       ;;
+    --purge)
+      PURGE_OFFLINE_ARTIFACTS=1
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage: cleanup-rke2.sh [OPTIONS]
@@ -24,6 +29,7 @@ Usage: cleanup-rke2.sh [OPTIONS]
 Options:
   -f, --force, -y, --yes   Skip confirmation prompt and remove files immediately (must run as root)
   -n, --dry-run            Show what would be removed but don't actually delete anything
+  --purge                  Also remove /opt/rke2/stage and /opt/rke2/artifacts
   -h, --help               Show this help message
 EOF
       exit 0
@@ -43,17 +49,31 @@ fi
 # Directories to remove
 declare -a targets=(
   "/etc/rancher/"
-  "/opt/rke2/"
   "/rke2-node-init/downloads/"
   "/rke2-node-init/logs/"
   "/rke2-node-init/outputs/"
   "/var/lib/rancher/"
 )
 
+if [[ $PURGE_OFFLINE_ARTIFACTS -eq 1 ]]; then
+  targets+=(
+    "/opt/rke2/stage/"
+    "/opt/rke2/artifacts/"
+  )
+fi
+
 echo "The following directories will be permanently removed:"
 for d in "${targets[@]}"; do
   echo "  $d"
 done
+
+if [[ $PURGE_OFFLINE_ARTIFACTS -ne 1 ]]; then
+  echo
+  echo "Preserving offline artifacts by default:"
+  echo "  /opt/rke2/stage/"
+  echo "  /opt/rke2/artifacts/"
+  echo "Use --purge to remove them."
+fi
 
 
 if [[ $FORCE -ne 1 ]]; then
