@@ -61,7 +61,7 @@ When using rke2-node-init:
 
 2. **Certificate Handling**
    - Rotate certificates regularly
-   - Use certificate generation scripts in `certs/scripts/`
+   - Use certificate generation scripts in `scripts/certs/`
    - Keep private keys with restrictive permissions (600 or 400)
 
 3. **Air-Gapped Deployments**
@@ -110,4 +110,4 @@ If you have questions about this security policy, please open a general issue (n
 
 ---
 
-Last Updated: 2026-02-13
+Last Updated: 2026-04-24

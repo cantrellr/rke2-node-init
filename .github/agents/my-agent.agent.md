@@ -53,8 +53,8 @@ Supported Actions
 Certificate Workflow
 --------------------
 The repository includes automated CA generation using Make targets:
-- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA (AES-256) with safe permissions
-- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA from YAML specification
+- `./scripts/certs/generate-root-ca.sh` - Generate encrypted root CA (AES-256) with safe permissions
+- `./scripts/certs/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA from YAML specification
 - `make certs-verify` - Validate OpenSSL availability and display security reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify certificate chain integrity
 
@@ -237,8 +237,8 @@ The repository is organized for modular offline operations:
 - custom-ca-example.yaml, verify-example.yaml
 
 **Make Targets**: `Makefile`
-- `./certs/scripts/generate-root-ca.sh` - Generate encrypted root CA
-- `./certs/scripts/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA
+- `./scripts/certs/generate-root-ca.sh` - Generate encrypted root CA
+- `./scripts/certs/generate-subordinate-ca.sh --input <yaml>` - Generate subordinate CA
 - `make certs-verify` - Validate OpenSSL and display reminders
 - `make certs-assert ROOT=<crt> SUB=<crt>` - Verify chain
 - `make token` - Generate base64 tokens for cluster join
@@ -372,10 +372,10 @@ When assisting users, follow these principles:
 ./scripts/wsl-env/wsl-dev-setup.sh
 
 # Generate certificates for testing
-./certs/scripts/generate-root-ca.sh --out-dir certs/scripts/outputs/root-ca
-./certs/scripts/generate-subordinate-ca.sh --input examples/certs/rke2clusterCA-example.yaml \
-  --root-key certs/scripts/outputs/root-ca/root-ca-key.pem \
-  --root-cert certs/scripts/outputs/root-ca/root-ca.crt
+./scripts/certs/generate-root-ca.sh --out-dir scripts/certs/outputs/root-ca
+./scripts/certs/generate-subordinate-ca.sh --input examples/certs/rke2clusterCA-example.yaml \
+  --root-key scripts/certs/outputs/root-ca/root-ca-key.pem \
+  --root-cert scripts/certs/outputs/root-ca/root-ca.crt
 
 # Validate scripts
 find . -name "*.sh" -exec bash -n {} \;

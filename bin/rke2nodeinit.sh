@@ -2036,10 +2036,10 @@ WORKFLOW EXAMPLES:
        --boot-yaml-path configs/preprod/nodes --boot-mode oneshot
 
   3. Initialize first control-plane with multi-interface networking:
-     sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
+      sudo ./rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml
 
   4. Join worker node:
-     sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
+      sudo ./rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-work01.yaml
 
   5. Push images to private registry:
      sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret

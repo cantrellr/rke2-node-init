@@ -1,3 +1,7 @@
+# Historical Note
+
+This document is retained as an implementation history artifact. It references an older `vm-configs/` layout that is no longer present in the active repository tree. For current operational workflows, use [README.md](../README.md), [docs/README.md](README.md), and [vm/docs/README.md](../vm/docs/README.md).
+
 # GitOps VM Configuration Workflow - Implementation Summary
 
 **Branch**: `feature/gitops-vm-config-workflow`  

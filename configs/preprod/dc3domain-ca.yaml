@@ -1,7 +1,7 @@
 apiVersion: rkeprep/v2
 kind: CustomCA
 metadata:
-  name: j64domain-ca
+  name: dc3domain-ca
 spec:
   customCA:
     rootCrt: /opt/rke2/stage/certs/dev-certa001-ca-dev-local.crt

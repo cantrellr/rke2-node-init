@@ -14,9 +14,7 @@ Thanks for contributing. This guide covers the current workflow, repository layo
 ```
 .
 ├── bin/                    # Main executable (rke2nodeinit.sh)
-├── certs/                  # Certificate materials and generation scripts
-├── clusters/               # Cluster-scoped rkeprep/v2 YAML manifests
-├── configs/                # Additional configuration manifests
+├── configs/                # Environment and cluster rkeprep/v2 YAML manifests
 ├── docs/                   # Technical docs and redesign archive
 ├── examples/               # Demo scripts and YAML examples
 ├── scripts/                # Supporting utilities and operational scripts
@@ -53,7 +51,7 @@ python3 -c "import json; json.load(open('vm-configs/schema.json'))"
 ### Markdown
 
 ```bash
-markdownlint README.md docs/**/*.md certs/**/*.md examples/**/*.md
+markdownlint README.md docs/**/*.md scripts/**/*.md examples/**/*.md
 ```
 
 ### Repository Tests
@@ -89,6 +87,10 @@ When behavior changes, update all relevant docs in the same PR:
 
 - [README.md](README.md)
 - [docs/README.md](docs/README.md)
+- [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md)
+- [docs/OPERATIONAL-RUNBOOK.md](docs/OPERATIONAL-RUNBOOK.md)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [docs/TESTING-GUIDE.md](docs/TESTING-GUIDE.md)
 - [examples/config/README.md](examples/config/README.md)
 - [CHANGELOG.md](CHANGELOG.md)
 
@@ -98,6 +100,8 @@ Documentation updates must include:
 2. Current action/flag names and supported kinds.
 3. Updated date metadata when present.
 4. Security-safe examples (no real credentials).
+5. `docs/MIGRATION-v2.0.md` updated when path or behavior changes are breaking.
+6. `docs/PR-VALIDATION-CHECKLIST.md` gates satisfied before merge.
 
 ## Pull Request Expectations
 

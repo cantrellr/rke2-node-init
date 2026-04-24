@@ -1,14 +1,14 @@
-# certs/scripts
+# scripts/certs
 
 This folder contains helper scripts for generating and validating CA materials used with RKE2. All scripts assume `openssl` is installed. Example commands below are shown from this directory.
 
-**Last Updated:** February 13, 2026
+**Last Updated:** April 24, 2026
 
 ## generate-ca.sh
 
-Generates a simple self-signed CA and a registry CA copy in the parent `certs/` directory.
+Generates a simple self-signed CA and a registry CA copy in the parent `scripts/` directory.
 
-Outputs (in `certs/`, because script writes to parent directory):
+Outputs (in `scripts/`, because the script writes to its parent directory):
 - `rke2ca-cert-key.pem` (CA private key)
 - `rke2ca-cert.crt` (CA certificate)
 - `rke2registry-ca.crt` (copy of CA cert for registry use)
@@ -81,7 +81,7 @@ Examples:
   --root-cert ./outputs/root-ca/root-ca.crt
 
 ./generate-subordinate-ca.sh \
-  --input ../rke2clusterCA.yaml \
+  --input ../../examples/certs/rke2clusterCA-example.yaml \
   --root-key ./outputs/root-ca/root-ca-key.pem \
   --root-cert ./outputs/root-ca/root-ca.crt
 

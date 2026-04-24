@@ -13,16 +13,24 @@
   - [Workflow Overview](#workflow-overview)
   - [Process Flow Chart](#process-flow-chart)
   - [Actions Breakdown](#actions-breakdown)
+  - [STIG Hardening Helper](#stig-hardening-helper)
   - [Command Reference](#command-reference)
     - [Common Flags](#common-flags)
     - [Makefile Helpers](#makefile-helpers)
   - [YAML Configuration Reference](#yaml-configuration-reference)
   - [Boot Service ISO Workflow](#boot-service-iso-workflow)
   - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
+  - [Certificate Management](#certificate-management)
+    - [Security Requirements](#security-requirements)
+    - [Directory Layout](#directory-layout)
+    - [Supported Generation Workflows](#supported-generation-workflows)
+    - [Integrating with `rkeprep/v2` Manifests](#integrating-with-rkeprepv2-manifests)
+    - [Operational Verification](#operational-verification)
+    - [CI Coverage](#ci-coverage)
+    - [Related Documentation](#related-documentation)
   - [Network Configuration Strategy](#network-configuration-strategy)
   - [Logging \& Observability](#logging--observability)
   - [Safety Controls \& Idempotency](#safety-controls--idempotency)
-  - [STIG Hardening Helper](#stig-hardening-helper)
   - [Generated Files \& Directory Layout](#generated-files--directory-layout)
   - [Verification \& Troubleshooting](#verification--troubleshooting)
   - [Maintenance \& Rollback Tips](#maintenance--rollback-tips)
@@ -164,13 +172,13 @@ The repository includes a STIG helper script and guidance for firewall zoning an
 
 ```bash
 # With a manifest
-sudo ./bin/rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f configs/preprod/preprod-vmware-v1.35.3+rke2r3-image.yaml image
 
 # Direct action without YAML
 sudo ./bin/rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
 
 # Print sanitized manifest for auditing
-sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
+sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml -P server
 ```
 
 ### Common Flags
@@ -275,6 +283,116 @@ Notes:
 
 ---
 
+## Certificate Management
+
+Certificate manifests used by bootstrap workflows live under `configs/cotpa/certs/`, while certificate generation utilities live under `scripts/certs/`.
+
+### Security Requirements
+
+- Never commit real private keys or production certificates.
+- Treat `*.pem` and `*.key` as sensitive material.
+- Generate CA assets on trusted hosts and move root keys to offline secure storage.
+- Use encrypted private keys whenever operationally feasible.
+
+### Directory Layout
+
+```text
+configs/cotpa/certs/
+├── *.crt / *.pem                  # Cluster/site CA material
+
+scripts/certs/
+├── generate-ca.sh
+├── generate-root-ca.sh
+├── generate-subordinate-ca.sh
+├── verify-chain.sh
+└── outputs/                       # Script-generated outputs (local use)
+```
+
+Example certificate fixtures live in `examples/certs/`.
+
+### Supported Generation Workflows
+
+1. Legacy single-CA helper:
+
+```bash
+./scripts/certs/generate-ca.sh --cn "Example RKE2 CA" --org "Example Org"
+```
+
+Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` under `scripts/certs/`.
+
+2. Root + subordinate CA chain (recommended):
+
+```bash
+# Create encrypted root CA
+./scripts/certs/generate-root-ca.sh --out-dir scripts/certs/outputs/root-ca
+
+# Create subordinate CA signed by root
+./scripts/certs/generate-subordinate-ca.sh \
+  --input examples/certs/rke2clusterCA-example.yaml \
+  --out-dir scripts/certs/outputs/sub-ca \
+  --root-key scripts/certs/outputs/root-ca/root-ca-key.pem \
+  --root-cert scripts/certs/outputs/root-ca/root-ca.crt
+```
+
+3. Chain verification:
+
+```bash
+./scripts/certs/verify-chain.sh \
+  --root scripts/certs/outputs/root-ca/root-ca.crt \
+  --sub scripts/certs/outputs/sub-ca/subordinate-ca.crt \
+  --sub-key scripts/certs/outputs/sub-ca/subordinate-ca-key.pem
+```
+
+### Integrating with `rkeprep/v2` Manifests
+
+Use `kind: CustomCA` manifests to reference CA assets consumed by `bin/rke2nodeinit.sh`:
+
+```yaml
+apiVersion: rkeprep/v2
+kind: CustomCA
+metadata:
+  name: cluster-ca
+spec:
+  customCA:
+    rootCrt: /rke2-node-init/configs/preprod/certs/root-ca.crt
+    rootKey: /rke2-node-init/configs/preprod/certs/root-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/preprod/certs/subordinate-ca.crt
+    intermediateKey: /rke2-node-init/configs/preprod/certs/subordinate-ca-key.pem
+    installToOSTrust: true
+```
+
+For sample values, see `examples/certs/rke2clusterCA-example.yaml`.
+
+### Operational Verification
+
+Useful checks before deployment:
+
+```bash
+openssl x509 -in scripts/certs/outputs/root-ca/root-ca.crt -noout -text
+openssl x509 -in scripts/certs/outputs/sub-ca/subordinate-ca.crt -noout -enddate
+openssl verify \
+  -CAfile scripts/certs/outputs/root-ca/root-ca.crt \
+  scripts/certs/outputs/sub-ca/subordinate-ca.crt
+```
+
+### CI Coverage
+
+- `tests/ci/test_ca_generation.sh`
+- `tests/ci/test_subordinate_encryption.sh`
+- `.github/workflows/certs-ci.yml`
+
+### Related Documentation
+
+- `scripts/certs/README.md`
+- `docs/CLI-REFERENCE.md`
+- `docs/OPERATIONAL-RUNBOOK.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/TESTING-GUIDE.md`
+- `SECURITY.md`
+- `README.md`
+
+---
+
 ## Network Configuration Strategy
 
 - Cloud-init network rendering is disabled (`/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg`).
@@ -310,8 +428,8 @@ Notes:
 │  ├─ <metadata.name>/               # run-specific exports (README, configs, CA copies)
 │  └─ sbom/                          # SBOM outputs per image (text inventory + SPDX 2.3 JSON)
 ├─ logs/                             # structured execution logs
-├─ certs/                            # example CA material consumed by manifests
-├─ rke2nodeinit.sh                   # the script
+├─ configs/                          # environment-scoped manifests and runtime cert material
+├─ bin/rke2nodeinit.sh               # primary entrypoint script
 └─ README.md
 ```
 

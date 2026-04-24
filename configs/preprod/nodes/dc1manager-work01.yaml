@@ -36,8 +36,8 @@ spec:
   - "role=worker"
   - "env=preprod"
   customCA:
-    rootCrt: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca.crt
-    rootKey: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca-key.pem
+    rootCrt: /rke2-node-init/configs/preprod/certs/root-ca.crt
+    rootKey: /rke2-node-init/configs/preprod/certs/root-ca-key.pem
     installToOSTrust: true
   disable:
   - rke2-ingress-nginx

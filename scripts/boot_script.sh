@@ -25,8 +25,8 @@ fi
 export VM_HOSTNAME
 
 # Formulate the path to the YAML file for rke2nodeinit.
-# Example: /home/adminlocal/preprod/k8s/j64manager/j64manager-ctrl01.yaml
-YAML_FILE="/home/adminlocal/preprod/k8s/j64manager/${VM_HOSTNAME}.yaml"
+# Example: /home/adminlocal/preprod/k8s/dc1domain/dc1domain-ctrl01.yaml
+YAML_FILE="/home/adminlocal/preprod/k8s/dc1domain/${VM_HOSTNAME}.yaml"
 
 if [[ ! -f "$YAML_FILE" ]]; then
   echo "Error: YAML file not found at $YAML_FILE"

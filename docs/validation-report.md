@@ -1,3 +1,7 @@
+# Historical Note
+
+This validation report includes historical path output that references the removed `vm-configs/` layout. Treat those lines as archived evidence only, not current repository structure.
+
 # RKE2 Configuration Validation Report
 
 **PR**: #66

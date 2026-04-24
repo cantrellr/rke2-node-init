@@ -14,7 +14,7 @@ mkdir -p outputs
 echo "1) Generate root CA (non-interactive with passphrase)"
 ROOT_PASS=testing-root-pass
 mkdir -p root
-${REPO_ROOT}/certs/scripts/generate-root-ca.sh --out-dir root --passphrase "${ROOT_PASS}"
+${REPO_ROOT}/scripts/certs/generate-root-ca.sh --out-dir root --passphrase "${ROOT_PASS}"
 
 echo "2) Generate subordinate key and CSR locally"
 mkdir -p sub
@@ -38,7 +38,7 @@ openssl x509 -req -in sub.csr -CA root-ca.crt -CAkey root-ca-key.pem -CAcreatese
 rm -f "$EXTFILE"
 
 echo "4) Run verify-chain.sh"
-${REPO_ROOT}/certs/scripts/verify-chain.sh --root ../root/root-ca.crt --sub sub.crt --sub-key sub.key
+${REPO_ROOT}/scripts/certs/verify-chain.sh --root ../root/root-ca.crt --sub sub.crt --sub-key sub.key
 
 echo "Test CA generation: PASS"
 popd >/dev/null

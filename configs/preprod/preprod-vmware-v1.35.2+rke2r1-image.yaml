@@ -13,14 +13,14 @@ spec:
   disable-default-registry-endpoint: true
   defaultDns: [4.2.2.2]
   defaultSearchDomains: [dev.kube, dev.local]
-#  customCA:
-#    rootCrt: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca.crt
-#    rootKey: /rke2-node-init/certs/scripts/outputs/root-ca/root-ca-key.pem
-#    intermediateCrt:
-#    intermediateKey:
-#    installToOSTrust: true
+  customCA:
+    rootCrt: /rke2-node-init/configs/preprod/certs/root-ca.crt
+    rootKey: /rke2-node-init/configs/preprod/certs/root-ca-key.pem
+    intermediateCrt:
+    intermediateKey:
+    installToOSTrust: true
   bootService:
     enabled: false
-  #  yamlPath: configs/preprod/nodes
+    yamlPath: configs/preprod/nodes
     mode: oneshot
     platform: vmware

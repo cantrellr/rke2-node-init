@@ -9,10 +9,10 @@ TO GENERATE A REAL CERTIFICATE:
      -key rke2ca-cert-key.pem \
      -out rke2ca-cert.crt \
      -subj "/CN=Your Organization RKE2 CA/O=Your Organization"
-4. Follow the instructions in certs/README.md
+4. Follow the instructions in scripts/certs/README.md
 
 SECURITY WARNING:
 - This is an EXAMPLE certificate for documentation
 - Real certificates should be generated with proper CN and validity
-- See certs/README.md for complete generation instructions
+- See scripts/certs/README.md for complete generation instructions
 -----END CERTIFICATE-----

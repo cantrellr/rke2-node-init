@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduced default CNI permissions remediation timer cadence for faster Multus/Canal bootstrap convergence: `OnBootSec=10s`, `OnUnitActiveSec=15s`, `AccuracySec=5s` in `scripts/systemd/rke2-cni-perms.timer`.
 - Refreshed repository documentation for technical accuracy against current codebase and workflows (README surfaces, config examples, cert generation guides, VM GitOps docs, WSL setup, and security policy metadata).
+- Normalized runtime `customCA` manifest paths to environment-scoped cert locations under `configs/<env>/certs/` for active COTPA and PREPROD manifests.
+- Standardized certificate utility references from legacy `certs/scripts/*` to `scripts/certs/*` across automation, CI, tests, and security guidance.
+- Added canonical v2.0 documentation set: `docs/CLI-REFERENCE.md`, `docs/OPERATIONAL-RUNBOOK.md`, `docs/TROUBLESHOOTING.md`, `docs/TESTING-GUIDE.md`, `docs/SCRIPTS-REFERENCE.md`, `docs/MIGRATION-v2.0.md`, and `docs/PR-VALIDATION-CHECKLIST.md`.
 
 ## [1.2.0] - 2026-02-13
 

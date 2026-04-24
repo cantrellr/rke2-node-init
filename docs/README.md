@@ -1,6 +1,6 @@
 # RKE2 Node Init Documentation Index
 
-**Last Updated:** April 22, 2026  
+**Last Updated:** April 24, 2026  
 **Project Status:** Active development (post-Phase 5 hardening/automation)
 
 ---
@@ -21,6 +21,13 @@ For operational entrypoints, start with:
 
 | Document | Purpose |
 | --- | --- |
+| [CLI-REFERENCE.md](CLI-REFERENCE.md) | Canonical CLI actions, flags, and command patterns |
+| [OPERATIONAL-RUNBOOK.md](OPERATIONAL-RUNBOOK.md) | End-to-end operational workflow from image build through node provisioning |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Failure signatures, triage flow, and remediation playbooks |
+| [TESTING-GUIDE.md](TESTING-GUIDE.md) | Local + CI validation workflow and required pre-PR test set |
+| [SCRIPTS-REFERENCE.md](SCRIPTS-REFERENCE.md) | Inventory of all operational scripts and utility tools |
+| [MIGRATION-v2.0.md](MIGRATION-v2.0.md) | Breaking path changes and migration checklist for v2.0 |
+| [PR-VALIDATION-CHECKLIST.md](PR-VALIDATION-CHECKLIST.md) | Merge-gate checklist for quality, path integrity, and release hygiene |
 | [HARDENED_CNI.md](HARDENED_CNI.md) | Hardened CNI plugin behavior, tag alignment, and offline staging guidance |
 | [RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md](RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md) | Golden image build flow for disconnected environments |
 | [STIG-README.md](STIG-README.md) | STIG helper execution model and persistent CNI permissions remediation |

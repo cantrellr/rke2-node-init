@@ -51,7 +51,7 @@ if [[ -z "${ROOT_PASS}" ]]; then
 fi
 
 echo "Generating Root CA in ${ROOT_OUT}..."
-./certs/scripts/generate-root-ca.sh --out-dir "${ROOT_OUT}" --cn "${ROOT_CN}" --passphrase "${ROOT_PASS}"
+./scripts/certs/generate-root-ca.sh --out-dir "${ROOT_OUT}" --cn "${ROOT_CN}" --passphrase "${ROOT_PASS}"
 ROOT_KEY_PATH="${ROOT_OUT}/root-ca-key.pem"
 ROOT_CERT_PATH="${ROOT_OUT}/root-ca.crt"
 
@@ -89,7 +89,7 @@ if [[ -n "${SUB_PASSFILE}" ]]; then
   SUB_FLAGS+=(--sub-passfile "${SUB_PASSFILE}")
 fi
 # shellcheck disable=SC2068
-./certs/scripts/generate-subordinate-ca.sh "${SUB_FLAGS[@]}"
+./scripts/certs/generate-subordinate-ca.sh "${SUB_FLAGS[@]}"
 
 SUB_KEY_PATH="${SUB_OUT}/subordinate-ca-key.pem"
 SUB_CERT_PATH="${SUB_OUT}/subordinate-ca.crt"

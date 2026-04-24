@@ -42,8 +42,8 @@ spec:
   disable:
   - rke2-ingress-nginx
   customCA:
-    rootCrt: /rke2-node-init/certs/cocloud/cocloud-ca.crt
-    rootKey: /rke2-node-init/certs/cocloud/cocloud-ca-key.pem
-    intermediateCrt: /rke2-node-init/certs/cocloud/cocloud-issue-ca2.crt
-    intermediateKey: /rke2-node-init/certs/cocloud/cocloud-issue-ca2-key.pem
+    rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
     installToOSTrust: true
