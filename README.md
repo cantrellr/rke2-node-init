@@ -267,6 +267,8 @@ Notes:
 - During the `image` action, `spec.customCA` paths can be relative or absolute and are resolved before trust/registry processing.
 - When `customCA.installToOSTrust: true`, both `customCA.rootCrt` and `customCA.intermediateCrt` (when present) are copied into `/usr/local/share/ca-certificates` as `*.crt`, then refreshed with `update-ca-certificates --verbose --fresh`.
 - When `spec.customCA` is present, `image` generates a bootstrap token file at `outputs/<metadata.name>-bootstrap-token.txt` using the same CA-hash token logic as the `custom-ca` action.
+- When boot service node manifests include `spec.tokenFile`, `image` also writes compatibility token aliases for token paths under `/rke2-node-init/outputs` so cloned nodes can consume a stable filename.
+- In `server` flow, when `spec.tokenFile` is provided but unreadable at runtime, initialization falls back to a generated first-server token instead of blocking startup.
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.

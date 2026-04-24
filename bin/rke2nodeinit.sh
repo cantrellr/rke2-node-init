@@ -6205,7 +6205,8 @@ generate_bootstrap_token() {
 
   # No custom CA context? Return the short token (Option A).
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
-    printf '%s' "$passphrase"
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
@@ -6219,14 +6220,18 @@ generate_bootstrap_token() {
   # If we cannot locate a CA file, revert to the short token.
   if [[ -z "$ca_cert" ]]; then
     log WARN "Custom CA context detected but certificate file missing; using short bootstrap token." >&2
-    printf '%s' "$passphrase"
+    [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]] && log WARN "Expected root certificate path: ${CUSTOM_CA_ROOT_CRT}" >&2
+    [[ -n "${CUSTOM_CA_INT_CRT:-}" ]] && log WARN "Expected intermediate certificate path: ${CUSTOM_CA_INT_CRT}" >&2
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
   ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
   if [[ -z "$ca_hash" ]]; then
     log WARN "Failed to derive custom CA hash from $ca_cert; using short bootstrap token." >&2
-    printf '%s' "$passphrase"
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
@@ -6235,7 +6240,7 @@ generate_bootstrap_token() {
     log ERROR "Failed to construct full bootstrap token despite having CA context." >&2
     return 1
   else
-  #  printf '%s' "$token"
+    printf '%s' "$token"
     log INFO "Generated secure server token" >&2
     log INFO "CustomCA:" >&2
     log INFO "  Fingerprint: $ca_hash" >&2
@@ -9466,15 +9471,78 @@ action_image() {
   if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
     local image_token=""
     local image_token_file="${OUT_DIR}/${SPEC_NAME:-image}-bootstrap-token.txt"
-    generate_bootstrap_token
-    image_token="$token"
-    if [[ -n "$image_token" ]]; then
-      printf '%s\n' "$image_token" > "$image_token_file"
-      chmod 600 "$image_token_file"
-      log_info "Custom CA bootstrap token generated: $image_token_file"
-    else
-      log_warn "Custom CA detected, but bootstrap token generation returned empty output."
+    local token_alias_yaml_dir=""
+    local _alias_manifest=""
+    local _alias_token_file=""
+    local _created_targets=""
+    local -A _written_token_targets=()
+
+    if [[ -n "$CA_ROOT" && ! -f "$CA_ROOT" ]]; then
+      log_error "Custom CA root certificate path is not readable during image action: $CA_ROOT"
+      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
+      exit 1
     fi
+    if [[ -n "$CA_INTCRT" && ! -f "$CA_INTCRT" ]]; then
+      log_error "Custom CA intermediate certificate path is not readable during image action: $CA_INTCRT"
+      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
+      exit 1
+    fi
+
+    CUSTOM_CA_ROOT_CRT="${CA_ROOT:-${CUSTOM_CA_ROOT_CRT:-}}"
+    CUSTOM_CA_ROOT_KEY="${CA_KEY:-${CUSTOM_CA_ROOT_KEY:-}}"
+    CUSTOM_CA_INT_CRT="${CA_INTCRT:-${CUSTOM_CA_INT_CRT:-}}"
+    CUSTOM_CA_INT_KEY="${CA_INTKEY:-${CUSTOM_CA_INT_KEY:-}}"
+
+    if ! image_token="$(generate_bootstrap_token)"; then
+      log_error "Custom CA bootstrap token generation failed during image action."
+      exit 1
+    fi
+
+    image_token="${image_token//$'\n'/}"
+    image_token="${image_token//$'\r'/}"
+    if [[ -z "$image_token" ]]; then
+      log_error "Custom CA bootstrap token generation returned empty output during image action."
+      exit 1
+    fi
+
+    mkdir -p "$(dirname "$image_token_file")"
+    printf '%s\n' "$image_token" > "$image_token_file"
+    chmod 600 "$image_token_file"
+    _written_token_targets["$image_token_file"]=1
+    log_info "Custom CA bootstrap token generated: $image_token_file"
+
+    if [[ -n "$boot_yaml_path_cfg" ]]; then
+      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$boot_yaml_path_cfg")"
+    elif [[ -n "${BOOT_YAML_PATH:-}" ]]; then
+      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$BOOT_YAML_PATH")"
+    fi
+
+    if [[ -n "$token_alias_yaml_dir" && -d "$token_alias_yaml_dir" ]]; then
+      while IFS= read -r _alias_manifest; do
+        _alias_token_file="$(yaml_spec_get "$_alias_manifest" tokenFile || true)"
+        [[ -n "$_alias_token_file" ]] || continue
+
+        if [[ "$_alias_token_file" != /rke2-node-init/outputs/* ]]; then
+          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile is outside /rke2-node-init/outputs: $_alias_token_file"
+          continue
+        fi
+
+        if [[ -n "${_written_token_targets["$_alias_token_file"]+x}" ]]; then
+          continue
+        fi
+
+        mkdir -p "$(dirname "$_alias_token_file")"
+        printf '%s\n' "$image_token" > "$_alias_token_file"
+        chmod 600 "$_alias_token_file" || true
+        _written_token_targets["$_alias_token_file"]=1
+        log_info "Created bootstrap token alias for $_alias_manifest: $_alias_token_file"
+      done < <(find "$token_alias_yaml_dir" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+    fi
+
+    for _alias_token_file in "${!_written_token_targets[@]}"; do
+      _created_targets+="${_created_targets:+, }${_alias_token_file}"
+    done
+    log_info "Bootstrap token artifacts created: ${_created_targets}"
   else
     log_info "No customCA stanza detected; skipping custom CA bootstrap token generation."
   fi
@@ -10595,8 +10663,28 @@ action_server() {
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN_FILE" ]]; then
-    log_info "Token file provided; skipping token expansion/generation."
-    TOKEN=""
+    local resolved_token_file="$TOKEN_FILE"
+    if [[ "$resolved_token_file" != /* ]]; then
+      if [[ -f "$REPO_ROOT/$resolved_token_file" ]]; then
+        resolved_token_file="$REPO_ROOT/$resolved_token_file"
+      fi
+    fi
+
+    if [[ -f "$resolved_token_file" && -r "$resolved_token_file" ]]; then
+      TOKEN_FILE="$resolved_token_file"
+      log_info "Token file provided and found; using token-file: $TOKEN_FILE"
+      TOKEN=""
+    else
+      log_warn "Token file provided but unavailable: $TOKEN_FILE"
+      log_warn "Falling back to generated first-server bootstrap token."
+      TOKEN_FILE=""
+      TOKEN="$(generate_bootstrap_token)"
+      if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
+        log_info "Using fallback generated secure first-server token (custom CA fingerprint embedded)."
+      else
+        log_info "Using fallback generated short first-server bootstrap token."
+      fi
+    fi
   elif [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
