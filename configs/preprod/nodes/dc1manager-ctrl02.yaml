@@ -1,0 +1,56 @@
+apiVersion: rkeprep/v2
+kind: AddServer
+metadata:
+  name: dc1manager-ctrl02
+spec:
+  hostname: dc1manager-ctrl02
+  # Bind to cluster communication interface
+  nodeIp: 10.1.1.217
+  bindAddress: 10.1.1.217
+  advertiseAddress: 10.1.1.217
+  cni:
+   - multus
+   - canal
+  interfaces:
+    - name: ens33
+      ip: 10.1.1.217
+      prefix: 24
+      gateway: 10.1.1.1
+      dns: ["4.2.2.2"]
+      searchDomains: [dev.kube, dev.local]
+    - name: ens35
+      ip: 172.16.69.61
+      prefix: 24
+      gateway:
+      dns: 
+      searchDomains: 
+    - name: ens36
+      ip: 172.16.255.241
+      prefix: 24
+      gateway:
+      dns: 
+      searchDomains: 
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=preprod"
+  tls-san:
+    - dc1manager-ctrl02
+    - dc1manager-ctrl02.dev.kube
+    - dc1manager-cluster
+    - dc1manager-cluster.dev.kube
+    - 10.1.1.217
+  service-cidr: 10.93.0.0/16
+  cluster-cidr: 10.243.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+  serverURL: https://10.1.1.215:9345
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  disable:
+  - rke2-ingress-nginx
+  customCA:
+    rootCrt: /rke2-node-init/configs/preprod/certs/root-ca.crt
+    rootKey: /rke2-node-init/configs/preprod/certs/root-ca-key.pem
+    installToOSTrust: true

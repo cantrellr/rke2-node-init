@@ -1,6 +1,50 @@
 # rke2nodeinit.sh
 
-`bin/rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without public Internet access.
+[![RKE Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml)
+[![VM Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml)
+[![Certs CI](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml)
+[![Tokenfile Verification](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Air-Gap Ready](https://img.shields.io/badge/Air--Gap-Ready-0A9396?style=for-the-badge&labelColor=001219)](#workflow-overview)
+[![Offline First](https://img.shields.io/badge/Offline-First-EE9B00?style=for-the-badge&labelColor=9B2226)](#workflow-overview)
+[![Shell](https://img.shields.io/badge/Shell-Bash-2A9D8F?style=for-the-badge&logo=gnu-bash&logoColor=white&labelColor=1D3557)](#command-reference)
+[![RKE2](https://img.shields.io/badge/Kubernetes-RKE2-3A86FF?style=for-the-badge&logo=kubernetes&logoColor=white&labelColor=023047)](#key-capabilities)
+
+```text
+ ____  _  _______     _   _  ___  ____  _____              
+|  _ \| |/ / ____|   | \ | |/ _ \|  _ \| ____|
+| |_) | ' /|  _|     |  \| | | | | | | |  _|
+|  _ <| . \| |___    | |\  | |_| | |_| | |
+|_| \_\_|\_\_____|   |_| \_|\___/|____/|_____|
+
+ ___ _   _ ___ _____
+|_ _| \ | |_ _|_   _|
+ | ||  \| || |  | |
+ | || |\  || |  | |
+|___|_| \_|___| |_|
+
+offline bootstrap and lifecycle automation for air-gapped RKE2
+```
+
+`bin/rke2nodeinit.sh` is a production-focused automation framework for building, validating, and operating fully offline Rancher RKE2 clusters on Ubuntu/Debian hosts. It combines air-gap artifact staging, registry mirroring, node bootstrap, OS-level hardening, and repeatable server/agent provisioning into one consistent workflow driven by CLI flags or `rkeprep/v2` YAML manifests.
+
+This repository is designed for platform and infrastructure teams that need Kubernetes delivery in disconnected, regulated, or high-assurance environments where reliability, traceability, and deterministic behavior matter more than convenience.
+
+At a glance, this project provides:
+
+- **Deterministic Air-Gap Operations**: Pull once in a connected environment, then install repeatedly offline with staged and validated artifacts.
+- **End-to-End Node Lifecycle Automation**: Move from image preparation to control-plane and worker provisioning using a single operational contract.
+- **Security-First Defaults**: Strong shell safety settings, strict input validation, secret masking, and hardened network/system behaviors.
+- **Operational Clarity**: Structured logs, explicit phase behavior, reproducible manifest-driven runs, and preflight verification support.
+
+Design principles for this repo:
+
+- **Offline-first execution model** for post-image workflows.
+- **Portable tooling** based on Bash and standard GNU/Linux utilities.
+- **Fail-fast validation** for missing images, bad tags, and invalid configuration.
+- **PR-friendly change control** with documentation, tests, and CI references aligned to production operations.
+
+Only the `image` action requires Internet access to gather artifacts. All other actions (`push`, `server`, `add-server`, `agent`, `verify`, and `airgap`) are intended to run without public Internet access when the environment is staged correctly.
 
 ---
 
@@ -13,15 +57,24 @@
   - [Workflow Overview](#workflow-overview)
   - [Process Flow Chart](#process-flow-chart)
   - [Actions Breakdown](#actions-breakdown)
+  - [STIG Hardening Helper](#stig-hardening-helper)
   - [Command Reference](#command-reference)
     - [Common Flags](#common-flags)
     - [Makefile Helpers](#makefile-helpers)
   - [YAML Configuration Reference](#yaml-configuration-reference)
+  - [Boot Service ISO Workflow](#boot-service-iso-workflow)
   - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
+  - [Certificate Management](#certificate-management)
+    - [Security Requirements](#security-requirements)
+    - [Directory Layout](#directory-layout)
+    - [Supported Generation Workflows](#supported-generation-workflows)
+    - [Integrating with `rkeprep/v2` Manifests](#integrating-with-rkeprepv2-manifests)
+    - [Operational Verification](#operational-verification)
+    - [CI Coverage](#ci-coverage)
+    - [Related Documentation](#related-documentation)
   - [Network Configuration Strategy](#network-configuration-strategy)
   - [Logging \& Observability](#logging--observability)
   - [Safety Controls \& Idempotency](#safety-controls--idempotency)
-  - [STIG Hardening Helper](#stig-hardening-helper)
   - [Generated Files \& Directory Layout](#generated-files--directory-layout)
   - [Verification \& Troubleshooting](#verification--troubleshooting)
   - [Maintenance \& Rollback Tips](#maintenance--rollback-tips)
@@ -32,11 +85,12 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
-- **Hardened CNI Alignment** – Uses `spec.rke2CNIVersion` when provided (or auto-selects a compatible tag) and stages `hardened-cni-plugins` into the RKE2 images directory for offline pulls.
+- **Hardened CNI Alignment** – Supports explicit or auto-detected tags for `hardened-cni-plugins`, `hardened-multus-cni`, and `hardened-flannel` (via `spec.rke2CNIVersion`, `spec.rke2MultusVersion`, and `spec.rke2FlannelVersion`) and stages required archives for offline pulls.
 - **CNI Image Preflight** – During `image`, validates that staged archives contain required images for configured `spec.cni` plugins (for example Multus/Canal) and fails fast when required images are missing.
 - **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
+- **First-Boot ISO Automation** – Optional boot service mode builds one ISO per node YAML (`metadata.name.iso`) and executes `rke2nodeinit.sh -f` from YAML discovered under `/config` on attached virtual CD media.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
 - **Operational Transparency** – Streams all steps to `logs/` with timestamps and hostnames. Long-running tasks show CLI spinners while stdout remains concise.
@@ -64,6 +118,8 @@
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer. Before install, staged artifacts are revalidated, including strict required image:tag presence checks.
 4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
+
+When `image`/`airgap` is run with boot service enabled, the script also generates per-node boot ISOs from a YAML directory (`bootService.yamlPath` or `--boot-yaml-path`). At first boot, the service mounts attached ISO media, selects the first YAML under `/config`, copies it into `/root/server-config`, and executes `rke2nodeinit.sh -f <copied-yaml> -y`.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v2`) that centralizes inputs and secrets.
 
@@ -160,13 +216,13 @@ The repository includes a STIG helper script and guidance for firewall zoning an
 
 ```bash
 # With a manifest
-sudo ./bin/rke2nodeinit.sh -f clusters/prod-image.yaml image
+sudo ./bin/rke2nodeinit.sh -f configs/preprod/preprod-vmware-v1.35.3+rke2r3-image.yaml image
 
 # Direct action without YAML
 sudo ./bin/rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
 
 # Print sanitized manifest for auditing
-sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
+sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml -P server
 ```
 
 ### Common Flags
@@ -182,6 +238,9 @@ sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `--enable-fips` | Enable OS FIPS mode (Ubuntu Pro) and prefer FIPS RKE2 builds |
 | `--fix-cni-permissions` | During `image`, install/enable timer-based CNI permission remediation |
+| `--enable-boot-service` | Install and enable first-boot automation for VM template workflows (`image`/`airgap` actions) |
+| `--boot-yaml-path PATH` | Directory containing per-node YAML files used to build boot ISOs |
+| `--boot-mode MODE` | Boot service mode: `oneshot` (run once) or `persistent` (rerun only when ISO YAML hash changes) |
 | `-h` | Display built-in help |
 
 ### Makefile Helpers
@@ -190,6 +249,8 @@ sudo ./bin/rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
+- `make boot-isos` builds one ISO per YAML from `BOOT_ISO_YAML_DIR` (default `configs/preprod/nodes`) and writes a manifest to `BOOT_ISO_MANIFEST`.
+- `make boot-isos-clean` removes generated boot ISO artifacts under `BOOT_ISO_OUTPUT_DIR`.
 
 ## YAML Configuration Reference
 
@@ -203,6 +264,8 @@ metadata:
 spec:
   rke2Version: v1.34.1+rke2r1
   rke2CNIVersion: v1.9.0-build20260116
+  rke2MultusVersion: v4.2.3-build20260120
+  rke2FlannelVersion: v0.28.0-build20260119
   registry: registry.example.local/rke2
   registryUsername: svc
   registryPassword: superSecret123!
@@ -212,6 +275,11 @@ spec:
     rootCrt: certs/root.crt
     intermediateCrt: certs/intermediate.crt
     installToOSTrust: true
+  bootService:
+    enabled: true
+    yamlPath: configs/preprod/nodes
+    mode: oneshot
+    platform: vmware
 ```
 
 **Supported spec keys (highlights):**
@@ -219,20 +287,155 @@ spec:
 - **Networking:** `ip`, `prefix`, `gateway`, `dns`, `searchDomains`
 - **TLS:** `tlsSans`, `token`, `tokenFile`
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
-- **Image prep:** `rke2Version`, `rke2CNIVersion`
+- **Image prep:** `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
+- **Boot service:** `bootService.enabled`, `bootService.yamlPath` (directory), `bootService.mode`, `bootService.platform`
 
 The script normalizes CSV values (commas or YAML lists) and masks secrets when printing sanitized output (`-P`).
 
 ---
 
+## Boot Service ISO Workflow
+
+1. Enable boot service in an `Image`/`Airgap` run (`bootService.enabled: true` or `--enable-boot-service`).
+2. Provide a YAML directory via `bootService.yamlPath` or `--boot-yaml-path`.
+3. The image workflow generates `metadata.name.iso` artifacts and a TSV manifest.
+4. During VM provisioning, attach one generated ISO as virtual CD media.
+5. On first boot, `rke2-boot.service` mounts ISO9660 media and finds the first `*.yaml`/`*.yml` under `/config`.
+6. The selected YAML is copied to `/root/server-config/<yaml-filename>` with `0600` permissions.
+7. The service executes `rke2nodeinit.sh -f <copied-yaml> -y`.
+8. In `persistent` mode, reruns occur only when the selected YAML hash changes.
+
+Notes:
+- Hostname matching is not required by the boot service.
+- ISO payload contract is `/config/<yaml>`.
+- The source YAML content is copied as-is into the ISO payload.
+
+---
+
 ## Offline Registry & CA Handling
 
-- Custom CA bundles can be referenced by relative or absolute paths. They are installed into `/usr/local/share/ca-certificates` when `installToOSTrust: true`.
+- During the `image` action, `spec.customCA` paths can be relative or absolute and are resolved before trust/registry processing.
+- When `customCA.installToOSTrust: true`, both `customCA.rootCrt` and `customCA.intermediateCrt` (when present) are copied into `/usr/local/share/ca-certificates` as `*.crt`, then refreshed with `update-ca-certificates --verbose --fresh`.
+- When `spec.customCA` is present, `image` generates a bootstrap token file at `outputs/<metadata.name>-bootstrap-token.txt` using the same CA-hash token logic as the `custom-ca` action.
+- When boot service node manifests include `spec.tokenFile`, `image` also writes compatibility token aliases for token paths under `/rke2-node-init/outputs` so cloned nodes can consume a stable filename.
+- In `server` flow, when `spec.tokenFile` is provided but unreadable at runtime, initialization falls back to a generated first-server token instead of blocking startup.
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.
+
+---
+
+## Certificate Management
+
+Certificate manifests used by bootstrap workflows live under `configs/cotpa/certs/`, while certificate generation utilities live under `scripts/certs/`.
+
+### Security Requirements
+
+- Never commit real private keys or production certificates.
+- Treat `*.pem` and `*.key` as sensitive material.
+- Generate CA assets on trusted hosts and move root keys to offline secure storage.
+- Use encrypted private keys whenever operationally feasible.
+
+### Directory Layout
+
+```text
+configs/cotpa/certs/
+├── *.crt / *.pem                  # Cluster/site CA material
+
+scripts/certs/
+├── generate-ca.sh
+├── generate-root-ca.sh
+├── generate-subordinate-ca.sh
+├── verify-chain.sh
+└── outputs/                       # Script-generated outputs (local use)
+```
+
+Example certificate fixtures live in `examples/certs/`.
+
+### Supported Generation Workflows
+
+1. Legacy single-CA helper:
+
+```bash
+./scripts/certs/generate-ca.sh --cn "Example RKE2 CA" --org "Example Org"
+```
+
+Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` under `scripts/certs/`.
+
+1. Root + subordinate CA chain (recommended):
+1. Root + subordinate CA chain (recommended):
+
+```bash
+# Create encrypted root CA
+./scripts/certs/generate-root-ca.sh --out-dir scripts/certs/outputs/root-ca
+
+# Create subordinate CA signed by root
+./scripts/certs/generate-subordinate-ca.sh \
+  --input examples/certs/rke2clusterCA-example.yaml \
+  --out-dir scripts/certs/outputs/sub-ca \
+  --root-key scripts/certs/outputs/root-ca/root-ca-key.pem \
+  --root-cert scripts/certs/outputs/root-ca/root-ca.crt
+```
+
+1. Chain verification:
+1. Chain verification:
+
+```bash
+./scripts/certs/verify-chain.sh \
+  --root scripts/certs/outputs/root-ca/root-ca.crt \
+  --sub scripts/certs/outputs/sub-ca/subordinate-ca.crt \
+  --sub-key scripts/certs/outputs/sub-ca/subordinate-ca-key.pem
+```
+
+### Integrating with `rkeprep/v2` Manifests
+
+Use `kind: CustomCA` manifests to reference CA assets consumed by `bin/rke2nodeinit.sh`:
+
+```yaml
+apiVersion: rkeprep/v2
+kind: CustomCA
+metadata:
+  name: cluster-ca
+spec:
+  customCA:
+    rootCrt: /rke2-node-init/configs/preprod/certs/root-ca.crt
+    rootKey: /rke2-node-init/configs/preprod/certs/root-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/preprod/certs/subordinate-ca.crt
+    intermediateKey: /rke2-node-init/configs/preprod/certs/subordinate-ca-key.pem
+    installToOSTrust: true
+```
+
+For sample values, see `examples/certs/rke2clusterCA-example.yaml`.
+
+### Operational Verification
+
+Useful checks before deployment:
+
+```bash
+openssl x509 -in scripts/certs/outputs/root-ca/root-ca.crt -noout -text
+openssl x509 -in scripts/certs/outputs/sub-ca/subordinate-ca.crt -noout -enddate
+openssl verify \
+  -CAfile scripts/certs/outputs/root-ca/root-ca.crt \
+  scripts/certs/outputs/sub-ca/subordinate-ca.crt
+```
+
+### CI Coverage
+
+- `tests/ci/test_ca_generation.sh`
+- `tests/ci/test_subordinate_encryption.sh`
+- `.github/workflows/certs-ci.yml`
+
+### Related Documentation
+
+- `scripts/certs/README.md`
+- `docs/CLI-REFERENCE.md`
+- `docs/OPERATIONAL-RUNBOOK.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/TESTING-GUIDE.md`
+- `SECURITY.md`
+- `README.md`
 
 ---
 
@@ -271,8 +474,8 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 │  ├─ <metadata.name>/               # run-specific exports (README, configs, CA copies)
 │  └─ sbom/                          # SBOM outputs per image (text inventory + SPDX 2.3 JSON)
 ├─ logs/                             # structured execution logs
-├─ certs/                            # example CA material consumed by manifests
-├─ rke2nodeinit.sh                   # the script
+├─ configs/                          # environment-scoped manifests and runtime cert material
+├─ bin/rke2nodeinit.sh               # primary entrypoint script
 └─ README.md
 ```
 
@@ -293,7 +496,7 @@ System locations used during installation:
 - `image`, `server`, and `agent` now fail fast when required chart/release image tags are not present in staged archives under `/var/lib/rancher/rke2/agent/images` and `/opt/rke2/stage`.
 - Log files provide timestamps and PIDs for forensic review. Search for `[ERROR]` or `[WARN]` entries to triage issues.
 - `outputs/<name>/README.txt` summarizes what `image` staged, including versions, registry endpoints, and next steps.
-- When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates` manually.
+- When custom CA installation fails, review `/usr/local/share/ca-certificates/` and rerun `update-ca-certificates --verbose --fresh` manually.
 - If Multus fails with `cannot find valid master CNI config` while Canal is present, apply the persistent CNI permissions remediation documented in [docs/STIG-README.md](docs/STIG-README.md#persistent-cni-permissions-remediation-canal--multus).
 
 ---

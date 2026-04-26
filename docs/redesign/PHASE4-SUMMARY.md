@@ -125,7 +125,7 @@ Enhanced error messages with remediation guidance:
 
 ```bash
 [ERROR] CLUSTER_TOKEN is not set
-[ERROR] Remediation: Add 'CLUSTER_TOKEN: <token>' to /configs/agent.yaml
+[ERROR] Remediation: Add 'token: <token>' or 'tokenFile: <path>' to configs/agent.yaml
 [ERROR] Get token from first server: cat /var/lib/rancher/rke2/server/node-token
 ```
 
@@ -141,7 +141,7 @@ All actions support `--dry-run` for validation:
 
 ```bash
 # Validate before deployment
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Review metrics without changes
 [INFO] Dry-run mode enabled - no changes will be made
@@ -218,7 +218,7 @@ bash -n /rke2/rke2-node-init/bin/rke2nodeinit.sh
 ```bash
 action_server() {
     # Load config
-    source /configs/server.yaml
+    source configs/server.yaml
     
     # Set hostname
     hostnamectl set-hostname "$NODE_NAME"
@@ -251,8 +251,8 @@ action_server() {
     # Phase 2: Validate Configuration
     report_progress "Validating configuration..." 2 8
     if [[ -z "$NODE_NAME" ]]; then
-        log_error "NODE_NAME is not set"
-        log_error "Remediation: Add 'NODE_NAME: hostname' to $CONFIG_FILE"
+        log_error "NODE_NAME/spec.hostname is not set"
+        log_error "Remediation: Set spec.hostname in your rkeprep/v2 manifest"
         return 1
     fi
     metrics_increment "config_validated"
@@ -401,17 +401,17 @@ EOF
 
 ```bash
 # Validate configuration
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Deploy with verbose output
-sudo ./rke2nodeinit.sh --verbose server
+sudo ./bin/rke2nodeinit.sh --verbose server
 
 # Output:
 [INFO] Dry-run mode enabled - no changes will be made
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [PROGRESS] [1/8] Loading configuration...
-[DEBUG] Loading site defaults from: /configs/site-defaults.yaml
-[DEBUG] Loading server config from: /configs/server.yaml
+[DEBUG] Loading site defaults from: configs/site-defaults.yaml
+[DEBUG] Loading server config from: configs/server.yaml
 ✓ Configuration loaded successfully
 ...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -430,7 +430,7 @@ config_validated            1
 
 ```bash
 # Deploy agent node
-sudo ./rke2nodeinit.sh agent
+sudo ./bin/rke2nodeinit.sh agent
 
 # Output shows clear progress
 [PROGRESS] [1/8] Loading configuration...
@@ -447,18 +447,18 @@ sudo ./rke2nodeinit.sh agent
 
 ```bash
 # Deploy first server
-sudo ./rke2nodeinit.sh server --config configs/server01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server01.yaml server
 
 # Add additional servers
-sudo ./rke2nodeinit.sh add-server --config configs/server02.yaml
-sudo ./rke2nodeinit.sh add-server --config configs/server03.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server02.yaml add-server
+sudo ./bin/rke2nodeinit.sh -f configs/server03.yaml add-server
 ```
 
 ### Airgap Template
 
 ```bash
 # Create VM template with pre-staged images
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 
 # Output:
 [INFO] Staging RKE2 images for airgap operation...

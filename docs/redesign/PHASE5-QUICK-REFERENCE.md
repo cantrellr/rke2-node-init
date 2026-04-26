@@ -648,7 +648,7 @@ server_deployment_20251116_143022_12345.csv
 #!/bin/bash
 source /rke2/rke2-node-init/bin/rke2nodeinit.sh
 enable_error_handling
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 ```
 
 ### Example 2: With Cleanup
@@ -658,7 +658,7 @@ enable_error_handling
 source /rke2/rke2-node-init/bin/rke2nodeinit.sh
 enable_error_handling
 register_cleanup "rm -rf /tmp/deployment-*"
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 ```
 
 ### Example 3: With Metrics
@@ -668,7 +668,7 @@ register_cleanup "rm -rf /tmp/deployment-*"
 source /rke2/rke2-node-init/bin/rke2nodeinit.sh
 enable_error_handling
 metrics_dashboard_init "deployment"
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 metrics_dashboard_display
 metrics_export_all
 ```

@@ -477,7 +477,7 @@ outputs/metrics/
 **Custom Location:**
 ```bash
 export METRICS_EXPORT_DIR="/var/log/rke2-metrics"
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 ```
 
 ---

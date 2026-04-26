@@ -1,17 +1,16 @@
 README Standardization Status
 
-Date: February 13, 2026
+Date: April 24, 2026
 
 Purpose:
 This document tracks README normalization efforts and confirms current canonical command paths and cross-reference expectations.
 
 Scope:
 - root README.md
-- certs/README.md
+- scripts/certs/README.md
 - examples/config/README.md
 - scripts/wsl-env/WSL-DEV-SETUP.md
 - vm/docs/README.md
-- vm-configs/README.md
 - any other README*.md found under subfolders
 
 Standard README structure (template):
@@ -26,7 +25,7 @@ Standard README structure (template):
 Current standardization checks:
 1. Identify all README files
 2. Ensure command paths match current tree (`bin/`, `examples/config/`, `scripts/wsl-env/`)
-3. Ensure certificate docs reference `certs/scripts/*` directly
+3. Ensure certificate docs reference `scripts/certs/*` directly
 4. Validate cross-links and refresh metadata dates
 
 Checklist (current cycle):

@@ -1,205 +1,136 @@
-# Hyper-V VM Name Configuration for Boot Service
+# Hyper-V Boot Service ISO Workflow
 
 ## Overview
 
-The RKE2 boot service needs to know the VM name to discover the correct configuration file. For Hyper-V VMs, the name must be set from the Hyper-V host using PowerShell.
+Boot service no longer depends on VM-name or hostname matching.
+
+Current behavior:
+- The first-boot service discovers attached ISO9660 media.
+- It selects the first YAML file found under `/config` inside the ISO.
+- It copies that YAML to `/root/server-config/` and runs `rke2nodeinit.sh -f <copied-yaml> -y`.
+- In `persistent` mode, it reruns only when the selected YAML hash changes.
 
 ## Prerequisites
 
-- Hyper-V host with PowerShell (Windows Server 2016+ or Windows 10/11 Pro)
-- Administrator access to the Hyper-V host
-- VMs must be running to accept KVP items
+- Hyper-V host with PowerShell access.
+- A template VM prepared with boot service enabled (`image` or `airgap` action).
+- Boot ISO artifacts built from your node YAML directory.
 
-## Setting VM Name for Single VM
+## Build Boot ISOs
 
-Run this PowerShell command on the **Hyper-V host** (not in the guest):
-
-```powershell
-# Set the VM name for a single VM
-$vmName = "cotpa-ctrl01"
-Set-VMKeyValuePairItem -VMName $vmName -Key "VirtualMachineName" -Value $vmName
-```
-
-### Verify the Setting
-
-```powershell
-# View all KVP items for a VM
-Get-VMKeyValuePairItem -VMName "cotpa-ctrl01"
-```
-
-## Setting VM Names for Multiple VMs
-
-For bulk configuration, use this script:
-
-```powershell
-# Set VM names for all VMs matching a pattern
-$vmNames = @(
-    "cotpa-ctrl01",
-    "cotpa-ctrl02",
-    "cotpa-ctrl03",
-    "cotpa-work01",
-    "cotpa-work02"
-)
-
-foreach ($vmName in $vmNames) {
-    try {
-        Set-VMKeyValuePairItem -VMName $vmName -Key "VirtualMachineName" -Value $vmName
-        Write-Host "✓ Set VirtualMachineName for $vmName" -ForegroundColor Green
-    } catch {
-        Write-Warning "Failed to set VirtualMachineName for $vmName : $_"
-    }
-}
-```
-
-## Setting VM Names for All VMs in a Cluster
-
-```powershell
-# Set VM name for all running VMs on the host
-Get-VM | Where-Object {$_.State -eq 'Running'} | ForEach-Object {
-    $vmName = $_.Name
-    try {
-        Set-VMKeyValuePairItem -VMName $vmName -Key "VirtualMachineName" -Value $vmName
-        Write-Host "✓ Configured $vmName" -ForegroundColor Green
-    } catch {
-        Write-Warning "Failed for $vmName : $_"
-    }
-}
-```
-
-## Verification from Guest
-
-After setting the VM name from the host, verify it's readable from within the guest VM:
-
-### Using PowerShell (if installed in guest)
+Option 1: use the Makefile helper.
 
 ```bash
-pwsh -NoProfile -Command '
-  $kvp0 = [System.IO.File]::ReadAllBytes("/var/lib/hyperv/.kvp_pool_0")
-  $text = [System.Text.Encoding]::ASCII.GetString($kvp0)
-  $lines = $text -split "\x00" | Where-Object {$_.Trim()}
-  for($i=0; $i -lt $lines.Count; $i++) {
-    if($lines[$i] -eq "VirtualMachineName" -and $i+1 -lt $lines.Count) {
-      Write-Output "VM Name: $($lines[$i+1].Trim())"
-      exit 0
-    }
-  }
-  Write-Output "VirtualMachineName not found"
-'
+cd /rke2-node-init
+make boot-isos \
+  BOOT_ISO_YAML_DIR=configs/preprod/nodes \
+  BOOT_ISO_OUTPUT_DIR=outputs/boot-isos
 ```
 
-### Using Bash
+Option 2: call the builder directly.
 
 ```bash
-cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | tr '\0' '\n' | grep -A1 "^VirtualMachineName$" | tail -1
+cd /rke2-node-init
+bash scripts/build-boot-isos.sh \
+  --yaml-dir configs/preprod/nodes \
+  --output-dir outputs/boot-isos \
+  --manifest outputs/boot-isos/manifest.tsv
 ```
 
-## Boot Service Behavior
+Expected artifacts:
+- `outputs/boot-isos/<metadata.name>.iso`
+- `outputs/boot-isos/manifest.tsv`
 
-The boot service hostname detection follows this priority:
+## ISO Payload Contract
 
-1. **PowerShell method** (if `pwsh` is available): Reads `VirtualMachineName` from KVP pool_0
-2. **Bash method**: Reads `VirtualMachineName` from KVP pool_0 using grep
-3. **Fallback**: Uses guest OS hostname via `hostname` command
+The ISO must contain YAML under this path:
+
+- `/config/<yaml-file>`
+
+The YAML content is copied into the ISO as-is.
+
+## Hyper-V Provisioning Steps
+
+### 1. Attach ISO as virtual DVD
+
+Run on the Hyper-V host:
+
+```powershell
+$vmName = "dc1manager-ctrl01"
+$isoPath = "C:\VM-ISO\dc1manager-ctrl01.iso"
+
+# Attach (or replace) DVD media
+Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue | Remove-VMDvdDrive -ErrorAction SilentlyContinue
+Add-VMDvdDrive -VMName $vmName -Path $isoPath
+```
+
+### 2. Start VM
+
+```powershell
+Start-VM -Name "dc1manager-ctrl01"
+```
+
+## What Happens at Boot
+
+1. `rke2-boot.service` starts.
+2. The script scans attached ISO9660 devices.
+3. It mounts each ISO read-only and looks for `*.yaml`/`*.yml` under `/config`.
+4. It selects the first YAML found.
+5. It copies the file to `/root/server-config/<yaml-filename>` with mode `0600`.
+6. It executes `rke2nodeinit.sh -f /root/server-config/<yaml-filename> -y`.
+7. In `oneshot` mode, systemd creates `/var/lib/rke2-boot-complete` and does not run again.
+8. In `persistent` mode, rerun happens only when the YAML hash differs from `/var/lib/rke2-boot-last-iso.sha256`.
+
+## Verification
+
+```bash
+sudo systemctl status rke2-boot
+sudo journalctl -u rke2-boot -n 200 --no-pager
+```
+
+Look for these log patterns:
+- `Step 1: Discover attached configuration ISO`
+- `Config path: /config/<yaml>`
+- `Step 4: Execute RKE2 node initialization`
 
 ## Troubleshooting
 
-### VM Name Not Found in Guest
+### No ISO detected
 
-**Symptom**: Guest cannot read the VirtualMachineName
+Symptoms:
+- `No attached ISO media detected (type iso9660).`
 
-**Solutions**:
-1. Ensure VM is running when you set the KVP item
-2. Restart the `hv_kvp_daemon` service in the guest:
-   ```bash
-   sudo systemctl restart hv-kvp-daemon
-   ```
-3. Verify KVP daemon is running:
-   ```bash
-   sudo systemctl status hv-kvp-daemon
-   ```
+Checks:
+- Confirm ISO is attached as DVD in Hyper-V.
+- Confirm guest sees optical block device (`lsblk -f`).
 
-### Permission Denied Reading KVP Files
+### ISO found but no YAML selected
 
-**Symptom**: Cannot read `/var/lib/hyperv/.kvp_pool_0`
+Symptoms:
+- `ISO on <device> does not contain a YAML file under /config`
+- `No attached ISO provided /config/<yaml>`
 
-**Solution**:
-```bash
-# The boot service runs as root, but for manual testing:
-sudo cat /var/lib/hyperv/.kvp_pool_0
-```
+Checks:
+- Verify ISO has `/config/<yaml>` (not `/configs`).
+- Rebuild ISO if needed using `scripts/build-boot-isos.sh`.
 
-### Boot Service Uses Hostname Instead of VM Name
+### Persistent mode skipped execution
 
-**Symptom**: Boot service logs show hostname instead of expected VM name
+Symptom:
+- `Persistent mode: ISO config hash unchanged; skipping bootstrap`
 
-**Causes**:
-1. VM name not set from Hyper-V host
-2. KVP daemon not running in guest
-3. Guest hasn't refreshed KVP data
+Meaning:
+- Selected YAML content hash is unchanged from last successful run.
 
-**Solution**: Set VM name from host and verify in guest as shown above
+### Bootstrap command failed
 
-## Alternative: Use Hostname Matching
+Symptom:
+- `RKE2 node initialization failed`
 
-If you prefer not to configure KVP items from the host, you can:
+Checks:
+- Review `rke2-boot` logs and `rke2nodeinit` logs under `logs/`.
+- Validate YAML syntax and required fields (`apiVersion`, `kind`, action-specific spec fields).
 
-1. **Set guest hostname to match config file name** during VM provisioning
-2. **Use cloud-init** to set hostname from metadata
-3. **Configure hostname** via netplan or systemd-hostnamed
+## Legacy Note
 
-Example cloud-init configuration:
-```yaml
-#cloud-config
-hostname: cotpa-ctrl01
-fqdn: cotpa-ctrl01.k8.cantrellcloud.net
-```
-
-## Best Practices
-
-1. **Set VM names immediately after cloning** from template
-2. **Use consistent naming convention** (e.g., `cluster-role-number`)
-3. **Match VM name to config file name exactly** (e.g., VM "cotpa-ctrl01" → config "cotpa-ctrl01.yaml")
-4. **Document your naming scheme** for the operations team
-5. **Automate VM name setting** in your provisioning scripts
-
-## Example: Complete Workflow
-
-### 1. On Hyper-V Host (PowerShell)
-
-```powershell
-# Clone template VM
-$templateVM = "cotpa-template"
-$newVMName = "cotpa-ctrl01"
-
-# Clone the VM
-Export-VM -Name $templateVM -Path "C:\Temp\Export"
-Import-VM -Path "C:\Temp\Export\$templateVM\*\*.vmcx" -Copy -GenerateNewId
-Rename-VM -Name $templateVM -NewName $newVMName
-
-# Set VM name in KVP
-Set-VMKeyValuePairItem -VMName $newVMName -Key "VirtualMachineName" -Value $newVMName
-
-# Start the VM
-Start-VM -Name $newVMName
-```
-
-### 2. Verify in Guest (after boot)
-
-```bash
-# Check what name the boot service will use
-sudo journalctl -u rke2-boot -n 50 | grep "Result:"
-```
-
-### 3. Expected Output
-
-```
-[INFO]   Result: cotpa-ctrl01
-[INFO] Step 2: Search for matching configuration file
-[INFO]   Searching: /rke2-node-init/configs
-[INFO]   ✓ Found: /rke2-node-init/configs/cotpa-ctrl01.yaml
-```
-
-## References
-
-- [Hyper-V KVP Exchange Documentation](https://docs.microsoft.com/en-us/virtualization/hyper-v-on-windows/reference/integration-services#key-value-pair-exchange)
-- [Set-VMKeyValuePairItem Cmdlet](https://docs.microsoft.com/en-us/powershell/module/hyper-v/set-vmkeyvaluepairitem)
+`VirtualMachineName` KVP and hostname-based config matching are no longer required for boot service operation. You can still use KVP for other automation workflows, but boot-service config selection is now ISO-path based (`/config`).

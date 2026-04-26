@@ -447,7 +447,7 @@ No changes required to existing code. Phase 5 features are opt-in:
 
 ```bash
 # Existing code works unchanged
-./rke2nodeinit.sh server
+./bin/rke2nodeinit.sh server
 
 # Enable Phase 5 features when ready
 enable_error_handling

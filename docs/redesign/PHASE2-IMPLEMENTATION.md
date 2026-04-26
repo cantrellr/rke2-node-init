@@ -579,6 +579,9 @@ Starting RKE2 Golden Image Preparation
 ==========================================
 [INFO] Configuration:
 [INFO]   RKE2_VERSION: v1.28.1+rke2r1
+[INFO]   HARDENED_CNI_TAG: <auto-detect>
+[INFO]   HARDENED_MULTUS_TAG: <auto-detect>
+[INFO]   HARDENED_FLANNEL_TAG: <auto-detect>
 [INFO]   REGISTRY: registry.example.com/rke2
 [PROGRESS] [1/8] Validating environment...
 [PROGRESS] [2/8] Loading configuration...
@@ -812,5 +815,5 @@ metrics_get "counter"  # Should output: 5
 ---
 
 **Document Version:** 1.0  
-**Last Updated:** November 16, 2025  
+**Last Updated:** February 16, 2026  
 **Maintainer:** rke2-node-init team

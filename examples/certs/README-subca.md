@@ -2,14 +2,14 @@
 
 This folder contains a sample YAML used by the subordinate CA generator.
 
-This folder contains sample YAML used by `certs/scripts/generate-subordinate-ca.sh`.
+This folder contains sample YAML used by `scripts/certs/generate-subordinate-ca.sh`.
 
 ## Usage
 
 Interactive (script prompts for missing values):
 
 ```bash
-./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+./scripts/certs/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
   --root-key /path/to/root-key.pem \
   --root-cert /path/to/root-cert.pem
 ```
@@ -17,7 +17,7 @@ Interactive (script prompts for missing values):
 Fully non-interactive (including encrypted root key passphrase):
 
 ```bash
-./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+./scripts/certs/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
   --root-key /path/to/root-key.pem \
   --root-cert /path/to/root-cert.pem \
   --root-passphrase 'rootpassphrase'
@@ -26,8 +26,8 @@ Fully non-interactive (including encrypted root key passphrase):
 Specify output directory and encrypted subordinate key:
 
 ```bash
-./certs/scripts/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
-  --out-dir certs/scripts/outputs/sub-ca \
+./scripts/certs/generate-subordinate-ca.sh --input examples/certs/subca-input.yaml \
+  --out-dir scripts/certs/outputs/sub-ca \
   --root-key /path/to/root-key.pem \
   --root-cert /path/to/root-cert.pem \
   --encrypt-sub-key --sub-passphrase 'subordinate-passphrase'

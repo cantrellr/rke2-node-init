@@ -320,6 +320,9 @@ Starting RKE2 Golden Image Preparation
 
 [INFO] Configuration:
 [INFO]   RKE2_VERSION: v1.28.1+rke2r1
+[INFO]   HARDENED_CNI_TAG: <auto-detect>
+[INFO]   HARDENED_MULTUS_TAG: <auto-detect>
+[INFO]   HARDENED_FLANNEL_TAG: <auto-detect>
 [INFO]   REGISTRY: registry.example.com/rke2
 [INFO]   REG_USER: admin
 [INFO] Directories:

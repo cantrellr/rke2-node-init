@@ -1,12 +1,12 @@
 # 🗺️ RKE2 Node Init - Project Roadmap
 
-**Last Updated:** February 13, 2026  
-**Status:** Active Development - **Post-Phase 5 Hardening & Automation**  
+**Last Updated:** April 25, 2026  
+**Status:** Active Development - **Documentation Refresh, Validation, and CI Expansion**  
 **GitHub Issues:** [View All Issues](https://github.com/cantrellr/rke2-node-init/issues)
 
 ---
 
-## 🎯 Major Milestone: Phases 1-5 Completed!
+## 🎯 Major Milestone: Phases 1-5 Completed
 
 **Achievement Date:** November 16, 2025  
 **Total Refactoring:** ~3,500+ lines across 8 actions + 17 reliability functions  
@@ -39,13 +39,16 @@
 
 - **Total Issues:** 12
 - **Completed:** 6/12 (50%) - *Including Phases 1-4*
-- **In Progress:** 0/12
-- **Not Started:** 6/12
+- **In Progress:** 1/12 *(Issue #46 CI/CD pipeline)*
+- **Not Started:** 5/12
 
 ---
 
 ## 🆕 Recent Updates (Current Cycle)
 
+- Root README header was refreshed with CI/status badges and improved project branding.
+- Validation workflow coverage is now active in repo workflows for RKE configs, VM configs, cert checks, tokenfile verification, and VM config application.
+- Shell-based regression tests were expanded under `tests/` to cover tokenfile paths, stage image validation, hardened CNI fetch behavior, and bootstrap token contracts.
 - Hardened CNI staging now aligns to the chart-required tag to avoid offline pull mismatches.
 - Added `--enable-fips` flow for Ubuntu Pro FIPS enablement and FIPS RKE2 builds.
 - Added persistent Multus/Canal CNI permissions remediation assets (`fix-cni-perms.sh` + `rke2-cni-perms.service` + `rke2-cni-perms.timer`).
@@ -163,18 +166,24 @@
 ## 🟡 Sprint 4: Long Term (Q2 2026)
 
 **Target:** Complete by end of Q2 2026  
-**Progress:** 0/4 started
+**Progress:** 1/4 in progress
 
 ### ⏳ Issue #46: Build CI/CD Pipeline
-- **Status:** ⏳ **TODO**
+- **Status:** 🔄 **IN PROGRESS**
 - **Priority:** P3 - Infrastructure
 - **Effort:** 1 week
 - **Labels:** `P3`, `infrastructure`
 - **Link:** [#46](https://github.com/cantrellr/rke2-node-init/issues/46)
-- **Workflows:**
-  - `.github/workflows/test.yml` - Testing
-  - `.github/workflows/security.yml` - Security scanning
-  - `.github/workflows/release.yml` - Release automation
+- **Workflows (Current):**
+  - `.github/workflows/validate-rke-configs.yml` - RKE config validation
+  - `.github/workflows/validate-vm-configs.yml` - VM config validation
+  - `.github/workflows/certs-ci.yml` - Certificate checks
+  - `.github/workflows/verify-tokenfile.yml` - Tokenfile guardrails
+  - `.github/workflows/apply-vm-configs.yml` - VM config application
+- **Remaining:**
+  - Add consolidated test workflow
+  - Add security scanning workflow
+  - Add release automation workflow
 
 ### ⏳ Issue #47: Add Health Check & Backup Actions
 - **Status:** ⏳ **TODO**
@@ -210,7 +219,8 @@
 ### Code Quality
 - **ShellCheck Warnings:** 3 (down from 3)
 - **Documentation Coverage:** 95% (excellent)
-- **Test Coverage:** 0% (target: 80%)
+- **Coverage Instrumentation:** Not yet implemented (target: 80%)
+- **Automated Test Scripts:** 6 shell tests currently under `tests/`
 
 ### Security Posture
 - **Critical Vulnerabilities:** 2 open (Issues #38, #40)
@@ -231,9 +241,9 @@
 - ✅ Create .gitignore
 - ⏳ Remove private keys
 - ⏳ Remove hardcoded credentials
-- ⏳ Fix CRLF issues
+- ✅ Fix CRLF issues
 
-**Progress:** 2/4 (50%)
+**Progress:** 3/4 (75%)
 
 ### Milestone 2: Quality & Testing (December 2025)
 - ⏳ Fix ShellCheck warnings
@@ -244,16 +254,21 @@
 **Progress:** 0/4 (0%)
 
 ### Milestone 3: Automation & Monitoring (Q1 2026)
-- ⏳ Build CI/CD pipeline
+- 🔄 Build CI/CD pipeline
 - ⏳ Add operational features
 - ⏳ Implement audit logging
 - ⏳ Add monitoring
 
-**Progress:** 0/4 (0%)
+**Progress:** 1/4 in progress
 
 ---
 
 ## 🔄 Recent Updates
+
+### April 25, 2026
+- ✅ Refreshed root README with improved visual identity and CI/status badges
+- ✅ Confirmed active validation workflow set in `.github/workflows/` for config/cert/token checks
+- ✅ Expanded shell regression coverage in `tests/` and reflected current test baseline in roadmap metrics
 
 ### February 13, 2026
 - ✅ Hardened CNI staging now aligns with chart-required tags for offline parity
@@ -311,6 +326,6 @@ gh issue close 39 --comment "Fixed CRLF line endings"
 
 ---
 
-**Next Review:** March 1, 2026  
+**Next Review:** May 15, 2026  
 **Team:** RKE2 DevOps  
 **Repository:** [cantrellr/rke2-node-init](https://github.com/cantrellr/rke2-node-init)

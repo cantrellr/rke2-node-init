@@ -10,16 +10,16 @@
 
 ```bash
 # Initialize first control plane node
-sudo ./rke2nodeinit.sh server
+sudo ./bin/rke2nodeinit.sh server
 
 # Deploy worker node
-sudo ./rke2nodeinit.sh agent
+sudo ./bin/rke2nodeinit.sh agent
 
 # Add control plane node to cluster
-sudo ./rke2nodeinit.sh add-server
+sudo ./bin/rke2nodeinit.sh add-server
 
 # Create airgap VM template
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 ```
 
 ### Global Flags
@@ -36,13 +36,13 @@ sudo ./rke2nodeinit.sh airgap
 
 ```bash
 # Validate server configuration
-sudo ./rke2nodeinit.sh --dry-run server
+sudo ./bin/rke2nodeinit.sh --dry-run server
 
 # Deploy agent with verbose logging
-sudo ./rke2nodeinit.sh --verbose agent
+sudo ./bin/rke2nodeinit.sh --verbose agent
 
 # Validate add-server in quiet mode
-sudo ./rke2nodeinit.sh --dry-run --quiet add-server
+sudo ./bin/rke2nodeinit.sh --dry-run --quiet add-server
 ```
 
 ---
@@ -244,7 +244,7 @@ AIRGAP_IMAGES_FILE: "/downloads/rke2-images.linux-amd64.tar.zst"
 **Missing Configuration:**
 ```
 [ERROR] NODE_NAME is not set
-[ERROR] Remediation: Add 'NODE_NAME: hostname' to /configs/server.yaml
+[ERROR] Remediation: Add 'spec.hostname: <node-name>' to configs/server.yaml
 ```
 
 **File Not Found:**
@@ -268,7 +268,7 @@ AIRGAP_IMAGES_FILE: "/downloads/rke2-images.linux-amd64.tar.zst"
 ### Configuration Files
 
 ```
-/configs/
+configs/
   site-defaults.yaml       # Site-wide defaults
   server.yaml              # Server node configuration
   agent.yaml               # Agent node configuration
@@ -314,10 +314,10 @@ AIRGAP_IMAGES_FILE: "/downloads/rke2-images.linux-amd64.tar.zst"
 bash -n /rke2/rke2-node-init/bin/rke2nodeinit.sh
 
 # Validate configuration
-sudo ./rke2nodeinit.sh --dry-run <action>
+sudo ./bin/rke2nodeinit.sh --dry-run <action>
 
 # Check file permissions
-ls -la /configs/
+ls -la configs/
 ls -la /downloads/
 ```
 
@@ -366,31 +366,31 @@ ls -lh /var/lib/rancher/rke2/agent/images/
 
 ```bash
 # Step 1: Deploy first server
-sudo ./rke2nodeinit.sh server --config /configs/server01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server01.yaml server
 
 # Step 2: Get token
 TOKEN=$(sudo cat /var/lib/rancher/rke2/server/node-token)
 
 # Step 3: Deploy agents (on agent nodes)
-sudo ./rke2nodeinit.sh agent --config /configs/agent01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/agent01.yaml agent
 ```
 
 ### HA Control Plane
 
 ```bash
 # Step 1: Deploy first server
-sudo ./rke2nodeinit.sh server --config /configs/server01.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server01.yaml server
 
 # Step 2: Add servers (on other nodes)
-sudo ./rke2nodeinit.sh add-server --config /configs/server02.yaml
-sudo ./rke2nodeinit.sh add-server --config /configs/server03.yaml
+sudo ./bin/rke2nodeinit.sh -f configs/server02.yaml add-server
+sudo ./bin/rke2nodeinit.sh -f configs/server03.yaml add-server
 ```
 
 ### Airgap Deployment
 
 ```bash
 # Step 1: Create template VM
-sudo ./rke2nodeinit.sh airgap
+sudo ./bin/rke2nodeinit.sh airgap
 
 # Step 2: Convert to template (manual/automation)
 # VM will be powered off and ready
@@ -399,9 +399,9 @@ sudo ./rke2nodeinit.sh airgap
 # Deploy clones with specific configs
 
 # Step 4: Deploy RKE2 on clones
-sudo ./rke2nodeinit.sh server  # on first server
-sudo ./rke2nodeinit.sh add-server  # on additional servers
-sudo ./rke2nodeinit.sh agent  # on workers
+sudo ./bin/rke2nodeinit.sh server  # on first server
+sudo ./bin/rke2nodeinit.sh add-server  # on additional servers
+sudo ./bin/rke2nodeinit.sh agent  # on workers
 ```
 
 ---
@@ -434,7 +434,7 @@ metric_name                 1
 
 1. **Validate configuration**
    ```bash
-   sudo ./rke2nodeinit.sh --dry-run <action>
+   sudo ./bin/rke2nodeinit.sh --dry-run <action>
    ```
 
 2. **Check prerequisites**
@@ -457,12 +457,12 @@ metric_name                 1
 
 2. **Use verbose mode for troubleshooting**
    ```bash
-   sudo ./rke2nodeinit.sh --verbose <action>
+   sudo ./bin/rke2nodeinit.sh --verbose <action>
    ```
 
 3. **Save logs**
    ```bash
-   sudo ./rke2nodeinit.sh <action> 2>&1 | tee deployment.log
+   sudo ./bin/rke2nodeinit.sh <action> 2>&1 | tee deployment.log
    ```
 
 ### Post-Deployment

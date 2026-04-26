@@ -54,12 +54,12 @@ If you need to generate a test Root / Subordinate CA for local RKE2 testing, use
 
 ```bash
 # From the repo root
-./certs/scripts/generate-root-ca.sh --out-dir certs/scripts/outputs/root-ca
-./certs/scripts/generate-subordinate-ca.sh \
+./scripts/certs/generate-root-ca.sh --out-dir scripts/certs/outputs/root-ca
+./scripts/certs/generate-subordinate-ca.sh \
 	--input examples/certs/rke2clusterCA-example.yaml \
-	--out-dir certs/scripts/outputs/sub-ca \
-	--root-key certs/scripts/outputs/root-ca/root-ca-key.pem \
-	--root-cert certs/scripts/outputs/root-ca/root-ca.crt
+	--out-dir scripts/certs/outputs/sub-ca \
+	--root-key scripts/certs/outputs/root-ca/root-ca-key.pem \
+	--root-cert scripts/certs/outputs/root-ca/root-ca.crt
 ```
 
 Customization

@@ -168,14 +168,17 @@ APPLY_NETPLAN_NOW=0         # --apply-netplan-now applies netplan immediately in
 LOAD_IMAGES=0               # --load-images will import staged images into local runtime (opt-in)
 VERIFY_LAYERS=0             # --verify-layers performs deep layer checksum verification (opt-in)
 ENABLE_BOOT_SERVICE=0       # --enable-boot-service installs and enables first-boot automation
-FIX_CNI_PERMISSIONS=0       # --fix-cni-permissions installs/enables CNI permission remediation (image)
+FIX_CNI_PERMISSIONS=1       # Install/enable CNI permission remediation by default (set spec.fixCNIPermissions: false to disable)
 BOOT_SERVICE_MODE="oneshot" # oneshot (run once and disable) or persistent (run every boot)
-BOOT_YAML_PATH=""           # Custom path template for boot script YAML discovery (supports ${HOSTNAME} variable)
-BOOT_CONFIG_SEARCH_PATHS=() # Directories to search for hostname-matched YAML configs
+BOOT_YAML_PATH=""           # Directory containing node YAML configs used to build boot ISOs
+BOOT_CONFIG_SEARCH_PATHS=() # Legacy YAML search paths (deprecated by ISO-only boot service)
 BOOT_TARGET_DIR="/root/server-config" # Target directory for discovered configs
 VM_PLATFORM="auto"          # auto-detect or specify: vmware, hyperv, virtualbox, generic
 BOOT_SCRIPT_PATH="/usr/local/bin/rke2-boot.sh"
 BOOT_SERVICE_PATH="/etc/systemd/system/rke2-boot.service"
+BOOT_ISO_OUTPUT_DIR=""
+BOOT_ISO_MANIFEST=""
+BOOT_ISO_COUNT=0
 NODE_NAME=""
 ACTION_ARGS=()
 ENABLE_FIPS=0               # --enable-fips turns on OS FIPS (Ubuntu Pro) and uses FIPS RKE2 builds
@@ -218,6 +221,12 @@ HARDENED_MULTUS_TAG="${HARDENED_MULTUS_TAG:-}"
 HARDENED_MULTUS_BN="hardened-multus-cni-${ARCH}.tar"
 HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
 
+# Optional explicit tag for rancher/hardened-flannel when Canal is used.
+HARDENED_FLANNEL_TAG="${HARDENED_FLANNEL_TAG:-}"
+# Basename used for saved hardened-flannel archive.
+HARDENED_FLANNEL_BN="hardened-flannel-${ARCH}.tar"
+HARDENED_FLANNEL_FILE="$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN"
+
 # Logging - LOG_FILE will be set by initialize_action_context or defaults to timestamped name
 LOG_FILE=""
 
@@ -255,6 +264,65 @@ Repository: cantrellcloud/rke2-node-init
 Branch: feat/stage-artifact-path
 EOF
   exit 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: extract_hardened_flannel_tag_from_images
+# Purpose : Inspect an RKE2 images tarball and extract the tag for
+#           `rancher/hardened-flannel`.
+# Arguments:
+#   $1 - Path to rke2-images tarball (e.g. rke2-images.linux-amd64.tar.zst)
+# Returns:
+#   Echoes the tag on success and returns 0. Returns non-zero if not found.
+# ------------------------------------------------------------------------------
+extract_hardened_flannel_tag_from_images() {
+  local images_tar="${1:-}"
+  [[ -z "$images_tar" || ! -f "$images_tar" ]] && return 2
+
+  local tmp
+  tmp=$(mktemp) || return 3
+
+  if [[ "$images_tar" == *.tar.zst || "$images_tar" == *.tzst || "$images_tar" == *.zst ]]; then
+    if ! command -v zstd >/dev/null 2>&1; then
+      rm -f "$tmp" || true
+      return 4
+    fi
+    if ! zstd -d -c "$images_tar" 2>/dev/null | tar -Ox manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 5
+    fi
+  else
+    if ! tar -xOf "$images_tar" manifest.json >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" || true
+      return 6
+    fi
+  fi
+
+  local tag=""
+  if command -v python3 >/dev/null 2>&1; then
+    tag=$(python3 - <<'PY' "$tmp" 2>/dev/null || true
+import json,sys,re
+p=sys.argv[1]
+try:
+    j=json.load(open(p,'r',encoding='utf-8'))
+    for e in j:
+        for rt in e.get('RepoTags',[]) or []:
+            if re.search(r'(^|/)rancher/hardened-flannel:', rt):
+                print(rt.rsplit(':',1)[1])
+                raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+)
+  else
+    tag=$(grep -oE 'rancher/hardened-flannel:[^" ]+' "$tmp" | head -n1 | sed -E 's#.*rancher/hardened-flannel:##')
+  fi
+
+  rm -f "$tmp" || true
+  [[ -n "$tag" ]] || return 7
+  printf '%s' "$tag"
+  return 0
 }
 
 #-----------------------------------------------------------------------------
@@ -1895,8 +1963,9 @@ OPTIONS:
                Service auto-runs appropriate action on first boot after template clone
                Must be used with 'image' or 'airgap' action
   --boot-yaml-path PATH
-               YAML config path for boot service to execute (default: /root/config.yaml)
-               Use with --enable-boot-service
+               Directory containing per-node YAML configs used to build boot ISOs
+               Generates metadata.name.iso for each YAML file in the directory
+               Required when --enable-boot-service (or bootService.enabled: true)
   --boot-mode MODE
                Boot service mode: 'oneshot' or 'persistent' (default: oneshot)
                oneshot: Run once on first boot, then disable service
@@ -1954,7 +2023,7 @@ BOOT SERVICE YAML EXAMPLE:
     rke2CNIVersion: v1.9.0-build20260116
     bootService:
       enabled: true
-      yamlPath: /root/server-config.yaml  # Config to run on first boot
+      yamlPath: configs/preprod/nodes      # Directory of node YAML files
       mode: oneshot                        # Run once, then disable
       platform: vmware                     # vmware, hyperv, virtualbox, or generic
 
@@ -1964,13 +2033,13 @@ WORKFLOW EXAMPLES:
 
   2. Prepare base image with boot service for automated server deployment:
      sudo ./rke2nodeinit.sh -f examples/image.yaml --enable-boot-service \\
-       --boot-yaml-path /root/server.yaml --boot-mode oneshot
+       --boot-yaml-path configs/preprod/nodes --boot-mode oneshot
 
   3. Initialize first control-plane with multi-interface networking:
-     sudo ./rke2nodeinit.sh -f clusters/dc1/ctrl01.yaml
+      sudo ./rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml
 
   4. Join worker node:
-     sudo ./rke2nodeinit.sh -f clusters/dc1/work01.yaml
+      sudo ./rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-work01.yaml
 
   5. Push images to private registry:
      sudo ./rke2nodeinit.sh -f examples/push.yaml -r registry.local/rke2 -u admin -p secret
@@ -2012,72 +2081,209 @@ EOF
 # Returns : 0 on success, non-zero on failure (download or write error)
 # ------------------------------------------------------------------------------
 cache_hardened_cni_http() {
-  local url="${1:-$HARDENED_CNI_URL}"
-  if [[ -z "$url" ]]; then
-    log INFO "HARDENED_CNI_URL not set; skipping hardened-cni-plugins download"
+  log INFO "Deprecated: direct hardened-cni HTTP download handler is disabled; using hardened-* auto-acquisition"
+  return 2
+}
+
+# ------------------------------------------------------------------------------
+# Function: archive_has_repotags
+# Purpose : Validate docker-archive payloads include at least one RepoTags entry
+#           in manifest.json. This prevents importing tagless images that cannot
+#           satisfy Kubernetes image references offline.
+# Arguments:
+#   $1 - Path to docker-archive tar file
+# Returns :
+#   0 when at least one RepoTags entry exists; non-zero otherwise.
+# ------------------------------------------------------------------------------
+archive_has_repotags() {
+  local archive="$1"
+  [[ -f "$archive" ]] || return 1
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    log WARN "python3 not found; skipping RepoTags validation for $archive"
     return 0
   fi
 
-  mkdir -p "$DOWNLOADS_DIR"
-  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
-  local tmp="$DOWNLOADS_DIR/.tmp-${bn}.$$"
-  log INFO "Downloading hardened-cni-plugins from $url -> $DOWNLOADS_DIR/$bn"
+  python3 - "$archive" <<'PY'
+import json
+import sys
+import tarfile
 
-  if command -v curl >/dev/null 2>&1; then
-    if ! spinner_run "Downloading $bn" curl -fL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
-      log ERROR "Failed to download hardened-cni-plugins from $url"
-      rm -f "$tmp" || true
-      return 1
+archive = sys.argv[1]
+
+try:
+    with tarfile.open(archive, "r:*") as tar:
+        manifest_fh = tar.extractfile("manifest.json")
+        if manifest_fh is None:
+            sys.exit(2)
+        manifest = json.load(manifest_fh)
+except Exception:
+    sys.exit(2)
+
+if not isinstance(manifest, list):
+    sys.exit(2)
+
+for entry in manifest:
+    tags = entry.get("RepoTags") if isinstance(entry, dict) else None
+    if isinstance(tags, list) and len(tags) > 0:
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+# ------------------------------------------------------------------------------
+# Function: cache_hardened_artifacts_from_images_txt
+# Purpose : Auto-detect all hardened-* entries in an images list file and
+#           download / mirror them into the downloads dir and stage them for
+#           offline use. Supports HTTP(S) tarballs and container image names
+#           (uses skopeo or nerdctl/docker when available).
+# Arguments:
+#   $1 - Optional path to images list (defaults to $DOWNLOADS_DIR/$IMAGES_TXT)
+# Returns : 0 on success, non-zero on error
+# ------------------------------------------------------------------------------
+cache_hardened_artifacts_from_images_txt() {
+  local images_list="${1:-$DOWNLOADS_DIR/$IMAGES_TXT}"
+  [[ -f "$images_list" ]] || return 0
+
+  mkdir -p "$DOWNLOADS_DIR" "$STAGE_DIR"
+
+  local line url bn outfn img safebn sha manifest="$DOWNLOADS_DIR/$SHA256_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^# ]] && continue
+    # Only consider lines that mention hardened-
+    if ! printf '%s' "$line" | grep -qi 'hardened-'; then
+      continue
     fi
-  elif command -v wget >/dev/null 2>&1; then
-    if ! spinner_run "Downloading $bn" wget -q -O "$tmp" "$url"; then
-      log ERROR "Failed to download hardened-cni-plugins via wget from $url"
-      rm -f "$tmp" || true
-      return 1
-    fi
-  else
-    log ERROR "Neither curl nor wget available to download hardened-cni-plugins"
-    return 2
-  fi
 
-  # Move into place atomically
-  mv -T "$tmp" "$DOWNLOADS_DIR/$bn"
-  chmod 0644 "$DOWNLOADS_DIR/$bn" || true
-
-  # Write a simple SHA256 file beside the artifact for audit/staging and
-  # also append the checksum to the repository-style manifest used by the
-  # script so the staged manifest `sha256sum-<arch>.txt` includes this
-  # artifact. This keeps hardened-cni entries aligned with other artifacts
-  # and allows `sha256sum -c` verification to work uniformly.
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    log INFO "Wrote checksum: $DOWNLOADS_DIR/${bn}.sha256"
-
-    # Ensure downloads dir manifest exists and is updated idempotently.
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    mkdir -p "$(dirname "$manifest")"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      # Remove any existing line referencing this basename, then append
-      # a single manifest line in the canonical format: "<sha>  <basename>"
-      if [[ -f "$manifest" ]]; then
-        # Use a temp file replacement to avoid races
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
+    if printf '%s' "$line" | grep -qE '^https?://'; then
+      url="$line"
+      bn="$(basename "$url" | sed -e 's/[?].*$//')"
+      outfn="$DOWNLOADS_DIR/$bn"
+      if [[ -f "$outfn" ]]; then
+        log INFO "Already have $bn; skipping download"
       else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
+        log INFO "Downloading hardened artifact from $url -> $outfn"
+        if command -v curl >/dev/null 2>&1; then
+          if ! curl -fL --retry 3 --retry-delay 2 -o "$outfn" "$url"; then
+            log WARN "Failed to download $url"
+            rm -f "$outfn" || true
+            continue
+          fi
+        elif command -v wget >/dev/null 2>&1; then
+          if ! wget -q -O "$outfn" "$url"; then
+            log WARN "Failed to download $url"
+            rm -f "$outfn" || true
+            continue
+          fi
+        else
+          log WARN "No HTTP client available to download $url"
+          continue
+        fi
+        chmod 0644 "$outfn" || true
       fi
-      log INFO "Appended hardened-cni checksum to manifest: $manifest"
+    else
+      # Treat as container image name (e.g. rancher/hardened-flannel:v1.2.3)
+      img="$line"
+      safebn="$(printf '%s' "$img" | sed -e 's/[/:@]/-/g' -e 's/^-*//')-linux-${ARCH}.tar"
+      outfn="$DOWNLOADS_DIR/$safebn"
+      if [[ -f "$outfn" ]]; then
+        if archive_has_repotags "$outfn"; then
+          log INFO "Already have image archive $safebn; skipping pull"
+        else
+          log WARN "Existing image archive missing RepoTags; re-pulling: $safebn"
+          rm -f "$outfn" || true
+        fi
+      fi
+      if [[ ! -f "$outfn" ]]; then
+        if command -v skopeo >/dev/null 2>&1; then
+          log INFO "Using skopeo to mirror image $img -> $outfn"
+          if ! skopeo copy --override-arch "$ARCH" "docker://$img" "docker-archive:$outfn:$img"; then
+            log WARN "skopeo failed for $img"
+            rm -f "$outfn" || true
+            continue
+          fi
+        else
+          if command -v nerdctl >/dev/null 2>&1; then
+            log INFO "Using nerdctl to pull and save $img -> $outfn"
+            if ! nerdctl pull "$img"; then
+              log WARN "nerdctl pull failed for $img"
+              continue
+            fi
+            if ! nerdctl save -o "$outfn" "$img"; then
+              log WARN "nerdctl save failed for $img"
+              rm -f "$outfn" || true
+              continue
+            fi
+          elif command -v docker >/dev/null 2>&1; then
+            log INFO "Using docker to pull and save $img -> $outfn"
+            if ! docker pull "$img"; then
+              log WARN "docker pull failed for $img"
+              continue
+            fi
+            if ! docker save -o "$outfn" "$img"; then
+              log WARN "docker save failed for $img"
+              rm -f "$outfn" || true
+              continue
+            fi
+          else
+            log WARN "No container tool available (skopeo/nerdctl/docker) to mirror image $img"
+            continue
+          fi
+        fi
+        chmod 0644 "$outfn" || true
+        if ! archive_has_repotags "$outfn"; then
+          log ERROR "Mirrored archive has empty RepoTags and is invalid for offline pulls: $outfn"
+          log ERROR "Remediation: verify source reference and skopeo export syntax includes destination image name"
+          rm -f "$outfn" || true
+          return 1
+        fi
+      fi
     fi
+
+    # Record checksum and append to manifest (idempotent)
+    if command -v sha256sum >/dev/null 2>&1 && [[ -f "$outfn" ]]; then
+      sha="$(sha256sum "$outfn" | awk '{print $1}' 2>/dev/null || true)"
+      if [[ -n "$sha" ]]; then
+        mkdir -p "$(dirname "$manifest")"
+        if [[ -f "$manifest" ]]; then
+          # Remove existing stanza for this basename
+          tmpm="$(mktemp)"
+          grep -v -F " $(basename "$outfn")" "$manifest" > "$tmpm" || true
+          printf "%s  %s\n" "$sha" "$(basename "$outfn")" >> "$tmpm"
+          mv "$tmpm" "$manifest"
+        else
+          printf "%s  %s\n" "$sha" "$(basename "$outfn")" > "$manifest"
+        fi
+      fi
+    fi
+
+    # Stage artifact for offline use (copy into STAGE_DIR)
+    if [[ -f "$outfn" ]]; then
+      cp -a "$outfn" "$STAGE_DIR/" || true
+      log INFO "Staged hardened artifact: $STAGE_DIR/$(basename "$outfn")"
+    fi
+
+    # Populate known specialized variables if names match
+    case "$(basename "$outfn")" in
+      hardened-cni* ) HARDENED_CNI_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+      hardened-multus* ) HARDENED_MULTUS_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+      hardened-flannel* ) HARDENED_FLANNEL_FILE="$DOWNLOADS_DIR/$(basename "$outfn")" ;; 
+    esac
+
+  done < "$images_list"
+
+  # After mirroring/staging hardened-* artifacts, emit derived tag info (if any)
+  local _tags=()
+  [[ -n "${HARDENED_CNI_TAG:-}" ]] && _tags+=("HARDENED_CNI_TAG=${HARDENED_CNI_TAG}")
+  [[ -n "${HARDENED_MULTUS_TAG:-}" ]] && _tags+=("HARDENED_MULTUS_TAG=${HARDENED_MULTUS_TAG}")
+  [[ -n "${HARDENED_FLANNEL_TAG:-}" ]] && _tags+=("HARDENED_FLANNEL_TAG=${HARDENED_FLANNEL_TAG}")
+  if [[ ${#_tags[@]} -gt 0 ]]; then
+    log INFO "Derived hardened tags: ${_tags[*]}"
   fi
 
-  local _size
-  _size=$(du -h "$DOWNLOADS_DIR/$bn" 2>/dev/null | awk '{print $1}' || echo "unknown")
-  log INFO "Downloaded hardened-cni-plugins: $DOWNLOADS_DIR/$bn ($_size)"
   return 0
 }
 
@@ -2644,151 +2850,8 @@ reconcile_chart_images_against_downloaded_bundle() {
 # Returns : 0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
 cache_hardened_cni_skopeo() {
-  local explicit_tag="${1:-}"
-  local bn="${HARDENED_CNI_BN:-hardened-cni-plugins-${ARCH}.tar}"
-  local repo="docker://rancher/hardened-cni-plugins"
-  if ! command -v skopeo >/dev/null 2>&1; then
-    log WARN "skopeo not available; cannot mirror hardened-cni via skopeo"
-    return 2
-  fi
-
-  mkdir -p "$DOWNLOADS_DIR"
-
-  # Determine desired tag:
-  #   1) explicit_tag (HARDENED_CNI_TAG)
-  #   2) extract the exact tag from the downloaded RKE2 images tarball
-  #   3) RKE2_VERSION (last-resort heuristic)
-  #
-  # The images tarball is the authoritative source for chart-bundled images.
-  local desired_tag=""
-  local desired_tag_source=""
-  if [[ -n "$explicit_tag" ]]; then
-    desired_tag="$explicit_tag"
-    desired_tag_source="explicit"
-  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    desired_tag=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
-  fi
-
-  if [[ -z "$desired_tag" && -n "${RKE2_VERSION:-}" ]]; then
-    desired_tag="${RKE2_VERSION}"
-    desired_tag_source="rke2-version"
-  fi
-
-  # Obtain remote tag list and pick a reasonable candidate. Consult skopeo
-  # tags and Docker Hub API and let a small helper choose the best tag.
-  local tags_json
-  tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
-  local hub_json
-  if command -v curl >/dev/null 2>&1; then
-    hub_json=$(curl -fsSL "https://hub.docker.com/v2/repositories/rancher/hardened-cni-plugins/tags?page_size=100" 2>/dev/null || true)
-  else
-    hub_json=""
-  fi
-
-  local chosen=""
-  if command -v python3 >/dev/null 2>&1; then
-    local _tfile _hfile
-    _tfile=$(mktemp) || _tfile="/tmp/.rke2nodeinit-tags$$"
-    _hfile=$(mktemp) || _hfile="/tmp/.rke2nodeinit-hub$$"
-    printf '%s' "$tags_json" > "$_tfile" || true
-    printf '%s' "$hub_json" > "$_hfile" || true
-    chosen=$(python3 "$REPO_ROOT/scripts/select_hardened_cni_tag.py" "$_tfile" "$_hfile" "${desired_tag:-}" "${RKE2_VERSION:-}" 2>/dev/null || true)
-    rm -f "$_tfile" "$_hfile" || true
-  fi
-  # If we have an authoritative tag from the images tarball (or explicit
-  # operator override), use it directly and skip remote tag selection.
-  # For RKE2_VERSION fallback, only force direct override when the value is a
-  # valid OCI image tag (RKE2 release tags can include '+' which is invalid).
-  if [[ -n "$desired_tag" ]]; then
-    if [[ "$desired_tag_source" == "rke2-version" ]]; then
-      if [[ "$desired_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-        chosen="$desired_tag"
-      else
-        log WARN "RKE2 version '$desired_tag' is not OCI-tag-safe; using discovered hardened-cni tag '${chosen:-latest}'"
-      fi
-    else
-      chosen="$desired_tag"
-    fi
-  elif [[ -z "$chosen" ]]; then
-    chosen="latest"
-  fi
-
-  log INFO "skopeo: chosen hardened-cni tag='$chosen' (desired='$desired_tag'; source='${desired_tag_source:-none}')"
-
-  local dest="$DOWNLOADS_DIR/$bn"
-  # Use docker-archive format (creates tar with manifest.json compatible with tooling)
-  # Write to a temporary destination first, then atomically move into place.
-  local tmp_dest
-  # create a safe temporary file path under the downloads dir
-  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
-  # we'll remove the tmp file before skopeo so skopeo creates it itself (avoids modify-in-place issues)
-  rm -f "$tmp_dest" || true
-  local skopeo_log
-  skopeo_log="$LOG_DIR/skopeo-$(basename "$bn")-$(date -u +%Y%m%dT%H%M%SZ).log"
-  local dest_ref="rancher/hardened-cni-plugins:${chosen}"
-  log INFO "Starting skopeo copy for $repo:$chosen -> $tmp_dest (timeout 300s); logging -> $skopeo_log"
-  # Use timeout to avoid hanging indefinitely. Capture exit code and direct skopeo output to a dedicated log.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
-    rc=$?
-  else
-    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$skopeo_log" 2>&1
-    rc=$?
-  fi
-  if [[ $rc -ne 0 ]]; then
-    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc). See $skopeo_log for raw output"
-    # append the tail of the skopeo log into the main log for quick inspection
-    if [[ -f "$skopeo_log" ]]; then
-      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
-      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
-      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
-    fi
-    rm -f "$tmp_dest" || true
-    return 1
-  fi
-  log INFO "skopeo copy completed (exit 0) for $repo:$chosen -> $tmp_dest ($dest_ref)"
-  # Move into final location atomically (mv will overwrite existing file)
-  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
-    log ERROR "Failed to move mirrored hardened-cni into place: $tmp_dest -> $dest"
-    # if move fails, include skopeo log for debugging
-    if [[ -f "$skopeo_log" ]]; then
-      printf "--- skopeo output (last 200 lines) ---\n" >>"$LOG_FILE" || true
-      tail -n 200 "$skopeo_log" >>"$LOG_FILE" 2>&1 || true
-      printf "--- end skopeo output ---\n" >>"$LOG_FILE" || true
-    fi
-    rm -f "$tmp_dest" || true
-    return 1
-  }
-  chmod 0644 "$dest" || true
-  # also copy the skopeo raw log alongside named artifact logs for post-mortem
-  if [[ -f "$skopeo_log" ]]; then
-    cp -f "$skopeo_log" "$LOG_DIR/" 2>/dev/null || true
-  fi
-  chmod 0644 "$dest" || true
-
-  # Generate per-file sha and append to downloads manifest (idempotent)
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      if [[ -f "$manifest" ]]; then
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
-      else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
-      fi
-      log INFO "Appended hardened-cni checksum to manifest: $manifest"
-    fi
-  fi
-
-  log INFO "skopeo mirrored hardened-cni -> $dest"
-  return 0
+  log INFO "Deprecated: direct hardened-cni skopeo handler is disabled; using hardened-* auto-acquisition"
+  return 2
 }
 
 # ------------------------------------------------------------------------------
@@ -2800,114 +2863,22 @@ cache_hardened_cni_skopeo() {
 # Returns : 0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
 cache_hardened_multus_skopeo() {
-  local explicit_tag="${1:-}"
-  local bn="${HARDENED_MULTUS_BN:-hardened-multus-cni-${ARCH}.tar}"
-  local repo="docker://rancher/hardened-multus-cni"
-
-  if ! command -v skopeo >/dev/null 2>&1; then
-    log WARN "skopeo not available; cannot mirror hardened-multus-cni"
-    return 2
-  fi
-
-  mkdir -p "$DOWNLOADS_DIR"
-
-  local desired_tag=""
-  local desired_tag_source=""
-  if [[ -n "$explicit_tag" ]]; then
-    desired_tag="$explicit_tag"
-    desired_tag_source="explicit"
-  elif [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    desired_tag=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    [[ -n "$desired_tag" ]] && desired_tag_source="images-tar"
-  fi
-
-  local chosen=""
-  if [[ -n "$desired_tag" ]]; then
-    chosen="$desired_tag"
-  else
-    local tags_json
-    tags_json=$(skopeo list-tags "$repo" 2>/dev/null) || tags_json=""
-    if command -v python3 >/dev/null 2>&1; then
-      chosen=$(python3 - <<'PY' "$tags_json" 2>/dev/null || true
-import json,re,sys
-raw=sys.argv[1]
-tags=[]
-try:
-    doc=json.loads(raw) if raw else {}
-    tags=doc.get("Tags") or []
-except Exception:
-    tags=[]
-
-def score(tag):
-    m=re.search(r'build(\d{8})$', tag)
-    b=int(m.group(1)) if m else -1
-    sv=re.match(r'^v(\d+)\.(\d+)\.(\d+)', tag)
-    if sv:
-        major,minor,patch=map(int,sv.groups())
-    else:
-        major=minor=patch=-1
-    return (b,major,minor,patch,tag)
-
-if not tags:
-    print("latest")
-else:
-    print(sorted(tags, key=score, reverse=True)[0])
-PY
-)
-    fi
-    [[ -n "$chosen" ]] || chosen="latest"
-  fi
-
-  log INFO "skopeo: chosen hardened-multus tag='$chosen' (desired='${desired_tag:-}'; source='${desired_tag_source:-auto}')"
-
-  local dest="$DOWNLOADS_DIR/$bn"
-  local tmp_dest
-  tmp_dest=$(mktemp -p "$DOWNLOADS_DIR" ".tmp-${bn}.XXXXXX") || tmp_dest="$DOWNLOADS_DIR/.tmp-${bn}.$$.tmp"
-  rm -f "$tmp_dest" || true
-
-  local dest_ref="rancher/hardened-multus-cni:${chosen}"
-  local rc=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 300 skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-  else
-    skopeo copy --dest-tls-verify=false "$repo:$chosen" "docker-archive:${tmp_dest}:$dest_ref" >>"$LOG_FILE" 2>&1 || rc=$?
-  fi
-
-  if [[ $rc -ne 0 ]]; then
-    log ERROR "skopeo copy failed for $repo:$chosen (exit $rc)"
-    rm -f "$tmp_dest" || true
-    return 1
-  fi
-
-  mv -T "$tmp_dest" "$dest" >>"$LOG_FILE" 2>&1 || {
-    log ERROR "Failed to move mirrored hardened-multus into place: $tmp_dest -> $dest"
-    rm -f "$tmp_dest" || true
-    return 1
-  }
-  chmod 0644 "$dest" || true
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DOWNLOADS_DIR" && sha256sum "$bn" > "${bn}.sha256") || true
-    local manifest="$DOWNLOADS_DIR/$SHA256_FILE"
-    local sha
-    sha=$(sha256sum "$DOWNLOADS_DIR/$bn" | awk '{print $1}') || sha=""
-    if [[ -n "$sha" ]]; then
-      if [[ -f "$manifest" ]]; then
-        local mtmp
-        mtmp=$(mktemp)
-        grep -v -F " $bn" "$manifest" > "$mtmp" || true
-        printf "%s  %s\n" "$sha" "$bn" >> "$mtmp"
-        mv "$mtmp" "$manifest"
-      else
-        printf "%s  %s\n" "$sha" "$bn" > "$manifest"
-      fi
-      log INFO "Appended hardened-multus checksum to manifest: $manifest"
-    fi
-  fi
-
-  log INFO "skopeo mirrored hardened-multus -> $dest"
-  return 0
+  log INFO "Deprecated: direct hardened-multus skopeo handler is disabled; using hardened-* auto-acquisition"
+  return 2
 }
+
+  # ----------------------------------------------------------------------------
+  # Function: cache_hardened_flannel_skopeo
+  # Purpose : Mirror `rancher/hardened-flannel` into a local docker-archive
+  #           tarball for offline Canal (flannel) deployments.
+  # Arguments:
+  #   $1 - Optional explicit tag to use
+  # Returns : 0 on success, non-zero on failure
+  # ----------------------------------------------------------------------------
+  cache_hardened_flannel_skopeo() {
+    log INFO "Deprecated: direct hardened-flannel skopeo handler is disabled; using hardened-* auto-acquisition"
+    return 2
+  }
 
 # ------------------------------------------------------------------------------
 # Function: log
@@ -3261,7 +3232,7 @@ try:
                 # Found exact match at correct depth - extract and return value
                 value = re.sub(r'\s+#.*$', '', value).strip()  # Remove inline comments
                 if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]  # Strip quotes
+                  value = value[1:-1]  # Strip quotes
                 print(value)
                 sys.exit(0)
 except FileNotFoundError:
@@ -3482,6 +3453,47 @@ append_spec_config_extras() {
       fi
     fi
   done
+}
+
+# ------------------------------------------------------------------------------
+# Function: append_offline_registry_guard_default
+# Purpose : Ensure config.yaml disables fallback pulls to upstream registries
+#           when staged offline artifacts are present and the operator did not
+#           explicitly set disable-default-registry-endpoint in YAML.
+# Arguments:
+#   $1 - Path to config.yaml being written
+#   $2 - Optional YAML spec path (defaults to CONFIG_FILE)
+# Returns : 0
+# ------------------------------------------------------------------------------
+append_offline_registry_guard_default() {
+  local cfg_path="$1"
+  local spec_file="${2:-$CONFIG_FILE}"
+  local images_dir="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+  local images_tar="${IMAGES_TAR:-rke2-images.linux-${ARCH}.tar.zst}"
+
+  [[ -z "$cfg_path" || ! -f "$cfg_path" ]] && return 0
+
+  # Respect explicit config (already present in generated config file)
+  if grep -Eq '^[[:space:]]*disable-default-registry-endpoint[[:space:]]*:' "$cfg_path" 2>/dev/null; then
+    return 0
+  fi
+
+  # Respect explicit YAML value if provided
+  if [[ -n "$spec_file" && -f "$spec_file" ]]; then
+    local explicit_val
+    explicit_val="$(yaml_spec_get_any "$spec_file" disable-default-registry-endpoint disableDefaultRegistryEndpoint || true)"
+    if [[ -n "$explicit_val" ]]; then
+      return 0
+    fi
+  fi
+
+  # If offline artifacts are staged, enforce strict no-upstream-fallback mode.
+  if [[ -f "$images_dir/$images_tar" || -f "$STAGE_DIR/$images_tar" || -f "$DOWNLOADS_DIR/$images_tar" ]]; then
+    echo "disable-default-registry-endpoint: true" >> "$cfg_path"
+    log_info "Applied offline default: disable-default-registry-endpoint=true" >&2
+  fi
+
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -4661,17 +4673,158 @@ detect_vm_platform() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: resolve_boot_yaml_dir
+# Purpose : Resolve bootService.yamlPath/--boot-yaml-path to an absolute
+#           directory path. Relative paths are resolved against the config file
+#           directory first, then REPO_ROOT.
+# Arguments:
+#   $1 - Raw directory path from CLI/YAML
+# Returns :
+#   Prints resolved path on stdout.
+# ------------------------------------------------------------------------------
+resolve_boot_yaml_dir() {
+  local raw_path="$1"
+
+  [[ -z "$raw_path" ]] && return 1
+
+  if [[ "$raw_path" == /* ]]; then
+    if [[ -d "$raw_path" ]]; then
+      (cd -- "$raw_path" && pwd -P)
+    else
+      printf '%s\n' "$raw_path"
+    fi
+    return 0
+  fi
+
+  local cfg_dir=""
+  if [[ -n "${CONFIG_FILE:-}" ]]; then
+    cfg_dir="$(dirname -- "$CONFIG_FILE")"
+    if [[ -d "$cfg_dir/$raw_path" ]]; then
+      (cd -- "$cfg_dir/$raw_path" && pwd -P)
+      return 0
+    fi
+  fi
+
+  if [[ -d "$REPO_ROOT/$raw_path" ]]; then
+    (cd -- "$REPO_ROOT/$raw_path" && pwd -P)
+    return 0
+  fi
+
+  printf '%s\n' "$REPO_ROOT/$raw_path"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: generate_bootservice_isos
+# Purpose : Build one ISO per YAML config from a source directory using
+#           scripts/build-boot-isos.sh. ISO names are metadata.name.iso.
+# Arguments:
+#   $1 - Source YAML directory
+#   $2 - Output directory for ISO files
+#   $3 - Manifest path
+# Returns :
+#   0 on success, non-zero on failure.
+# ------------------------------------------------------------------------------
+generate_bootservice_isos() {
+  local yaml_dir="$1"
+  local out_dir="$2"
+  local manifest_file="$3"
+  local builder_script="$REPO_ROOT/scripts/build-boot-isos.sh"
+
+  if [[ ! -f "$builder_script" ]]; then
+    log ERROR "Boot ISO builder script not found: $builder_script"
+    return 1
+  fi
+
+  if ! ensure_iso_builder_available; then
+    log ERROR "Boot service requested, but no ISO builder is available"
+    return 1
+  fi
+
+  local log_target="${LOG_FILE:-/dev/null}"
+  if ! bash "$builder_script" \
+    --yaml-dir "$yaml_dir" \
+    --output-dir "$out_dir" \
+    --manifest "$manifest_file" \
+    >>"$log_target" 2>&1; then
+    log ERROR "Failed to build boot-service ISOs from directory: $yaml_dir"
+    log ERROR "See logs for details: $log_target"
+    return 1
+  fi
+
+  BOOT_ISO_OUTPUT_DIR="$out_dir"
+  BOOT_ISO_MANIFEST="$manifest_file"
+  BOOT_ISO_COUNT="$(awk 'NR>1 {c++} END {print c+0}' "$manifest_file" 2>/dev/null || echo 0)"
+
+  if [[ "${BOOT_ISO_COUNT:-0}" -eq 0 ]]; then
+    log ERROR "Boot ISO manifest was created but no ISO entries were found: $manifest_file"
+    return 1
+  fi
+
+  log INFO "Boot-service ISO build completed: $BOOT_ISO_COUNT file(s)"
+  log INFO "Boot-service ISO manifest: $BOOT_ISO_MANIFEST"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_iso_builder_available
+# Purpose : Ensure at least one supported ISO builder command is present for
+#           boot-service ISO generation. Attempts APT installation when absent.
+# Arguments:
+#   None
+# Returns :
+#   0 when an ISO builder is available, non-zero otherwise.
+# ------------------------------------------------------------------------------
+ensure_iso_builder_available() {
+  if command -v xorriso >/dev/null 2>&1 || \
+     command -v genisoimage >/dev/null 2>&1 || \
+     command -v mkisofs >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log INFO "No ISO builder detected; attempting to install one (xorriso, genisoimage)."
+
+  local pkg=""
+  local candidate
+  for candidate in xorriso genisoimage; do
+    if apt-cache show "$candidate" >/dev/null 2>&1; then
+      pkg="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$pkg" ]]; then
+    log ERROR "No ISO builder found and no installable package detected in APT cache"
+    log ERROR "Install one of: xorriso, genisoimage, mkisofs"
+    return 1
+  fi
+
+  export DEBIAN_FRONTEND=noninteractive
+  log INFO "Installing ISO builder package: $pkg"
+  if ! apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1; then
+    log ERROR "Failed to install ISO builder package: $pkg"
+    return 1
+  fi
+
+  if command -v xorriso >/dev/null 2>&1 || \
+     command -v genisoimage >/dev/null 2>&1 || \
+     command -v mkisofs >/dev/null 2>&1; then
+    log INFO "ISO builder is now available"
+    return 0
+  fi
+
+  log ERROR "ISO builder command still unavailable after package install"
+  return 1
+}
+
+# ------------------------------------------------------------------------------
 # Function: install_boot_script
-# Purpose : Generate and install the first-boot automation script that queries
-#           VM hostname, discovers matching config file, copies it to target
-#           directory, and executes rke2nodeinit with the configuration.
-# 
-# Note for Hyper-V: The VM name must be set from the Hyper-V host using:
-#   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
-#   Otherwise, the guest OS hostname will be used as fallback.
+# Purpose : Generate and install the first-boot automation script that
+#           discovers attached ISO config media, copies config to target
+#           directory, and executes rke2nodeinit with that configuration.
 #
 # Arguments:
-#   None (uses global BOOT_SCRIPT_PATH, BOOT_CONFIG_SEARCH_PATHS, BOOT_TARGET_DIR)
+#   None (uses global BOOT_SCRIPT_PATH, BOOT_TARGET_DIR, BOOT_SERVICE_MODE)
 # Returns :
 #   0 on success, non-zero on failure
 # ------------------------------------------------------------------------------
@@ -4688,75 +4841,40 @@ install_boot_script() {
     log ERROR "Failed to create directory for boot script: $script_dir"
     return 1
   }
-  
-  # Set default config search paths if not specified
-  if [[ ${#BOOT_CONFIG_SEARCH_PATHS[@]} -eq 0 ]]; then
-    BOOT_CONFIG_SEARCH_PATHS=(
-      "$REPO_ROOT/configs"
-      "/opt/rke2/configs"
-      "/root/configs"
-    )
-  fi
-  
-  # Generate platform-specific hostname query command
-  local hostname_query_cmd=""
-  case "$platform" in
-    vmware)
-      hostname_query_cmd='VM_HOSTNAME=$(vmtoolsd --cmd "info-get guestinfo.hostname" 2>/dev/null || hostname)'
-      ;;
-    hyperv)
-      # Hyper-V: Query VM name from KVP pool (requires host-side configuration)
-      # Preferred method: Host admin sets custom KVP item via PowerShell:
-      #   Set-VMKeyValuePairItem -VMName "vm-name" -Key "VirtualMachineName" -Value "vm-name"
-      # 
-      # Alternative: Use PowerShell to read VirtualMachineName from KVP pool_0
-      # Fallback: Use guest hostname if not found
-      hostname_query_cmd='
-if command -v pwsh >/dev/null 2>&1; then
-  # Try PowerShell to read KVP VirtualMachineName
-  VM_HOSTNAME=$(pwsh -NoProfile -Command '\''
-    try {
-      $kvp0 = [System.IO.File]::ReadAllBytes("/var/lib/hyperv/.kvp_pool_0")
-      $text = [System.Text.Encoding]::ASCII.GetString($kvp0)
-      $lines = $text -split "\x00" | Where-Object {$_.Trim()}
-      for($i=0; $i -lt $lines.Count; $i++) {
-        if($lines[$i] -eq "VirtualMachineName" -and $i+1 -lt $lines.Count) {
-          Write-Output $lines[$i+1].Trim()
-          exit 0
-        }
-      }
-    } catch {}
-  '\'' 2>/dev/null)
-fi
-# Fallback to bash method if PowerShell fails or not available
-[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(cat /var/lib/hyperv/.kvp_pool_0 2>/dev/null | tr "\\0" "\\n" | grep -A1 "^VirtualMachineName$" | tail -1 | xargs 2>/dev/null)
-# Final fallback to hostname
-[[ -z "$VM_HOSTNAME" ]] && VM_HOSTNAME=$(hostname)'
-      ;;
-    virtualbox)
-      hostname_query_cmd='VM_HOSTNAME=$(VBoxControl guestproperty get /VirtualBox/HostInfo/VBoxVer 2>/dev/null | cut -d: -f2 | xargs 2>/dev/null || hostname)'
-      ;;
-    generic|*)
-      # Generic: use system hostname
-      hostname_query_cmd='VM_HOSTNAME=$(hostnamectl --static 2>/dev/null || hostname)'
+
+  local boot_mode="${BOOT_SERVICE_MODE:-oneshot}"
+  case "$boot_mode" in
+    oneshot|persistent) ;;
+    *)
+      log WARN "Invalid BOOT_SERVICE_MODE '$boot_mode'; defaulting to oneshot"
+      boot_mode="oneshot"
       ;;
   esac
-  
-  # Generate boot script with config discovery
+
+  # Generate boot script with ISO-only config discovery.
   cat > "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
 #!/usr/bin/env bash
 #
 # rke2-boot.sh - First-boot automation for RKE2 node initialization
-# This script automatically discovers node configs by VM hostname, copies them
-# to the target directory, and executes rke2nodeinit.sh for automatic setup.
+# This script discovers an attached configuration ISO, selects a YAML file
+# from /config, then executes rke2nodeinit.sh with that config.
 #
 # Workflow:
-#   1. Query VM hostname from hypervisor (platform-specific)
-#   2. Search for matching config file: {hostname}.yaml
-#   3. Copy found config to /root/server-config/{hostname}.yaml
-#   4. Execute rke2nodeinit.sh with the discovered config
+#   1. Scan attached ISO media and locate /config/*.yaml|*.yml
+#   2. Copy selected YAML to /root/server-config/
+#   3. Execute rke2nodeinit.sh with copied config
+#   4. In persistent mode, rerun only if config hash changes
 
 set -euo pipefail
+EOF_BOOT_SCRIPT
+  echo "BOOT_MODE=\"$boot_mode\"" >> "$BOOT_SCRIPT_PATH"
+  echo "TARGET_DIR=\"$BOOT_TARGET_DIR\"" >> "$BOOT_SCRIPT_PATH"
+  echo "SCRIPT_PATH=\"$REPO_ROOT/bin/rke2nodeinit.sh\"" >> "$BOOT_SCRIPT_PATH"
+  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+LAST_HASH_FILE="/var/lib/rke2-boot-last-iso.sha256"
+MOUNT_ROOT="/run/rke2-boot-iso"
+MOUNT_POINT=""
+TARGET_FILE=""
 
 # Logging helper
 log() {
@@ -4765,83 +4883,89 @@ log() {
   echo "[$level] $*"
 }
 
-# Cleanup on error
+cleanup_mount() {
+  if [[ -n "$MOUNT_POINT" ]] && mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    umount "$MOUNT_POINT" >/dev/null 2>&1 || true
+  fi
+  [[ -n "$MOUNT_POINT" ]] && rm -rf "$MOUNT_POINT" >/dev/null 2>&1 || true
+  MOUNT_POINT=""
+}
+
+# Cleanup on error.
 cleanup_on_error() {
   log ERROR "Boot service failed - cleaning up"
+  cleanup_mount
   [[ -n "${TARGET_FILE:-}" && -f "$TARGET_FILE" ]] && rm -f "$TARGET_FILE"
   exit 1
 }
 trap cleanup_on_error ERR
+trap cleanup_mount EXIT
 
 log INFO "========================================"
 log INFO "RKE2 First-Boot Automation Starting"
 log INFO "========================================"
 
-# Query VM hostname (platform-specific)
-log INFO "Step 1: Query VM hostname from hypervisor"
-EOF_BOOT_SCRIPT
-  echo "$hostname_query_cmd" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+log INFO "Step 1: Discover attached configuration ISO"
+ISO_DEVICES=()
+while IFS= read -r dev; do
+  [[ -n "$dev" ]] && ISO_DEVICES+=("$dev")
+done < <(lsblk -pnro NAME,FSTYPE,TYPE 2>/dev/null | awk '$2 == "iso9660" {print $1}' | sort -u)
 
-if [[ -z "$VM_HOSTNAME" ]]; then
-  log ERROR "Unable to retrieve VM hostname from platform"
+if (( ${#ISO_DEVICES[@]} == 0 )) && command -v blkid >/dev/null 2>&1; then
+  while IFS= read -r dev; do
+    [[ -n "$dev" ]] && ISO_DEVICES+=("$dev")
+  done < <(blkid -t TYPE=iso9660 -o device 2>/dev/null | sort -u)
+fi
+
+if (( ${#ISO_DEVICES[@]} == 0 )); then
+  log ERROR "No attached ISO media detected (type iso9660)."
+  log ERROR "Attach a boot config ISO as a virtual CD before booting."
   exit 1
 fi
 
-log INFO "  Result: $VM_HOSTNAME"
-export VM_HOSTNAME
-
-# Define config search paths
-log INFO "Step 2: Search for matching configuration file"
-EOF_BOOT_SCRIPT
-  # Embed search paths from global variable
-  echo "CONFIG_SEARCH_PATHS=(" >> "$BOOT_SCRIPT_PATH"
-  for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-    echo "  \"$search_path\"" >> "$BOOT_SCRIPT_PATH"
-  done
-  echo ")" >> "$BOOT_SCRIPT_PATH"
-  
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
-
-# Search for matching config file
 FOUND_CONFIG=""
-for search_path in "${CONFIG_SEARCH_PATHS[@]}"; do
-  log INFO "  Searching: $search_path"
-  candidate="$search_path/${VM_HOSTNAME}.yaml"
-  
-  if [[ -f "$candidate" ]]; then
-    FOUND_CONFIG="$candidate"
-    log INFO "  ✓ Found: $candidate"
-    break
+FOUND_HASH=""
+FOUND_DEVICE=""
+for dev in "${ISO_DEVICES[@]}"; do
+  MOUNT_POINT="$MOUNT_ROOT/$(basename "$dev")"
+  mkdir -p "$MOUNT_POINT"
+
+  if ! mount -o ro "$dev" "$MOUNT_POINT" >/dev/null 2>&1; then
+    log WARN "Unable to mount ISO device: $dev"
+    cleanup_mount
+    continue
   fi
-  
-  # Try case-insensitive search as fallback
-  if [[ -d "$search_path" ]]; then
-    candidate_ci=$(find "$search_path" -maxdepth 1 -type f -iname "${VM_HOSTNAME}.yaml" -print -quit 2>/dev/null || true)
-    if [[ -n "$candidate_ci" && -f "$candidate_ci" ]]; then
-      FOUND_CONFIG="$candidate_ci"
-      log INFO "  ✓ Found (case-insensitive): $candidate_ci"
-      break
-    fi
+
+  candidate="$(find "$MOUNT_POINT/config" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) -print -quit 2>/dev/null || true)"
+  if [[ ! -f "$candidate" ]]; then
+    log WARN "ISO on $dev does not contain a YAML file under /config"
+    cleanup_mount
+    continue
   fi
+
+  FOUND_CONFIG="$candidate"
+  FOUND_HASH="$(sha256sum "$candidate" | awk '{print $1}')"
+  FOUND_DEVICE="$dev"
+  break
 done
 
 if [[ -z "$FOUND_CONFIG" ]]; then
-  log ERROR "No configuration file found for hostname: $VM_HOSTNAME"
-  log ERROR "Searched paths:"
-  for path in "${CONFIG_SEARCH_PATHS[@]}"; do
-    log ERROR "  - $path/${VM_HOSTNAME}.yaml"
-  done
-  log ERROR "Ensure the config file exists with exact hostname match"
+  log ERROR "No attached ISO provided /config/<yaml>"
   exit 1
 fi
 
-# Validate config file
-log INFO "Step 3: Validate configuration file"
-if [[ ! -r "$FOUND_CONFIG" ]]; then
-  log ERROR "Config file not readable: $FOUND_CONFIG"
-  exit 1
+log INFO "  Selected ISO device: $FOUND_DEVICE"
+log INFO "  Config path: ${FOUND_CONFIG#"$MOUNT_POINT"}"
+
+if [[ "$BOOT_MODE" == "persistent" && -f "$LAST_HASH_FILE" ]]; then
+  last_hash="$(tr -d '\r\n' < "$LAST_HASH_FILE" 2>/dev/null || true)"
+  if [[ -n "$last_hash" && "$last_hash" == "$FOUND_HASH" ]]; then
+    log INFO "Persistent mode: ISO config hash unchanged; skipping bootstrap"
+    exit 0
+  fi
 fi
+
+log INFO "Step 2: Copy configuration to target directory"
 
 # Basic YAML syntax validation (if yq available)
 if command -v yq >/dev/null 2>&1; then
@@ -4849,7 +4973,7 @@ if command -v yq >/dev/null 2>&1; then
     log ERROR "YAML syntax validation failed: $FOUND_CONFIG"
     exit 1
   fi
-  log INFO "  ✓ YAML syntax valid"
+  log INFO "  YAML syntax valid"
 fi
 
 # Check for required fields
@@ -4860,17 +4984,12 @@ if ! grep -q "kind" "$FOUND_CONFIG" 2>/dev/null; then
   log WARN "  Missing 'kind' field (recommended)"
 fi
 
-# Copy config to target directory
-log INFO "Step 4: Copy configuration to target directory"
-EOF_BOOT_SCRIPT
-  echo "TARGET_DIR=\"$BOOT_TARGET_DIR\"" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
 mkdir -p "$TARGET_DIR" || {
   log ERROR "Failed to create target directory: $TARGET_DIR"
   exit 1
 }
 
-TARGET_FILE="$TARGET_DIR/${VM_HOSTNAME}.yaml"
+TARGET_FILE="$TARGET_DIR/$(basename "$FOUND_CONFIG")"
 if ! cp "$FOUND_CONFIG" "$TARGET_FILE"; then
   log ERROR "Failed to copy config to: $TARGET_FILE"
   exit 1
@@ -4882,17 +5001,13 @@ chmod 600 "$TARGET_FILE" || {
   exit 1
 }
 
-log INFO "  ✓ Config copied to: $TARGET_FILE"
-log INFO "  ✓ Permissions set: 600 (root only)"
+log INFO "  Config copied to: $TARGET_FILE"
+log INFO "  Permissions set: 600 (root only)"
 
-# Set YAML_FILE for rke2nodeinit execution
-YAML_FILE="$TARGET_FILE"
+# No further access to media required after config copy.
+cleanup_mount
 
-# Locate rke2nodeinit.sh script
-log INFO "Step 5: Locate rke2nodeinit.sh script"
-EOF_BOOT_SCRIPT
-  echo "SCRIPT_PATH=\"$REPO_ROOT/bin/rke2nodeinit.sh\"" >> "$BOOT_SCRIPT_PATH"
-  cat >> "$BOOT_SCRIPT_PATH" <<'EOF_BOOT_SCRIPT'
+log INFO "Step 3: Locate rke2nodeinit.sh script"
 
 if [[ ! -x "$SCRIPT_PATH" ]]; then
   # Try alternate locations
@@ -4910,25 +5025,29 @@ if [[ ! -x "$SCRIPT_PATH" ]]; then
   exit 1
 fi
 
-log INFO "  ✓ Script found: $SCRIPT_PATH"
+log INFO "  Script found: $SCRIPT_PATH"
 
 # Set environment variable to signal execution via boot service
 export RKE2_BOOT_SERVICE=true
 
 # Execute rke2nodeinit with the discovered YAML file
-log INFO "Step 6: Execute RKE2 node initialization"
-log INFO "  Command: $SCRIPT_PATH -f $YAML_FILE -y"
+log INFO "Step 4: Execute RKE2 node initialization"
+log INFO "  Command: $SCRIPT_PATH -f $TARGET_FILE -y"
 log INFO "========================================"
 
-if "$SCRIPT_PATH" -f "$YAML_FILE" -y; then
+if "$SCRIPT_PATH" -f "$TARGET_FILE" -y; then
+  mkdir -p "$(dirname "$LAST_HASH_FILE")"
+  printf '%s\n' "$FOUND_HASH" > "$LAST_HASH_FILE"
+  chmod 600 "$LAST_HASH_FILE" || true
+
   log INFO "========================================"
-  log INFO "✓ RKE2 node initialization completed"
+  log INFO "RKE2 node initialization completed"
   log INFO "========================================"
   exit 0
 else
   rc=$?
   log ERROR "========================================"
-  log ERROR "✗ RKE2 node initialization failed"
+  log ERROR "RKE2 node initialization failed"
   log ERROR "  Exit code: $rc"
   log ERROR "========================================"
   exit $rc
@@ -4941,7 +5060,7 @@ EOF_BOOT_SCRIPT
     return 1
   }
   
-  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform)"
+  log INFO "Boot script installed: $BOOT_SCRIPT_PATH (platform: $platform, mode: $boot_mode)"
   return 0
 }
 
@@ -4962,23 +5081,29 @@ install_boot_service() {
     log ERROR "Failed to create systemd service directory: $service_dir"
     return 1
   }
+
+  local run_once_condition=""
+  local run_once_post=""
+  if [[ "$BOOT_SERVICE_MODE" == "oneshot" ]]; then
+    run_once_condition="ConditionPathExists=!/var/lib/rke2-boot-complete"
+    run_once_post="ExecStartPost=/bin/touch /var/lib/rke2-boot-complete"
+  fi
   
   # Generate systemd service unit
   cat > "$BOOT_SERVICE_PATH" <<EOF
 [Unit]
-Description=RKE2 First-Boot Automation with Config Discovery
+Description=RKE2 Boot Automation with ISO Config Discovery
 Documentation=https://github.com/cantrellcloud/rke2-node-init
 After=network-online.target systemd-hostnamed.service
 Wants=network-online.target
 Requires=systemd-hostnamed.service
 ConditionPathExists=$BOOT_SCRIPT_PATH
-# Only run once on first boot (unless marker removed)
-ConditionPathExists=!/var/lib/rke2-boot-complete
+$run_once_condition
 
 [Service]
 Type=oneshot
 ExecStart=$BOOT_SCRIPT_PATH
-ExecStartPost=/bin/touch /var/lib/rke2-boot-complete
+$run_once_post
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rke2-boot
@@ -5096,6 +5221,7 @@ uninstall_boot_service_artifacts() {
   fi
 
   rm -f /var/lib/rke2-boot-complete || true
+  rm -f /var/lib/rke2-boot-last-iso.sha256 || true
 
   if ! systemctl daemon-reload >>"$LOG_FILE" 2>&1; then
     log WARN "systemctl daemon-reload failed after boot artifact removal"
@@ -6079,7 +6205,8 @@ generate_bootstrap_token() {
 
   # No custom CA context? Return the short token (Option A).
   if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
-    printf '%s' "$passphrase"
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
@@ -6093,14 +6220,18 @@ generate_bootstrap_token() {
   # If we cannot locate a CA file, revert to the short token.
   if [[ -z "$ca_cert" ]]; then
     log WARN "Custom CA context detected but certificate file missing; using short bootstrap token." >&2
-    printf '%s' "$passphrase"
+    [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]] && log WARN "Expected root certificate path: ${CUSTOM_CA_ROOT_CRT}" >&2
+    [[ -n "${CUSTOM_CA_INT_CRT:-}" ]] && log WARN "Expected intermediate certificate path: ${CUSTOM_CA_INT_CRT}" >&2
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
   ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
   if [[ -z "$ca_hash" ]]; then
     log WARN "Failed to derive custom CA hash from $ca_cert; using short bootstrap token." >&2
-    printf '%s' "$passphrase"
+    token="$passphrase"
+    printf '%s' "$token"
     return 0
   fi
 
@@ -6109,7 +6240,7 @@ generate_bootstrap_token() {
     log ERROR "Failed to construct full bootstrap token despite having CA context." >&2
     return 1
   else
-  #  printf '%s' "$token"
+    printf '%s' "$token"
     log INFO "Generated secure server token" >&2
     log INFO "CustomCA:" >&2
     log INFO "  Fingerprint: $ca_hash" >&2
@@ -6443,8 +6574,32 @@ verify_required_cni_images_staged() {
           ;;
       esac
       if [[ -n "$separate_bn" ]] && [[ -f "$images_dir/$separate_bn" || -f "$STAGE_DIR/$separate_bn" || -f "$DOWNLOADS_DIR/$separate_bn" ]]; then
-        log_info "  ✓ ${labels[$pattern]} satisfied via separate archive $separate_bn"
+        log_info "  ✓ ${labels[$pattern]} found in $separate_bn"
         found=1
+      else
+        case "$pattern" in
+          rancher/hardened-cni-plugins:)
+            # prefer images_dir then stage then downloads
+            local _match
+            _match=$(ls "$images_dir"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)
+            _match=${_match:-$(ls "$STAGE_DIR"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)}
+            _match=${_match:-$(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* 2>/dev/null | head -n1 || true)}
+            if [[ -n "$_match" ]]; then
+              log_info "  ✓ ${labels[$pattern]} found in $(basename "$_match")"
+              found=1
+            fi
+            ;;
+          rancher/hardened-multus-cni:)
+            local _match
+            _match=$(ls "$images_dir"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)
+            _match=${_match:-$(ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)}
+            _match=${_match:-$(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null | head -n1 || true)}
+            if [[ -n "$_match" ]]; then
+              log_info "  ✓ ${labels[$pattern]} found in $(basename "$_match")"
+              found=1
+            fi
+            ;;
+        esac
       fi
     fi
 
@@ -6605,6 +6760,28 @@ verify_required_image_tags_staged() {
   fi
 
   comm -23 "$required_tmp" "$present_tmp" > "$missing_tmp" || true
+
+  # Safety check: ensure the sandbox pause image is explicitly present in the
+  # staged archives for disconnected bootstrap. Some workflows may derive
+  # required refs from chart lists that can omit this critical runtime image.
+  local pause_expected=""
+  local pause_src
+  for pause_src in \
+    "$DOWNLOADS_DIR/rke2-images.linux-${ARCH}.txt" \
+    "$DOWNLOADS_DIR/rke2-images-all.linux-${ARCH}.txt" \
+    "$STAGE_DIR/rke2-images.linux-${ARCH}.txt" \
+    "$STAGE_DIR/rke2-images-all.linux-${ARCH}.txt"
+  do
+    [[ -s "$pause_src" ]] || continue
+    pause_expected="$(grep -E '(^|/)rancher/mirrored-pause:' "$pause_src" | head -n1 | awk '{$1=$1;print}')"
+    [[ -n "$pause_expected" ]] || continue
+    pause_expected="$(normalize_image_reference "$pause_expected")"
+    [[ -n "$pause_expected" ]] && break
+  done
+  if [[ -n "$pause_expected" ]] && ! grep -Fxq "$pause_expected" "$present_tmp"; then
+    printf '%s\n' "$pause_expected" >> "$missing_tmp"
+  fi
+
   local missing_count
   missing_count=$(wc -l < "$missing_tmp" | awk '{print $1}')
 
@@ -6861,13 +7038,14 @@ except:
 run_rke2_installer() {
   local src="$1"
   local itype="${2:-}"
+  local skip_download="${INSTALL_RKE2_SKIP_DOWNLOAD:-true}"
   set +e
   if [[ -n "$itype" ]]; then
     log INFO "RKE2 installing INSTALL_RKE2_TYPE..."
-    INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+    INSTALL_RKE2_SKIP_DOWNLOAD="$skip_download" INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
   else
     log INFO "RKE2 installing INSTALL_RKE2_ARTIFACT_PATH..."
-    INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+    INSTALL_RKE2_SKIP_DOWNLOAD="$skip_download" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
   fi
   local rc=$?
   set -e
@@ -7124,6 +7302,12 @@ verify_custom_cluster_ca() {
 # ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
+  local artifact_dir="/opt/rke2/artifacts"
+
+  if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
+    artifact_dir="${INSTALL_RKE2_ARTIFACT_PATH}"
+  fi
+
   # If operator provided a local artifact path, attempt to stage from it into STAGE_DIR
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
     log INFO "INSTALL_RKE2_ARTIFACT_PATH is set; attempting to stage artifacts from '${INSTALL_RKE2_ARTIFACT_PATH}' into '$STAGE_DIR'"
@@ -7136,6 +7320,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
       log INFO "Staged install.sh"
+    elif [[ -f "$artifact_dir/install.sh" ]]; then
+      cp "$artifact_dir/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
+      log INFO "Staged install.sh from $artifact_dir"
     else
       log ERROR "Missing install.sh. Run 'image' first."; missing=1
     fi
@@ -7144,6 +7331,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
       cp "$DOWNLOADS_DIR/$RKE2_TARBALL" "$STAGE_DIR/"
       log INFO "Staged RKE2 tarball"
+    elif [[ -f "$artifact_dir/$RKE2_TARBALL" ]]; then
+      cp "$artifact_dir/$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged RKE2 tarball from $artifact_dir"
     else
       log ERROR "Missing $RKE2_TARBALL. Run 'image' first."; missing=1
     fi
@@ -7152,6 +7342,9 @@ ensure_staged_artifacts() {
     if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
       cp "$DOWNLOADS_DIR/$SHA256_FILE" "$STAGE_DIR/"
       log INFO "Staged SHA256 file"
+    elif [[ -f "$artifact_dir/$SHA256_FILE" ]]; then
+      cp "$artifact_dir/$SHA256_FILE" "$STAGE_DIR/"
+      log INFO "Staged SHA256 file from $artifact_dir"
     else
       log ERROR "Missing $SHA256_FILE. Run 'image' first."; missing=1
     fi
@@ -7168,6 +7361,8 @@ ensure_staged_artifacts() {
       # their actual staged locations (STAGE_DIR or IMAGES_DIR) so sha256sum
       # can validate them regardless of which staging target holds the file.
       local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+      local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+      local IMAGES_TXT="rke2-images-all.linux-${ARCH}.txt"
       log INFO "Verifying staged artifacts checksums in $STAGE_DIR (including $IMAGES_DIR)"
       local tmp_manifest
       tmp_manifest=$(mktemp)
@@ -7233,6 +7428,34 @@ ensure_staged_artifacts() {
           fi
         fi
       fi
+
+            # If Canal (flannel) is required, derive hardened-flannel tag similarly
+            if [[ ${requires_canal:-0} -ne 1 && -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+              if grep -q "spec.cni: *canal" "$CONFIG_FILE" 2>/dev/null || grep -q "canal" "$CONFIG_FILE" 2>/dev/null; then
+                requires_canal=1
+              fi
+            fi
+            if [[ ${requires_canal:-0} -eq 1 && -z "${HARDENED_FLANNEL_TAG:-}" ]]; then
+              if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+                local _fline
+                _fline=$(grep -E 'hardened-flannel' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
+                if [[ -n "$_fline" ]]; then
+                  HARDENED_FLANNEL_TAG="${_fline##*:}"
+                fi
+              fi
+              if [[ -z "${HARDENED_FLANNEL_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+                HARDENED_FLANNEL_TAG=$(extract_hardened_flannel_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+                if [[ -n "${HARDENED_FLANNEL_TAG:-}" ]]; then
+                  :
+                else
+                  if [[ -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+                    log INFO "Unable to derive HARDENED_FLANNEL_TAG from images list/tarball, but existing hardened-flannel artifact found at $DOWNLOADS_DIR/$HARDENED_FLANNEL_BN"
+                  else
+                    log WARN "Unable to derive HARDENED_FLANNEL_TAG from release artifacts; hardened-flannel mirroring will auto-select a tag"
+                  fi
+                fi
+              fi
+            fi
 
       # Build the temporary manifest to validate with sha256sum: include mapped lines
       # and any missing_entries that are not image-like (or image-like but not covered).
@@ -7371,8 +7594,7 @@ ensure_staged_artifacts() {
       elif [[ -n "$hardened_cni_tar" ]]; then
         log INFO "  ✓ Tarball verification: hardened-cni-plugins provided via separate archive $(basename "$hardened_cni_tar")"
       else
-        log WARN "  ⚠ Tarball verification: 'hardened-cni-plugins' not found in Docker manifest"
-        log WARN "     Archive may use OCI format or different image naming. Attempting OCI index parsing..."
+        log INFO "  Tarball does not list 'hardened-cni-plugins' in Docker manifest; relying on staged per-image archives if present"
       fi
     else
       # Docker manifest not found, try OCI image index format as fallback
@@ -7494,6 +7716,19 @@ write_registries_yaml_with_fallbacks() {
   local prefix=""
   [[ -n "$project" ]] && prefix="${project}/"
 
+  # Always include local Spegel endpoint first so disconnected nodes can boot
+  # entirely from local/peer cache. Only include the configured registry
+  # endpoint when its hostname resolves at generation time.
+  local primary_host="${primary%%:*}"
+  primary_host="${primary_host#[}"
+  primary_host="${primary_host%]}"
+  local -a mirror_endpoints=("https://127.0.0.1:9345")
+  if [[ -n "$primary_host" ]] && getent hosts "$primary_host" >/dev/null 2>&1; then
+    mirror_endpoints+=("https://${primary}")
+  else
+    log WARN "Registry host '${primary}' is not resolvable at generation time; using local Spegel-only mirror endpoints for offline bootstrap."
+  fi
+
   # Discover registries from release image list files when available.
   # This keeps registries.yaml aligned with the exact images staged/downloaded.
   local -a regs=()
@@ -7552,7 +7787,10 @@ write_registries_yaml_with_fallbacks() {
     for reg in "${regs[@]}"; do
       echo "  \"${reg}\":"
       echo "    endpoint:"
-      echo "      - \"https://${primary}\""
+      local ep
+      for ep in "${mirror_endpoints[@]}"; do
+        echo "      - \"${ep}\""
+      done
       echo "    rewrite:"
       # Rewrite upstream image path into <project>/<upstream-registry>/<repo>
       # Example: docker.io/rancher/pause -> altregistry/<project>/docker.io/rancher/pause
@@ -7572,10 +7810,87 @@ write_registries_yaml_with_fallbacks() {
       echo "    tls:"
       echo "      ca_file: \"${ca_file}\""
     fi
+
+    # For truly air‑gapped environments, disable containerd's default
+    # registry endpoint so it never falls back to upstream registries.  See
+    # https://docs.rke2.io/install/private_registry#default-endpoint-fallback
+    # for details.  Adding a global section here ensures that all mirror
+    # configurations honour this setting.  Without this, containerd will
+    # try the default registry endpoint as a last resort.
+    echo "global:"
+    echo "  disable-default-registry-endpoint: true"
   } > /etc/rancher/rke2/registries.yaml
 
   chmod 600 /etc/rancher/rke2/registries.yaml
   log INFO "Wrote /etc/rancher/rke2/registries.yaml for internal registry ${primary} (project='${project:-<none>}')"
+}
+
+# ------------------------------------------------------------------------------
+# Function: write_local_loopback_registries_yaml
+# Purpose : Write a minimal offline-safe registries.yaml that resolves all core
+#           pulls through the local embedded mirror only.
+# Arguments:
+#   None
+# Returns : 0 on success
+# ------------------------------------------------------------------------------
+write_local_loopback_registries_yaml() {
+  mkdir -p /etc/rancher/rke2
+  {
+    echo "# Auto-generated by rke2nodeinit.sh - local-only offline safeguard"
+    echo "mirrors:"
+    for reg in docker.io registry.k8s.io ghcr.io quay.io gcr.io k8s.gcr.io; do
+      echo "  \"${reg}\":"
+      echo "    endpoint:"
+      echo "      - \"https://127.0.0.1:9345\""
+    done
+    echo "global:"
+    echo "  disable-default-registry-endpoint: true"
+  } > /etc/rancher/rke2/registries.yaml
+
+  chmod 600 /etc/rancher/rke2/registries.yaml
+  log INFO "Wrote local-only offline registries.yaml (127.0.0.1:9345 endpoints)"
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_server_loopback_registry_safeguard
+# Purpose : Server-flow guard to ensure registries.yaml always includes local
+#           loopback mirror endpoints. If configured registry host is
+#           unresolved, force local-only registries.yaml for disconnected boot.
+# Arguments:
+#   $1 - Optional YAML config path
+# Returns : 0 on success
+# ------------------------------------------------------------------------------
+ensure_server_loopback_registry_safeguard() {
+  local cfg="${1:-}"
+  local reg_spec="${REGISTRY:-${REG_HOST:-}}"
+
+  if [[ -n "$cfg" && -f "$cfg" ]]; then
+    local cfg_reg
+    cfg_reg="$(yaml_spec_get_any "$cfg" registry private-registry system-default-registry || true)"
+    [[ -n "$cfg_reg" ]] && reg_spec="$cfg_reg"
+  fi
+
+  local reg_host="${reg_spec%%/*}"
+  local reg_ns=""
+  if [[ -n "$reg_spec" && "$reg_spec" == */* ]]; then
+    reg_ns="${reg_spec#*/}"
+  fi
+
+  if [[ -z "$reg_host" ]]; then
+    log WARN "No registry host configured in server flow; enforcing local-only loopback mirror endpoints."
+    write_local_loopback_registries_yaml
+    return 0
+  fi
+
+  if getent hosts "$reg_host" >/dev/null 2>&1; then
+    write_registries_yaml_with_fallbacks "$reg_host" "$reg_ns" "$REG_USER" "$REG_PASS" ""
+    log INFO "Server registry safeguard applied: loopback + resolvable registry host ($reg_host)."
+  else
+    log WARN "Configured registry host '$reg_host' is unresolved; enforcing local-only loopback mirror endpoints."
+    write_local_loopback_registries_yaml
+  fi
+
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -7612,6 +7927,7 @@ fetch_rke2_ca_generator() {
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
   local requires_multus=0
+  local requires_canal=0
 
   # If operator provided a local artifact path, prefer it and stage from there
   if [[ -n "${INSTALL_RKE2_ARTIFACT_PATH:-}" && -d "${INSTALL_RKE2_ARTIFACT_PATH}" ]]; then
@@ -7632,8 +7948,11 @@ cache_rke2_artifacts() {
 
   normalize_rke2_fips_version
 
-  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
+  # URL-encode '+' in version (GitHub releases use %2B for plus signs)
+  local url_version="${RKE2_VERSION//+/%2B}"
+  local BASE_URL="https://github.com/rancher/rke2/releases/download/${url_version}"
   local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local IMAGES_TXT="rke2-images-all.linux-${ARCH}.txt"
   local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
   local SHA256_FILE="sha256sum-${ARCH}.txt"
 
@@ -7694,92 +8013,152 @@ cache_rke2_artifacts() {
     local _cni
     while IFS= read -r _cni; do
       [[ "$_cni" == "multus" ]] && requires_multus=1
+      [[ "$_cni" == "canal" ]] && requires_canal=1
     done < <(collect_requested_cni_plugins "$CONFIG_FILE")
   fi
 
-  # If operator didn't set HARDENED_CNI_TAG, attempt to extract the exact
-  # `rancher/hardened-cni-plugins` tag from the downloaded RKE2 images tarball.
-  # This makes hardened-cni staging deterministic and aligned with the RKE2
-  # release (no "latest" drift).
-  if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
-      log INFO "Derived HARDENED_CNI_TAG from images tarball: ${HARDENED_CNI_TAG}"
+  # Prefer parsing the release images list text file for explicit hardened-* tags
+  # Download the images list txt first (idempotent) so we can extract exact
+  # `hardened-cni-plugins` and `hardened-multus-cni` tags used by the release.
+  if [[ -f "$IMAGES_TXT" ]]; then
+    log INFO "Already present: $IMAGES_TXT (skipping download)"
+  else
+    log INFO "Downloading $IMAGES_TXT from $BASE_URL/$IMAGES_TXT"
+    spinner_run "Downloading $IMAGES_TXT" curl -Lf "$BASE_URL/$IMAGES_TXT" -o "$IMAGES_TXT" || true
+    if [[ -f "$IMAGES_TXT" ]]; then
+      log INFO "Downloaded: $DOWNLOADS_DIR/$IMAGES_TXT from $BASE_URL/$IMAGES_TXT"
     else
-      if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-        log INFO "Unable to derive HARDENED_CNI_TAG from images tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
-      else
-        log WARN "Unable to derive HARDENED_CNI_TAG from images tarball; hardened-cni mirroring may fall back to heuristics"
-      fi
+      log WARN "Images list not found: $IMAGES_TXT; continuing and falling back to tarball parsing"
     fi
   fi
 
-  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
-    if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
-      log INFO "Derived HARDENED_MULTUS_TAG from images tarball: ${HARDENED_MULTUS_TAG}"
-    else
-      if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-        log INFO "Unable to derive HARDENED_MULTUS_TAG from images tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
-      else
-        log WARN "Unable to derive HARDENED_MULTUS_TAG from images tarball; hardened-multus mirroring will auto-select a tag"
+  # If operator didn't set HARDENED_CNI_TAG, try to derive it from the images list
+  if [[ -z "${HARDENED_CNI_TAG:-}" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      # Prefer entries without digests (@sha256) and take the first matching line
+      local _line
+      _line=$(grep -E 'hardened-cni-plugins' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | head -n1 || true)
+      if [[ -n "$_line" ]]; then
+        HARDENED_CNI_TAG="${_line##*:}"
       fi
     fi
-  fi
-
-  # Optionally download hardened-cni-plugins when configured. Prefer skopeo
-  # (Docker Hub mirror) when available; fall back to HTTP(S) URL if provided.
-  if [[ -n "${HARDENED_CNI_URL:-}" || -n "${HARDENED_CNI_BN:-}" ]]; then
-    # If the artifact already exists in downloads, skip acquisition.
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_CNI_BN; skipping hardened-cni acquisition"
-    else
-      if command -v skopeo >/dev/null 2>&1; then
-        log INFO "skopeo detected; attempting to mirror hardened-cni from Docker Hub"
-        if ! cache_hardened_cni_skopeo "${HARDENED_CNI_TAG:-}"; then
-          log WARN "skopeo hardened-cni mirror failed; attempting HTTP fallback"
-          if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
-            cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
-          fi
-        fi
+    # Fallback: extract from images tarball if text list not available
+    if [[ -z "${HARDENED_CNI_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      HARDENED_CNI_TAG=$(extract_hardened_cni_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+      if [[ -n "${HARDENED_CNI_TAG:-}" ]]; then
+        :
       else
-        if [[ -n "${HARDENED_CNI_URL:-}" ]]; then
-          log INFO "Configured HARDENED_CNI_URL detected; attempting HTTP download"
-          cache_hardened_cni_http "$HARDENED_CNI_URL" || log WARN "hardened-cni download failed; continuing without it"
+        if [[ -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
+          log INFO "Unable to derive HARDENED_CNI_TAG from images list/tarball, but existing hardened-cni artifact found at $DOWNLOADS_DIR/$HARDENED_CNI_BN"
         else
-          log INFO "HARDENED_CNI_URL not configured and skopeo not available; skipping hardened-cni acquisition"
+          log WARN "Unable to derive HARDENED_CNI_TAG from release artifacts; hardened-cni mirroring may fall back to heuristics"
         fi
       fi
     fi
   fi
+
+  # If Multus is required, derive hardened-multus tag similarly
+  if [[ $requires_multus -eq 1 && -z "${HARDENED_MULTUS_TAG:-}" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      local _mline
+      _mline=$(grep -E 'hardened-multus-cni|multus' "$DOWNLOADS_DIR/$IMAGES_TXT" | grep -v '@' | grep -E 'multus|hardened-multus-cni' | head -n1 || true)
+      if [[ -n "$_mline" ]]; then
+        HARDENED_MULTUS_TAG="${_mline##*:}"
+      fi
+    fi
+    if [[ -z "${HARDENED_MULTUS_TAG:-}" && -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+      HARDENED_MULTUS_TAG=$(extract_hardened_multus_tag_from_images "$DOWNLOADS_DIR/$IMAGES_TAR" 2>/dev/null || true)
+      if [[ -n "${HARDENED_MULTUS_TAG:-}" ]]; then
+        :
+      else
+        if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+          log INFO "Unable to derive HARDENED_MULTUS_TAG from images list/tarball, but existing hardened-multus artifact found at $DOWNLOADS_DIR/$HARDENED_MULTUS_BN"
+        else
+          log WARN "Unable to derive HARDENED_MULTUS_TAG from release artifacts; hardened-multus mirroring will auto-select a tag"
+        fi
+      fi
+    fi
+  fi
+
+    # Auto-detect and cache any hardened-* artifacts listed in images manifest
+    if [[ -f "$DOWNLOADS_DIR/$IMAGES_TXT" ]]; then
+      log INFO "Scanning $DOWNLOADS_DIR/$IMAGES_TXT for hardened-* artifacts"
+      cache_hardened_artifacts_from_images_txt "$DOWNLOADS_DIR/$IMAGES_TXT" || log WARN "Auto-acquire of hardened-* artifacts encountered errors"
+    fi
+
+    # Consolidated info: staged hardened artifacts. Derived tags are logged by the
+    # hardened-* auto-acquisition function after mirroring/staging completes.
+    local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+
+    # Emit deduped INFO lines for all staged hardened artifacts (collect unique basenames and their locations)
+    declare -A _staged_locs=()
+    for f in "$STAGE_DIR"/docker.io-rancher-hardened-* "$STAGE_DIR"/hardened-* "$IMAGES_DIR"/docker.io-rancher-hardened-* "$IMAGES_DIR"/hardened-*; do
+      [[ -f "$f" ]] || continue
+      local bn
+      bn="$(basename "$f")"
+      local loc
+      if [[ "$f" == "$STAGE_DIR"/* ]]; then
+        loc="$STAGE_DIR"
+      elif [[ "$f" == "$IMAGES_DIR"/* ]]; then
+        loc="$IMAGES_DIR"
+      else
+        loc="$(dirname "$f")"
+      fi
+      if [[ -n "${_staged_locs[$bn]:-}" ]]; then
+        case ",${_staged_locs[$bn]}," in
+          *",$loc,"*) : ;;
+          *) _staged_locs[$bn]="${_staged_locs[$bn]},$loc" ;;
+        esac
+      else
+        _staged_locs[$bn]="$loc"
+      fi
+    done
+
+    for _bn in "${!_staged_locs[@]}"; do
+      IFS=, read -r -a _locs <<< "${_staged_locs[$_bn]}"
+      if [[ ${#_locs[@]} -eq 1 ]]; then
+        log INFO "Staged ${_bn} into ${_locs[0]}"
+      else
+        # join multiple locations with ' and '
+        local _joined
+        _joined="${_locs[0]}"
+        for ((i=1; i<${#_locs[@]}; i++)); do
+          _joined="${_joined} and ${_locs[i]}"
+        done
+        log INFO "Staged ${_bn} into ${_joined}"
+      fi
+    done
+
+  # Dedicated hardened-cni/multus/flannel mirroring handlers have been
+  # deprecated in favor of the unified hardened-* auto-acquisition that
+  # scans the release images list and mirrors/stages any matching
+  # 'hardened-*' artifacts. At this point those artifacts should already
+  # be present in $DOWNLOADS_DIR or $STAGE_DIR.
 
   # Enforce hardened-cni availability when required (ensures offline Multus/CNI dependencies).
   if [[ "${HARDENED_CNI_REQUIRED:-0}" != "0" ]]; then
-    if [[ ! -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-      log ERROR "Required hardened-cni-plugins artifact missing: $DOWNLOADS_DIR/$HARDENED_CNI_BN"
-      log ERROR "Remediation: install 'skopeo' for auto-mirroring or set HARDENED_CNI_URL to a direct tarball"
+    if ! (ls "$DOWNLOADS_DIR"/hardened-cni* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-cni* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-cni* 1>/dev/null 2>&1); then
+      log ERROR "Required hardened-cni-plugins artifact missing in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a machine with network access to mirror hardened-* artifacts, or pre-stage hardened-cni archives in $DOWNLOADS_DIR"
       popd >/dev/null || true
       return 4
     fi
   fi
 
   if [[ $requires_multus -eq 1 ]]; then
-    if [[ -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-      log INFO "Already present: $DOWNLOADS_DIR/$HARDENED_MULTUS_BN; skipping hardened-multus acquisition"
-    else
-      if command -v skopeo >/dev/null 2>&1; then
-        log INFO "Multus requested; attempting to mirror hardened-multus from Docker Hub"
-        if ! cache_hardened_multus_skopeo "${HARDENED_MULTUS_TAG:-}"; then
-          log ERROR "Failed to mirror hardened-multus-cni required for spec.cni=multus"
-          popd >/dev/null || true
-          return 6
-        fi
-      else
-        log ERROR "Multus requested but skopeo is not available to mirror hardened-multus-cni"
-        log ERROR "Remediation: install skopeo and re-run image action, or pre-stage $HARDENED_MULTUS_BN in $DOWNLOADS_DIR"
-        popd >/dev/null || true
-        return 6
-      fi
+    if ! (ls "$DOWNLOADS_DIR"/hardened-multus* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-multus* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 1>/dev/null 2>&1); then
+      log ERROR "Multus requested but hardened-multus artifacts not found in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a networked host to mirror hardened-* artifacts or pre-stage hardened-multus archives in $DOWNLOADS_DIR"
+      popd >/dev/null || true
+      return 6
+    fi
+  fi
+  if [[ $requires_canal -eq 1 ]]; then
+    if ! (ls "$DOWNLOADS_DIR"/hardened-flannel* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/hardened-flannel* 1>/dev/null 2>&1 || ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-flannel* 1>/dev/null 2>&1 || ls "$STAGE_DIR"/docker.io-rancher-hardened-flannel* 1>/dev/null 2>&1); then
+      log ERROR "Canal requested but hardened-flannel artifacts not found in downloads or stage"
+      log ERROR "Remediation: run the 'image' action on a networked host to mirror hardened-* artifacts or pre-stage hardened-flannel archives in $DOWNLOADS_DIR"
+      popd >/dev/null || true
+      return 7
     fi
   fi
 
@@ -7858,6 +8237,14 @@ cache_rke2_artifacts() {
   # checksum manifest that contains only tarball entries that were actually
   # staged/cached (images tarball(s) and RKE2 tarball). This avoids shipping
   # a manifest containing many unrelated files.
+  if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
+    local tmp_install="$STAGE_DIR/.tmp-install.sh.$$"
+    cp -f "$DOWNLOADS_DIR/install.sh" "$tmp_install"
+    mv -T "$tmp_install" "$STAGE_DIR/install.sh"
+    chmod +x "$STAGE_DIR/install.sh" || true
+    log INFO "Staged install.sh into $STAGE_DIR"
+  fi
+
   if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
     local tmpf="$STAGE_DIR/.tmp-${RKE2_TARBALL}.$$"
     cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$tmpf"
@@ -7865,35 +8252,135 @@ cache_rke2_artifacts() {
     log INFO "Staged $RKE2_TARBALL into $STAGE_DIR"
   fi
 
-  # Stage hardened-cni-plugins tarball if present in downloads
-  if [[ -n "${HARDENED_CNI_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" ]]; then
-    local tmpc="$STAGE_DIR/.tmp-${HARDENED_CNI_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc"
-    mv -T "$tmpc" "$STAGE_DIR/$HARDENED_CNI_BN"
-    log INFO "Staged $HARDENED_CNI_BN into $STAGE_DIR"
+  # Stage any per-image mirrored hardened-cni artifacts (docker-archive names)
+  # Do not auto-stage the legacy consolidated tarball (e.g. hardened-cni-plugins-amd64.tar)
+  for _hc in "$DOWNLOADS_DIR"/docker.io-rancher-hardened-cni* "$STAGE_DIR"/docker.io-rancher-hardened-cni*; do
+    [[ -f "$_hc" ]] || continue
+    local bn
+    bn="$(basename "$_hc")"
+    local tmpc="$STAGE_DIR/.tmp-${bn}.$$"
+    cp -f "$_hc" "$tmpc"
+    mv -T "$tmpc" "$STAGE_DIR/$bn"
+    log INFO "Staged $bn into $STAGE_DIR"
 
-    local tmpc_img="$IMAGES_DIR/.tmp-${HARDENED_CNI_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_CNI_BN" "$tmpc_img"
-    mv -T "$tmpc_img" "$IMAGES_DIR/$HARDENED_CNI_BN"
-    log INFO "Staged $HARDENED_CNI_BN into $IMAGES_DIR"
+    local tmpc_img="$IMAGES_DIR/.tmp-${bn}.$$"
+    cp -f "$_hc" "$tmpc_img"
+    mv -T "$tmpc_img" "$IMAGES_DIR/$bn"
+    log INFO "Staged $bn into $IMAGES_DIR"
+  done
+
+  # Ensure golden-image-friendly layout: extract CNI binaries and any
+  # available /etc/cni/net.d config snippets into the stage tree so image
+  # builders can bake them into VM templates. This makes the golden image
+  # immediately usable offline (Multus/Canal find master conflists & binaries).
+  ensure_cni_binaries_baked() {
+    local archive dest_root
+    dest_root="$STAGE_DIR"
+    local IMAGES_DIR="${INSTALL_RKE2_AGENT_IMAGES_DIR:-/var/lib/rancher/rke2/agent/images}"
+    mkdir -p "$dest_root/opt/cni/bin" "$dest_root/etc/cni/net.d" || true
+
+    for archive in "$DOWNLOADS_DIR"/hardened-cni* "$DOWNLOADS_DIR"/hardened-multus* "$DOWNLOADS_DIR"/hardened-flannel* "$STAGE_DIR"/hardened-cni* "$STAGE_DIR"/hardened-multus* "$STAGE_DIR"/hardened-flannel*; do
+      [[ -f "$archive" ]] || continue
+      local tmpd
+      tmpd=$(mktemp -d) || tmpd="/tmp/.rke2nodeinit-extract-$$"
+      # Extract docker-archive contents into tempdir
+      if ! tar -xf "$archive" -C "$tmpd" 2>/dev/null; then
+        rm -rf "$tmpd" || true
+        continue
+      fi
+      # Find layer tars and inspect for opt/cni and etc/cni/net.d
+      shopt -s nullglob
+      for lt in "$tmpd"/*.tar; do
+        mkdir -p "$tmpd/layer"
+        tar -xf "$lt" -C "$tmpd/layer" 2>/dev/null || true
+        if [[ -d "$tmpd/layer/opt/cni/bin" ]]; then
+          mkdir -p "$dest_root/opt/cni/bin"
+          cp -a "$tmpd/layer/opt/cni/bin/." "$dest_root/opt/cni/bin/" 2>/dev/null || true
+        fi
+        if [[ -d "$tmpd/layer/etc/cni/net.d" ]]; then
+          mkdir -p "$dest_root/etc/cni/net.d"
+          cp -a "$tmpd/layer/etc/cni/net.d/." "$dest_root/etc/cni/net.d/" 2>/dev/null || true
+        fi
+        rm -rf "$tmpd/layer"/* || true
+      done
+      shopt -u nullglob
+      rm -rf "$tmpd" || true
+    done
+
+    # If a canal conflist was generated in the agent images staging area,
+    # prefer that copy so golden image contains a ready-to-use master CNI
+    # config. The script may also have staged a 10-canal.conflist previously.
+    if [[ -f "$IMAGES_DIR/10-canal.conflist" ]]; then
+      mkdir -p "$STAGE_DIR/etc/cni/net.d"
+      cp -a "$IMAGES_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
+    elif [[ -f "$DOWNLOADS_DIR/10-canal.conflist" ]]; then
+      mkdir -p "$STAGE_DIR/etc/cni/net.d"
+      cp -a "$DOWNLOADS_DIR/10-canal.conflist" "$STAGE_DIR/etc/cni/net.d/10-canal.conflist" || true
+    fi
+    log INFO "Prepared $STAGE_DIR with CNI binaries and net.d snippets for baking into golden image"
+  }
+
+  # Run the bake step (best-effort)
+  ensure_cni_binaries_baked || true
+
+  # Only stage the legacy hardened-multus tarball if no per-image mirrored multus archive exists
+  if [[ -z $(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null) && -z $(ls "$STAGE_DIR"/docker.io-rancher-hardened-multus* 2>/dev/null) ]]; then
+    if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
+      local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
+      mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
+      log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
+
+      local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
+      mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
+      log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
+    fi
   fi
 
-  if [[ -n "${HARDENED_MULTUS_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" ]]; then
-    local tmpm="$STAGE_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm"
-    mv -T "$tmpm" "$STAGE_DIR/$HARDENED_MULTUS_BN"
-    log INFO "Staged $HARDENED_MULTUS_BN into $STAGE_DIR"
+  # Only stage the legacy hardened-flannel tarball if no per-image mirrored flannel archive exists
+  if [[ -z $(ls "$DOWNLOADS_DIR"/docker.io-rancher-hardened-flannel* 2>/dev/null) && -z $(ls "$STAGE_DIR"/docker.io-rancher-hardened-flannel* 2>/dev/null) ]]; then
+    if [[ -n "${HARDENED_FLANNEL_BN:-}" && -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" ]]; then
+      local tmpf="$STAGE_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf"
+      mv -T "$tmpf" "$STAGE_DIR/$HARDENED_FLANNEL_BN"
+      log INFO "Staged $HARDENED_FLANNEL_BN into $STAGE_DIR"
 
-    local tmpm_img="$IMAGES_DIR/.tmp-${HARDENED_MULTUS_BN}.$$"
-    cp -f "$DOWNLOADS_DIR/$HARDENED_MULTUS_BN" "$tmpm_img"
-    mv -T "$tmpm_img" "$IMAGES_DIR/$HARDENED_MULTUS_BN"
-    log INFO "Staged $HARDENED_MULTUS_BN into $IMAGES_DIR"
+      local tmpf_img="$IMAGES_DIR/.tmp-${HARDENED_FLANNEL_BN}.$$"
+      cp -f "$DOWNLOADS_DIR/$HARDENED_FLANNEL_BN" "$tmpf_img"
+      mv -T "$tmpf_img" "$IMAGES_DIR/$HARDENED_FLANNEL_BN"
+      log INFO "Staged $HARDENED_FLANNEL_BN into $IMAGES_DIR"
+    fi
   fi
 
   # Build a filtered sha256 manifest containing only staged/cached tarballs.
   if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
     local out_manifest="$STAGE_DIR/$SHA256_FILE"
     : > "$out_manifest"
+
+  # Ensure all staged tarball artifacts are also present in the RKE2 images
+  # directory so the RKE2 installer can consume them directly without
+  # contacting external registries. Copy any staged archives (*.tar, *.tgz,
+  # *.tar.zst) into the images dir if they are missing or differ in size.
+  mkdir -p "$IMAGES_DIR"
+  shopt -s nullglob
+  for _stagef in "$STAGE_DIR"/*.tar "$STAGE_DIR"/*.tgz "$STAGE_DIR"/*.tar.zst; do
+    [[ -f "$_stagef" ]] || continue
+    _bn="$(basename "$_stagef")"
+    _dst="$IMAGES_DIR/$_bn"
+    if [[ -f "$_dst" ]]; then
+      # Skip identical-size copies to avoid unnecessary writes
+      _srcsz=$(stat -c%s "$_stagef" 2>/dev/null || true)
+      _dstsz=$(stat -c%s "$_dst" 2>/dev/null || true)
+      if [[ -n "$_srcsz" && "$_srcsz" -eq "$_dstsz" ]]; then
+        continue
+      fi
+    fi
+    _tmp="$IMAGES_DIR/.tmp-$_bn.$$"
+    cp -f "$_stagef" "$_tmp" && mv -T "$_tmp" "$_dst" || { rm -f "$_tmp" || true; continue; }
+    log INFO "Copied staged artifact $_bn into $IMAGES_DIR"
+  done
+  shopt -u nullglob
     # Iterate over each line in the downloaded manifest and include only
     # entries whose basename is a tar archive and which exist in the
     # staging or images directories. Also produce a JSON metadata file
@@ -8005,30 +8492,66 @@ cache_rke2_artifacts() {
 # ------------------------------------------------------------------------------
 ca_trust_registries() {
   # --- Optional: CA trust + registries mirrors -------------------------------
+  local CA_ROOT_EFFECTIVE="${CA_ROOT:-${CUSTOM_CA_ROOT_CRT:-}}"
+  local CA_KEY_EFFECTIVE="${CA_KEY:-${CUSTOM_CA_ROOT_KEY:-}}"
+  local CA_INTCRT_EFFECTIVE="${CA_INTCRT:-${CUSTOM_CA_INT_CRT:-}}"
+  local CA_INTKEY_EFFECTIVE="${CA_INTKEY:-${CUSTOM_CA_INT_KEY:-}}"
+  local CA_INSTALL_EFFECTIVE="${CA_INSTALL:-${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}}"
+  local install_os_trust=0
   local CA_BN=""
-  if [[ -n "$CA_ROOT" && -f "$CA_ROOT" ]]; then
-    CA_BN="$(basename "$CA_ROOT")"
-    if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-      mkdir -p /usr/local/share/ca-certificates
-      cp -f "$CA_ROOT" "/usr/local/share/ca-certificates/$CA_BN"
-      update-ca-certificates >>"$LOG_FILE" 2>&1 || true
+  local installed_ca_path=""
+
+  if [[ "$CA_INSTALL_EFFECTIVE" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
+    install_os_trust=1
+  fi
+
+  if [[ $install_os_trust -eq 1 ]]; then
+    mkdir -p /usr/local/share/ca-certificates
+
+    if [[ -n "$CA_ROOT_EFFECTIVE" && -f "$CA_ROOT_EFFECTIVE" ]]; then
+      CA_BN="$(basename "$CA_ROOT_EFFECTIVE")"
+      [[ "$CA_BN" != *.crt ]] && CA_BN="${CA_BN%.*}.crt"
+      cp -f "$CA_ROOT_EFFECTIVE" "/usr/local/share/ca-certificates/$CA_BN"
+      installed_ca_path="/usr/local/share/ca-certificates/$CA_BN"
       log INFO "Installed $CA_BN into OS trust store."
     fi
-    # Persist to site defaults for server phase
-    local STATE="/etc/rke2image.defaults"
-    {
-      echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT\""
-      [[ -n "$CA_KEY"    ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY\""
-      [[ -n "$CA_INTCRT" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT\""
-      [[ -n "$CA_INTKEY" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY\""
-      if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=1"
-      else
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=0"
-      fi
-    } >> "$STATE"
-    chmod 600 "$STATE"
+
+    if [[ -n "$CA_INTCRT_EFFECTIVE" && -f "$CA_INTCRT_EFFECTIVE" ]]; then
+      local CA_INT_BN
+      CA_INT_BN="$(basename "$CA_INTCRT_EFFECTIVE")"
+      [[ "$CA_INT_BN" != *.crt ]] && CA_INT_BN="${CA_INT_BN%.*}.crt"
+      cp -f "$CA_INTCRT_EFFECTIVE" "/usr/local/share/ca-certificates/$CA_INT_BN"
+      [[ -z "$installed_ca_path" ]] && installed_ca_path="/usr/local/share/ca-certificates/$CA_INT_BN"
+      log INFO "Installed $CA_INT_BN into OS trust store."
+    fi
+
+    if [[ -n "$installed_ca_path" ]]; then
+      update-ca-certificates --verbose --fresh >>"$LOG_FILE" 2>&1 || true
+      log INFO "Refreshed OS trust store with update-ca-certificates --verbose --fresh."
+    fi
   fi
+
+  # Persist to site defaults for server/agent phases while preserving defaults
+  local STATE="/etc/rke2image.defaults"
+  touch "$STATE"
+  sed -i \
+    -e '/^CUSTOM_CA_ROOT_CRT=/d' \
+    -e '/^CUSTOM_CA_ROOT_KEY=/d' \
+    -e '/^CUSTOM_CA_INT_CRT=/d' \
+    -e '/^CUSTOM_CA_INT_KEY=/d' \
+    -e '/^CUSTOM_CA_INSTALL_TO_OS_TRUST=/d' \
+    "$STATE"
+
+  if [[ -n "$CA_ROOT_EFFECTIVE" || -n "$CA_INTCRT_EFFECTIVE" || -n "$CA_KEY_EFFECTIVE" || -n "$CA_INTKEY_EFFECTIVE" ]]; then
+    {
+      [[ -n "$CA_ROOT_EFFECTIVE" ]] && echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT_EFFECTIVE\""
+      [[ -n "$CA_KEY_EFFECTIVE"  ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY_EFFECTIVE\""
+      [[ -n "$CA_INTCRT_EFFECTIVE" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT_EFFECTIVE\""
+      [[ -n "$CA_INTKEY_EFFECTIVE" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY_EFFECTIVE\""
+      echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=$install_os_trust"
+    } >> "$STATE"
+  fi
+  chmod 600 "$STATE" || true
 
   # If a registry is configured, write registries.yaml with mirrors + auth + CA
   mkdir -p /etc/rancher/rke2
@@ -8038,7 +8561,7 @@ ca_trust_registries() {
       _REG_HOST="${REGISTRY%%/*}"
       [[ "$REGISTRY" == */* ]] && _REG_NS="${REGISTRY#*/}"
     fi
-    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
+    write_registries_yaml_with_fallbacks "$_REG_HOST" "$_REG_NS" "$REG_USER" "$REG_PASS" "${installed_ca_path:-}"
   else
     rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
   fi
@@ -8693,6 +9216,7 @@ action_image() {
   local REQ_VER="${RKE2_VERSION:-}"
   local REQ_CNI_VER="${HARDENED_CNI_TAG:-}"
   local REQ_MULTUS_VER="${HARDENED_MULTUS_TAG:-}"
+  local REQ_FLANNEL_VER="${HARDENED_FLANNEL_TAG:-}"
   local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
@@ -8702,6 +9226,9 @@ action_image() {
   local boot_yaml_path_cfg=""
   local boot_mode_cfg=""
   local boot_platform_cfg=""
+  local boot_yaml_dir=""
+  local boot_iso_output_dir=""
+  local boot_iso_manifest=""
   local REG_HOST="${REGISTRY%%/*}"
   local CA_ROOT="" CA_KEY="" CA_INTCRT="" CA_INTKEY="" CA_INSTALL="true"
   
@@ -8715,10 +9242,15 @@ action_image() {
     REQ_VER="${REQ_VER:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REQ_CNI_VER="${REQ_CNI_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2CNIVersion rke2CniVersion || true)}"
     REQ_MULTUS_VER="${REQ_MULTUS_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2MultusVersion rke2MultusCniVersion rke2MultusCNIVersion || true)}"
+    REQ_FLANNEL_VER="${REQ_FLANNEL_VER:-$(yaml_spec_get_any "$CONFIG_FILE" rke2FlannelVersion rke2FlannelCniVersion rke2FlannelCNIVersion || true)}"
     local fix_cni_permissions_yaml=""
     fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
-    if bool_value_is_true "$fix_cni_permissions_yaml"; then
-      fix_cni_permissions_enabled=1
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
     fi
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
@@ -8746,12 +9278,16 @@ action_image() {
     boot_mode_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.mode || true)"
     boot_platform_cfg="$(yaml_spec_get "$CONFIG_FILE" bootService.platform || true)"
     
-    # Optional custom CA for registry/cluster
-    CA_ROOT="$(yaml_spec_get "$CONFIG_FILE" customCA.rootCrt || true)"
-    CA_KEY="$(yaml_spec_get "$CONFIG_FILE" customCA.rootKey || true)"
-    CA_INTCRT="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateCrt || true)"
-    CA_INTKEY="$(yaml_spec_get "$CONFIG_FILE" customCA.intermediateKey || true)"
-    CA_INSTALL="$(yaml_spec_get "$CONFIG_FILE" customCA.installToOSTrust || echo true)"
+    # Optional custom CA for registry/cluster from spec.customCA if present.
+    load_custom_ca_from_config "$CONFIG_FILE" "" 1
+    CA_ROOT="${CUSTOM_CA_ROOT_CRT:-}"
+    CA_KEY="${CUSTOM_CA_ROOT_KEY:-}"
+    CA_INTCRT="${CUSTOM_CA_INT_CRT:-}"
+    CA_INTKEY="${CUSTOM_CA_INT_KEY:-}"
+    case "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" in
+      0|[Ff]alse|[Nn]o) CA_INSTALL="false" ;;
+      *) CA_INSTALL="true" ;;
+    esac
     
     metrics_increment "total"
     metrics_increment "success"
@@ -8768,12 +9304,14 @@ action_image() {
   # Honor explicit hardened-cni tag from env/YAML for artifact mirroring.
   [[ -n "$REQ_CNI_VER" ]] && HARDENED_CNI_TAG="$REQ_CNI_VER"
   [[ -n "$REQ_MULTUS_VER" ]] && HARDENED_MULTUS_TAG="$REQ_MULTUS_VER"
+  [[ -n "$REQ_FLANNEL_VER" ]] && HARDENED_FLANNEL_TAG="$REQ_FLANNEL_VER"
 
   # Log effective configuration after YAML/CLI/env resolution.
   log_info "Configuration:"
   log_info "  RKE2_VERSION: ${REQ_VER:-<auto-detect>}"
   log_info "  HARDENED_CNI_TAG: ${HARDENED_CNI_TAG:-<auto-detect>}"
   log_info "  HARDENED_MULTUS_TAG: ${HARDENED_MULTUS_TAG:-<auto-detect>}"
+  log_info "  HARDENED_FLANNEL_TAG: ${HARDENED_FLANNEL_TAG:-<auto-detect>}"
   log_info "  CNI_PLUGINS: ${cni_plugins_csv:-<unset>}"
   log_info "  FIX_CNI_PERMISSIONS: ${fix_cni_permissions_enabled}"
   log_info "  REGISTRY: ${REGISTRY:-<none>}"
@@ -8781,16 +9319,13 @@ action_image() {
   log_info "  REG_USER: ${REG_USER:-<none>}"
   log_info "  DEFAULT_DNS: ${defaultDnsCsv:-<unset>}"
   log_info "  DEFAULT_SEARCH_DOMAINS: ${defaultSearchCsv:-<unset>}"
+  log_info "  CUSTOM_CA_ROOT_CRT: ${CA_ROOT:-<unset>}"
+  log_info "  CUSTOM_CA_INTERMEDIATE_CRT: ${CA_INTCRT:-<unset>}"
+  log_info "  CUSTOM_CA_INSTALL_TO_OS_TRUST: ${CA_INSTALL:-<unset>}"
   log_info "  BOOT_SERVICE_ENABLED: ${boot_enabled_cfg}"
   log_info "  BOOT_SERVICE_MODE: ${boot_mode_cfg:-<unset>}"
   log_info "  BOOT_SERVICE_PLATFORM: ${boot_platform_cfg:-<unset>}"
   log_info "  BOOT_SERVICE_YAML_PATH: ${boot_yaml_path_cfg:-<unset>}"
-
-  # Resolve cert paths relative to script dir if not absolute
-  [[ -n "$CA_ROOT"   && "${CA_ROOT:0:1}"   != "/" ]] && CA_ROOT="$SCRIPT_DIR/$CA_ROOT"
-  [[ -n "$CA_KEY"    && "${CA_KEY:0:1}"    != "/" ]] && CA_KEY="$SCRIPT_DIR/$CA_KEY"
-  [[ -n "$CA_INTCRT" && "${CA_INTCRT:0:1}" != "/" ]] && CA_INTCRT="$SCRIPT_DIR/$CA_INTCRT"
-  [[ -n "$CA_INTKEY" && "${CA_INTKEY:0:1}" != "/" ]] && CA_INTKEY="$SCRIPT_DIR/$CA_INTKEY"
 
   # --- Install OS prerequisites ----------------------------------------------
   report_progress "Installing OS prerequisites" 3 8
@@ -8861,6 +9396,32 @@ action_image() {
   metrics_increment "success"
   metrics_increment "required_image_tags_validated"
 
+  # Copy the RKE2 binary and checksum into an offline artifacts directory for
+  # install.sh to consume without internet.  Operators can set
+  # INSTALL_RKE2_ARTIFACT_PATH to this directory during installation.  This
+  # directory mirrors the layout recommended in the RKE2 air‑gap docs.
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    local artifact_dir="/opt/rke2/artifacts"
+    mkdir -p "$artifact_dir"
+    # Copy tarball and checksum if present in the stage directory
+    if [[ -f "$STAGE_DIR/$RKE2_TARBALL" ]]; then
+      cp -f "$STAGE_DIR/$RKE2_TARBALL" "$artifact_dir/" || true
+    elif [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+      cp -f "$DOWNLOADS_DIR/$RKE2_TARBALL" "$artifact_dir/" || true
+    fi
+    if [[ -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+      cp -f "$STAGE_DIR/$SHA256_FILE" "$artifact_dir/" || true
+    elif [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+      cp -f "$DOWNLOADS_DIR/$SHA256_FILE" "$artifact_dir/" || true
+    fi
+    if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
+      cp -f "$DOWNLOADS_DIR/install.sh" "$artifact_dir/" || true
+    fi
+    log_info "Offline installer artifacts copied to $artifact_dir"
+  else
+    log_info "DRY-RUN: Would copy RKE2 artifacts into /opt/rke2/artifacts"
+  fi
+
   # --- Optional: Load images into local runtime ------------------------------
   report_progress "Processing container images" 5 8
   if [[ "${LOAD_IMAGES:-0}" -eq 1 ]]; then
@@ -8906,17 +9467,124 @@ action_image() {
   metrics_increment "success"
   metrics_increment "registry_trust_configured"
 
-  # Collect artifact inventory for SBOM and verification
-  log_info "Collecting artifact inventory for SBOM generation"
+  # Generate a custom-CA bootstrap token file in image outputs when custom CA exists.
+  if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
+    local image_token=""
+    local image_token_file="${OUT_DIR}/${SPEC_NAME:-image}-bootstrap-token.txt"
+    local token_alias_yaml_dir=""
+    local _alias_manifest=""
+    local _alias_token_file=""
+    local _created_targets=""
+    local -A _written_token_targets=()
+
+    if [[ -n "$CA_ROOT" && ! -f "$CA_ROOT" ]]; then
+      log_error "Custom CA root certificate path is not readable during image action: $CA_ROOT"
+      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
+      exit 1
+    fi
+    if [[ -n "$CA_INTCRT" && ! -f "$CA_INTCRT" ]]; then
+      log_error "Custom CA intermediate certificate path is not readable during image action: $CA_INTCRT"
+      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
+      exit 1
+    fi
+
+    CUSTOM_CA_ROOT_CRT="${CA_ROOT:-${CUSTOM_CA_ROOT_CRT:-}}"
+    CUSTOM_CA_ROOT_KEY="${CA_KEY:-${CUSTOM_CA_ROOT_KEY:-}}"
+    CUSTOM_CA_INT_CRT="${CA_INTCRT:-${CUSTOM_CA_INT_CRT:-}}"
+    CUSTOM_CA_INT_KEY="${CA_INTKEY:-${CUSTOM_CA_INT_KEY:-}}"
+
+    if ! image_token="$(generate_bootstrap_token)"; then
+      log_error "Custom CA bootstrap token generation failed during image action."
+      exit 1
+    fi
+
+    image_token="${image_token//$'\n'/}"
+    image_token="${image_token//$'\r'/}"
+    if [[ -z "$image_token" ]]; then
+      log_error "Custom CA bootstrap token generation returned empty output during image action."
+      exit 1
+    fi
+
+    mkdir -p "$(dirname "$image_token_file")"
+    printf '%s\n' "$image_token" > "$image_token_file"
+    chmod 600 "$image_token_file"
+    _written_token_targets["$image_token_file"]=1
+    log_info "Custom CA bootstrap token generated: $image_token_file"
+
+    if [[ -n "$boot_yaml_path_cfg" ]]; then
+      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$boot_yaml_path_cfg")"
+    elif [[ -n "${BOOT_YAML_PATH:-}" ]]; then
+      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$BOOT_YAML_PATH")"
+    fi
+
+    if [[ -n "$token_alias_yaml_dir" && -d "$token_alias_yaml_dir" ]]; then
+      while IFS= read -r _alias_manifest; do
+        _alias_token_file="$(yaml_spec_get "$_alias_manifest" tokenFile || true)"
+        [[ -n "$_alias_token_file" ]] || continue
+
+        if [[ "$_alias_token_file" != /rke2-node-init/outputs/* ]]; then
+          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile is outside /rke2-node-init/outputs: $_alias_token_file"
+          continue
+        fi
+
+        if [[ -n "${_written_token_targets["$_alias_token_file"]+x}" ]]; then
+          continue
+        fi
+
+        mkdir -p "$(dirname "$_alias_token_file")"
+        printf '%s\n' "$image_token" > "$_alias_token_file"
+        chmod 600 "$_alias_token_file" || true
+        _written_token_targets["$_alias_token_file"]=1
+        log_info "Created bootstrap token alias for $_alias_manifest: $_alias_token_file"
+      done < <(find "$token_alias_yaml_dir" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+    fi
+
+    for _alias_token_file in "${!_written_token_targets[@]}"; do
+      _created_targets+="${_created_targets:+, }${_alias_token_file}"
+    done
+    log_info "Bootstrap token artifacts created: ${_created_targets}"
+  else
+    log_info "No customCA stanza detected; skipping custom CA bootstrap token generation."
+  fi
+
+  # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
+  # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
+  # when the `import-images: true` flag is present.  The configuration also
+  # carries an optional embedded registry toggle if the YAML spec requests it
+  # (spec.embeddedRegistry or spec.embedded-registry).  Finally, ensure
+  # disable-default-registry-endpoint is appended so that containerd never
+  # contacts upstream registries on air‑gapped nodes.
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    mkdir -p /etc/rancher/rke2
+    : > /etc/rancher/rke2/config.yaml
+    echo "import-images: true" >> /etc/rancher/rke2/config.yaml
+    # Honour embedded-registry setting from YAML spec if provided
+    local _emb=""
+    if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+      _emb="$(yaml_spec_get_any "$CONFIG_FILE" embedded-registry embeddedRegistry || true)"
+      if bool_value_is_true "$_emb"; then
+        echo "embedded-registry: true" >> /etc/rancher/rke2/config.yaml
+      fi
+    fi
+    # Always append the offline registry guard.  This helper writes
+    # disable-default-registry-endpoint: true when images are staged.
+    append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
+    chmod 600 /etc/rancher/rke2/config.yaml || true
+    log_info "Wrote /etc/rancher/rke2/config.yaml with offline defaults"
+  else
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml with import-images and offline defaults"
+  fi
 
   # --- Save site defaults (DNS/search) ---------------------------------------
-  report_progress "Saving site defaults" 7 8
+  report_progress "Persisting defaults and automation" 7 8
   local STATE="/etc/rke2image.defaults"
+  touch "$STATE"
+  sed -i -e '/^DEFAULT_DNS=/d' -e '/^DEFAULT_SEARCH=/d' "$STATE"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
     echo "DEFAULT_SEARCH=\"$defaultSearchCsv\""
-  } > "$STATE"
-  chmod 600 "$STATE"
+  } >> "$STATE"
+  chmod 600 "$STATE" || true
   log_info "Site defaults saved to: $STATE"
   log_info "  DNS servers: $defaultDnsCsv"
   log_info "  Search domains: $defaultSearchCsv"
@@ -8944,39 +9612,66 @@ action_image() {
     [[ -n "$boot_mode_yaml" ]] && BOOT_SERVICE_MODE="$boot_mode_yaml"
     [[ -n "$boot_platform_yaml" ]] && VM_PLATFORM="$boot_platform_yaml"
   fi
+
+  if [[ "$BOOT_SERVICE_MODE" != "oneshot" && "$BOOT_SERVICE_MODE" != "persistent" ]]; then
+    log_error "Invalid boot service mode: $BOOT_SERVICE_MODE"
+    log_error "Valid values are: oneshot, persistent"
+    exit 1
+  fi
   
   # Normalize boolean value
   boot_enabled="$(normalize_bool_value "$boot_enabled")"
   
   # Install and enable boot service only when explicitly requested.
   if [[ "$ENABLE_BOOT_SERVICE" -eq 1 ]] || [[ "$boot_enabled" == "true" ]]; then
+    if [[ -z "${BOOT_YAML_PATH:-}" ]]; then
+      log_error "bootService.yamlPath (or --boot-yaml-path) is required when boot service is enabled"
+      log_error "Expected a directory containing per-node YAML configs"
+      exit 1
+    fi
+
+    boot_yaml_dir="$(resolve_boot_yaml_dir "$BOOT_YAML_PATH")"
+    if [[ ! -d "$boot_yaml_dir" ]]; then
+      log_error "bootService.yamlPath must point to an existing directory"
+      log_error "Resolved path: $boot_yaml_dir"
+      exit 1
+    fi
+
+    boot_iso_output_dir="${RUN_OUT_DIR:-$OUT_DIR}/boot-isos"
+    boot_iso_manifest="$boot_iso_output_dir/manifest.tsv"
+
+    if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+      log_info "Generating per-node boot ISOs from: $boot_yaml_dir"
+      if ! generate_bootservice_isos "$boot_yaml_dir" "$boot_iso_output_dir" "$boot_iso_manifest"; then
+        log_error "Boot service requested, but ISO generation failed"
+        exit 1
+      fi
+      log_info "Boot-service ISO output directory: $boot_iso_output_dir"
+      log_info "Boot-service ISO manifest: $boot_iso_manifest"
+    else
+      log_info "DRY-RUN: Would generate per-node boot ISOs from: $boot_yaml_dir"
+      log_info "DRY-RUN: Would write ISO artifacts under: $boot_iso_output_dir"
+    fi
+
     if install_boot_script; then
       if install_boot_service; then
-        log_info "✓ Boot script and service installed successfully"
+        log_info "Boot script and service installed successfully"
         log_info "  Script: $BOOT_SCRIPT_PATH"
         log_info "  Service: $BOOT_SERVICE_PATH"
         log_info "  Mode: $BOOT_SERVICE_MODE"
         log_info "  Platform: $(detect_vm_platform)"
-        log_info "  Config search paths:"
-        for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-          log_info "    - $search_path"
-        done
+        log_info "  YAML source directory: $boot_yaml_dir"
+        if [[ -n "$boot_iso_output_dir" ]]; then
+          log_info "  ISO output directory: $boot_iso_output_dir"
+          log_info "  ISO manifest: $boot_iso_manifest"
+          log_info "  ISO files generated: ${BOOT_ISO_COUNT:-0}"
+        fi
         log_info "  Target directory: $BOOT_TARGET_DIR"
         
-        # Display Hyper-V specific requirements
-        if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-          log_info ""
-          log_info "Hyper-V Configuration Required:"
-          log_info "  Run this PowerShell command on the Hyper-V host for each VM:"
-          log_info "  Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-          log_info "  Example: Set-VMKeyValuePairItem -VMName \"cotpa-ctrl01\" -Key \"VirtualMachineName\" -Value \"cotpa-ctrl01\""
-          log_info "  Without this, the guest hostname will be used as fallback."
-        fi
-
         if enable_boot_service; then
-          log_info "✓ Boot service ENABLED for next reboot"
-          log_info "IMPORTANT: Place node configs in search paths with naming: {hostname}.yaml"
-          log_info "           Boot service will auto-discover and copy configs on first boot"
+          log_info "Boot service enabled for next reboot"
+          log_info "IMPORTANT: Attach a boot config ISO (with /config/<yaml>) as a virtual CD at provisioning time"
+          log_info "           Boot service is ISO-only and uses the first YAML found under /config"
         else
           log_warn "Failed to enable boot service; install completed but service not active"
         fi
@@ -8999,7 +9694,7 @@ action_image() {
   if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
     log_info "Enabling CNI permission remediation (requested by YAML/CLI)"
     if install_cni_permission_remediation; then
-      log_info "✓ CNI permission remediation installed and enabled"
+      log_info "CNI permission remediation installed and enabled"
       metrics_increment "total"
       metrics_increment "success"
       metrics_increment "cni_perm_fix_enabled"
@@ -9017,6 +9712,7 @@ action_image() {
   # --- SBOM and README generation --------------------------------------------
   report_progress "Generating SBOM and documentation" 8 8
   log_info "Generating Software Bill of Materials (SBOM)"
+  log_info "Collecting artifact inventory for SBOM generation"
   
   # Ensure nerdctl archive names are known for reporting
   local full_tgz="${NERDCTL_FULL_TGZ:-}"
@@ -9534,14 +10230,20 @@ PY
       echo "Custom CA: ${CA_ROOT:-<none>} (installed to OS trust: ${CA_INSTALL})"
       echo "Staged:"
       echo "  - /var/lib/rancher/rke2/agent/images/${IMAGES_TAR}"
-      echo "  - $STAGE_DIR/${RKE2_TARBALL}, $STAGE_DIR/${SHA256_FILE}, $STAGE_DIR/install.sh"
+      echo "  - ${STAGE_DIR}/${RKE2_TARBALL}, ${STAGE_DIR}/${SHA256_FILE}, ${STAGE_DIR}/install.sh"
+      echo "  - /opt/rke2/artifacts/${RKE2_TARBALL}"
+      echo "  - /opt/rke2/artifacts/${SHA256_FILE}"
+      echo "  - /opt/rke2/artifacts/install.sh"
       echo "Defaults:"
       echo "  - DNS: ${defaultDnsCsv}"
       echo "  - Search Domains: ${defaultSearchCsv:-<none>}"
       echo
       echo "Next Steps:"
-      echo "  - Shut down this VM and clone it for use in the air-gapped environment"
-      echo "  - Run this script in 'server' or 'agent' mode on the clone(s)"
+      echo "  - Power off this VM and clone it for use in your air‑gapped environment.  Do not connect the cloned node(s) to the Internet."
+      echo "  - Do not configure any external package repositories or remote container registries on the cloned node(s); all images are already present locally."
+      echo "  - When the clone boots, run this script in \"server\" or \"agent\" mode on the node(s) to apply the RKE2 configuration.  The script will import the images from /var/lib/rancher/rke2/agent/images and use the offline artifacts stored in /opt/rke2/artifacts."
+      echo "  - Alternatively, you can manually install RKE2 offline by setting INSTALL_RKE2_ARTIFACT_PATH=/opt/rke2/artifacts and running ./install.sh from that directory."
+      echo "  - Ensure that /etc/rancher/rke2/registries.yaml exists with a \"global: disable-default-registry-endpoint: true\" section so that containerd never falls back to public registries."
     } > "$RUN_OUT_DIR/README.txt"
     log_info "README written to: $RUN_OUT_DIR/README.txt"
     metrics_increment "total"
@@ -9573,31 +10275,26 @@ PY
   log_info "Next steps:"
   log_info "  1. Review SBOM and verify all artifacts"
   if [[ "$boot_status" == "ENABLED"* ]]; then
-    log_info "  2. Place node-specific YAML configs in: $REPO_ROOT/configs/"
-    log_info "     - Naming pattern: {hostname}.yaml (e.g., node01.yaml)"
-    log_info "     - Boot service will auto-discover configs by VM hostname"
-    
-    # Add Hyper-V specific instructions
-    if [[ "$(detect_vm_platform)" == "hyperv" ]]; then
-      log_info "  3. Configure VM names on Hyper-V host (PowerShell on host):"
-      log_info "     Set-VMKeyValuePairItem -VMName \"<vm-name>\" -Key \"VirtualMachineName\" -Value \"<vm-name>\""
-      log_info "     (Without this, guest hostname will be used as fallback)"
-      log_info "  4. Clone/template this VM for deployment"
-      log_info "  5. First boot will automatically:"
+    if [[ -n "$boot_iso_output_dir" ]]; then
+      log_info "  2. Collect generated boot ISOs from: $boot_iso_output_dir"
+      log_info "     - One ISO per node named metadata.name.iso"
+      log_info "     - Manifest: $boot_iso_manifest"
     else
-      log_info "  3. Clone/template this VM for deployment"
-      log_info "  4. First boot will automatically:"
+      log_info "  2. Build per-node metadata.name.iso artifacts from your YAML directory"
     fi
-    log_info "     - Query VM hostname from hypervisor"
-    log_info "     - Search for matching config: {hostname}.yaml"
-    log_info "     - Copy config to: $BOOT_TARGET_DIR/{hostname}.yaml"
+    log_info "  3. Attach a boot config ISO (containing /config/<yaml>) as virtual CD during provisioning"
+    log_info "  4. Clone/template this VM for deployment"
+    log_info "  5. First boot will automatically:"
+    log_info "     - Scan attached ISO media for /config/*.yaml"
+    log_info "     - Select the first YAML file found"
+    log_info "     - Copy config to: $BOOT_TARGET_DIR/{yaml-filename}"
     log_info "     - Execute: rke2nodeinit.sh -f {config} -y"
+    if [[ "$BOOT_SERVICE_MODE" == "persistent" ]]; then
+      log_info "     - Rerun only when attached ISO config hash changes"
+    fi
     log_info ""
     log_info "Boot service status: $boot_status"
-    log_info "Config search paths:"
-    for search_path in "${BOOT_CONFIG_SEARCH_PATHS[@]}"; do
-      log_info "  - $search_path"
-    done
+    log_info "Boot service mode: $BOOT_SERVICE_MODE"
   else
     log_info "  2. Clone this VM for air-gapped deployment"
     log_info "  3. Run 'server' or 'agent' action on cloned nodes"
@@ -9741,6 +10438,7 @@ action_server() {
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local -a NET_INTERFACES=()
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -9761,6 +10459,15 @@ action_server() {
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "total"
     metrics_increment "success"
@@ -9867,6 +10574,18 @@ action_server() {
     metrics_increment "failed"
     exit 3
   fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before server startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
+    metrics_increment "failed"
+    exit 3
+  fi
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "artifacts_staged"
@@ -9944,8 +10663,28 @@ action_server() {
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN_FILE" ]]; then
-    log_info "Token file provided; skipping token expansion/generation."
-    TOKEN=""
+    local resolved_token_file="$TOKEN_FILE"
+    if [[ "$resolved_token_file" != /* ]]; then
+      if [[ -f "$REPO_ROOT/$resolved_token_file" ]]; then
+        resolved_token_file="$REPO_ROOT/$resolved_token_file"
+      fi
+    fi
+
+    if [[ -f "$resolved_token_file" && -r "$resolved_token_file" ]]; then
+      TOKEN_FILE="$resolved_token_file"
+      log_info "Token file provided and found; using token-file: $TOKEN_FILE"
+      TOKEN=""
+    else
+      log_warn "Token file provided but unavailable: $TOKEN_FILE"
+      log_warn "Falling back to generated first-server bootstrap token."
+      TOKEN_FILE=""
+      TOKEN="$(generate_bootstrap_token)"
+      if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
+        log_info "Using fallback generated secure first-server token (custom CA fingerprint embedded)."
+      else
+        log_info "Using fallback generated short first-server bootstrap token."
+      fi
+    fi
   elif [[ -n "$TOKEN" ]]; then
     local full_token
     full_token="$(ensure_full_cluster_token "$TOKEN")"
@@ -9975,6 +10714,7 @@ action_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Get token..." >&2
       if [[ -n "$TOKEN" ]]; then
@@ -9987,6 +10727,7 @@ action_server() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
@@ -10011,6 +10752,23 @@ action_server() {
   metrics_increment "success"
   metrics_increment "config_written"
 
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
+
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     if (( ${#NET_INTERFACES[@]} )); then
@@ -10024,6 +10782,13 @@ action_server() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "netplan_written"
+
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    log_info "Applying server offline registry safeguard (loopback mirror endpoints)"
+    ensure_server_loopback_registry_safeguard "$CONFIG_FILE"
+  else
+    log_info "DRY-RUN: Would enforce server offline registry safeguard"
+  fi
 
   # Phase 8: Install RKE2
   report_progress "Installing RKE2 server" 8 8
@@ -10108,6 +10873,10 @@ action_server() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-server installed. Reboot to initialize the control plane."
     echo "        First server token: /var/lib/rancher/rke2/server/node-token"
   else
@@ -10174,6 +10943,7 @@ action_agent() {
   local TOKEN="" GW=""  URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
   local NODE_IP_SPEC="" NODE_NAME_SPEC=""
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -10193,11 +10963,20 @@ action_agent() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "config_loaded"
   fi
 
-  log INFO "Reading configuration from CLI args (if provided)..."
+  log_info "Reading configuration from CLI args (if provided)..."
   local -A agent_cli=()
   parse_action_cli_args agent_cli "agent" "${ACTION_ARGS[@]}"
 
@@ -10206,7 +10985,7 @@ action_agent() {
     yaml_has_interfaces_agent=1
   fi
 
-  log INFO "Merging configuration values..."
+  log_info "Merging configuration values..."
   if [[ -z "$HOSTNAME" && -n "${agent_cli[hostname]:-}" ]]; then
     HOSTNAME="${agent_cli[hostname]}"
   fi
@@ -10267,40 +11046,16 @@ action_agent() {
   merge_primary_interface_fields NET_INTERFACES IP PREFIX GW DNS SEARCH
   metrics_increment "config_validated"
 
-  # Phase 3: Stage artifacts
-  report_progress "Staging RKE2 artifacts" 3 8
-  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
-  if ! ensure_staged_artifacts; then
-    log_error "Failed to ensure staged artifacts"
-    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
-    metrics_increment "failed"
-    exit 3
-  fi
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "artifacts_staged"
-
-  # Phase 4: Configure system
-  report_progress "Configuring system" 4 8
-  log_info "Setting new hostname: $HOSTNAME..."
-  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
-    hostnamectl set-hostname "$HOSTNAME"
-    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-  else
-    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
-  fi
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "hostname_set"
-
+  # Phase 3: Network configuration
+  report_progress "Configuring network" 3 8
   local prompt_extra_ifaces_agent=1
   if (( ${#NET_INTERFACES[@]} )); then
     if (( yaml_has_interfaces_agent )); then
       prompt_extra_ifaces_agent=0
-      log INFO "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
+      log_info "Interfaces defined in YAML manifest; skipping interactive prompt for additional NICs."
     elif [[ -n "${agent_cli[interfaces]:-}" ]]; then
       prompt_extra_ifaces_agent=0
-      log INFO "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
+      log_info "Interfaces provided via CLI flags; skipping interactive prompt for additional NICs."
     fi
   fi
 
@@ -10314,7 +11069,7 @@ action_agent() {
     for _encoded in "${NET_INTERFACES[@]}"; do
       local -A _nic_dbg=()
       if ! interface_decode_entry "$_encoded" _nic_dbg; then
-        log WARN "Skipping invalid interface entry in summary"
+        log_warn "Skipping invalid interface entry in summary"
         continue
       fi
       local _name_dbg="${_nic_dbg[name]:-<auto>}"
@@ -10337,6 +11092,44 @@ action_agent() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "interfaces_configured"
+
+  # Phase 4: Stage artifacts
+  report_progress "Staging RKE2 artifacts" 4 8
+  log_info "Ensuring staged artifacts for offline RKE2 agent install..."
+  if ! ensure_staged_artifacts; then
+    log_error "Failed to ensure staged artifacts"
+    log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before agent startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
+    metrics_increment "failed"
+    exit 3
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "artifacts_staged"
+
+  # Phase 5: Configure system
+  report_progress "Configuring system" 5 8
+  log_info "Setting new hostname: $HOSTNAME..."
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    hostnamectl set-hostname "$HOSTNAME"
+    if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  else
+    log_info "DRY-RUN: Would set hostname to $HOSTNAME and update /etc/hosts"
+  fi
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "hostname_set"
 
   # Phase 6: Gather cluster join information
   report_progress "Configuring cluster join" 6 8
@@ -10377,6 +11170,7 @@ action_agent() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
@@ -10392,6 +11186,7 @@ action_agent() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
@@ -10415,6 +11210,23 @@ action_agent() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "config_written"
+
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
 
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -10491,6 +11303,10 @@ action_agent() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-agent installed. Reboot to initialize the worker node."
   else
     echo "[DRY-RUN] Agent configuration validated. No changes made."
@@ -10553,6 +11369,7 @@ action_add_server() {
   local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
   local URL="" TOKEN_FILE=""
   local -a NET_INTERFACES=()
+  local fix_cni_permissions_enabled="$FIX_CNI_PERMISSIONS"
 
   log_info "Reading configuration from YAML (if provided)..."
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -10573,6 +11390,15 @@ action_add_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
+    local fix_cni_permissions_yaml=""
+    fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
+    if [[ -n "$fix_cni_permissions_yaml" ]]; then
+      if bool_value_is_true "$fix_cni_permissions_yaml"; then
+        fix_cni_permissions_enabled=1
+      else
+        fix_cni_permissions_enabled=0
+      fi
+    fi
     load_custom_ca_from_config "$CONFIG_FILE"
     metrics_increment "config_loaded"
   fi
@@ -10673,6 +11499,18 @@ action_add_server() {
   if ! ensure_staged_artifacts; then
     log_error "Failed to ensure staged artifacts"
     log_error "Remediation: Check $STAGE_DIR and re-run 'image' action"
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_cni_images_staged "$CONFIG_FILE"; then
+    log_error "CNI staged-image preflight failed (required Canal/Multus images missing)."
+    log_error "Remediation: run 'image' and stage complete offline bundles before add-server startup."
+    metrics_increment "failed"
+    exit 3
+  fi
+  if ! verify_required_image_tags_staged; then
+    log_error "Required image/tag validation failed for staged artifacts."
+    log_error "Remediation: run 'image' and ensure all chart-required image tags are staged."
     metrics_increment "failed"
     exit 3
   fi
@@ -10785,6 +11623,7 @@ action_add_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
+      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
@@ -10800,6 +11639,7 @@ action_add_server() {
 
       log_debug "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..." >&2
       append_spec_config_extras "$CONFIG_FILE"
+      append_offline_registry_guard_default "/etc/rancher/rke2/config.yaml" "$CONFIG_FILE"
 
       # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
       echo "kubelet-arg:"
@@ -10823,6 +11663,23 @@ action_add_server() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "config_written"
+
+  if [[ "$fix_cni_permissions_enabled" -eq 1 ]]; then
+    log_info "Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability"
+    if install_cni_permission_remediation; then
+      log_info "CNI permission remediation installed and enabled"
+      metrics_increment "total"
+      metrics_increment "success"
+      metrics_increment "cni_perm_fix_enabled"
+    else
+      log_warn "Failed to install/enable CNI permission remediation; continuing"
+      metrics_increment "total"
+      metrics_increment "skipped"
+      metrics_increment "cni_perm_fix_warned"
+    fi
+  else
+    log_info "CNI permission remediation disabled by configuration"
+  fi
 
   log_info "Writing netplan configuration and applying network settings..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -10895,6 +11752,10 @@ action_add_server() {
 
   echo
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+  log_info "NOTE: This node is configured for fully offline operation."
+  log_info "  Images staged in /var/lib/rancher/rke2/agent/images will be imported automatically."
+  log_info "  RKE2 offline artifacts are located in /opt/rke2/artifacts and will be used by the installer."
+  log_info "  The node does not need to access any external registry."
     echo "[READY] rke2-server installed. Reboot to join the control plane."
   else
     echo "[DRY-RUN] Add-server configuration validated. No changes made."

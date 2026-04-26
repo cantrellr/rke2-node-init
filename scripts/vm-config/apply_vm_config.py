@@ -9,7 +9,7 @@ appropriate client (Hyper-V, VMware, etc.).
 Usage:
     python3 apply_vm_config.py <config-file.yaml>
     python3 apply_vm_config.py <config-file.yaml> --dry-run
-    python3 apply_vm_config.py --all vm-configs/clusters/cotpa/
+    python3 apply_vm_config.py --all <config-directory>/
 """
 
 import sys

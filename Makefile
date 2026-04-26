@@ -12,8 +12,11 @@ export TOKEN_SIZE ?= 32
 export TOKEN_OUTPUT_DIR := outputs/generated-token
 export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
+export BOOT_ISO_YAML_DIR ?= configs/preprod/nodes
+export BOOT_ISO_OUTPUT_DIR ?= outputs/boot-isos
+export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 
-.PHONY: token sh kubeconfig
+.PHONY: token sh kubeconfig boot-isos boot-isos-clean
 ## Generate a reusable base64 token and persist it for later use.
 token:
 	@set -euo pipefail; \
@@ -40,3 +43,16 @@ kubeconfig:
 		command -v kubectl; \
 		ls -l /usr/local/bin/kubectl; \
 		kubectl get node -o wide
+
+## Build per-node boot ISOs from YAML files in a folder (metadata.name.iso).
+boot-isos:
+	@set -euo pipefail; \
+		bash scripts/build-boot-isos.sh \
+		  --yaml-dir "${BOOT_ISO_YAML_DIR}" \
+		  --output-dir "${BOOT_ISO_OUTPUT_DIR}" \
+		  --manifest "${BOOT_ISO_MANIFEST}"
+
+## Remove generated boot ISO artifacts.
+boot-isos-clean:
+	@set -euo pipefail; \
+		rm -rf "${BOOT_ISO_OUTPUT_DIR}"

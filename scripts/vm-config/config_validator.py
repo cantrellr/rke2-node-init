@@ -7,7 +7,7 @@ additional semantic checks for consistency and best practices.
 
 Usage:
     python3 config_validator.py <config-file.yaml>
-    python3 config_validator.py --all vm-configs/
+    python3 config_validator.py --all <config-directory>/
 """
 
 import sys

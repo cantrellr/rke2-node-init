@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Simple test: run the render helper against all YAML manifests under configs/ and clusters/
+# Simple test: run the render helper against YAML manifests under the repository.
 # Fail if any rendered fragment contains more than one 'token-file:' line.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"

@@ -18,5 +18,5 @@ Option 3: Extract from existing registry
   openssl s_client -showcerts -connect registry.example.com:443 </dev/null 2>/dev/null \
     | openssl x509 -outform PEM > rke2registry-ca.crt
 
-See certs/README.md for complete instructions.
+See scripts/certs/README.md for complete instructions.
 -----END CERTIFICATE-----
