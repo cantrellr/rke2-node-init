@@ -2,112 +2,121 @@
 
 ## Supported Versions
 
-We actively support the latest version of rke2-node-init. Security patches will be applied to the current release.
+Security fixes are applied to actively maintained code on the default branch.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| main    | :white_check_mark: |
-| < main  | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| main | :white_check_mark: |
+| < main | :x: |
 
 ## Reporting a Vulnerability
 
-We take security vulnerabilities seriously. If you discover a security issue in rke2-node-init, please report it responsibly.
+Please do not open public issues for vulnerability reports.
 
-### How to Report
+### Preferred Reporting Channel
 
-**Please DO NOT open a public GitHub issue for security vulnerabilities.**
+Use GitHub Security Advisories:
 
-Instead, please report security vulnerabilities through one of the following methods:
+1. Go to the [Security Advisories page](https://github.com/cantrellr/rke2-node-init/security/advisories)
+2. Select **Report a vulnerability**
+3. Provide technical details and impact assessment
 
-1. **GitHub Security Advisories (Preferred)**
-   - Navigate to the [Security tab](https://github.com/cantrellr/rke2-node-init/security/advisories)
-   - Click "Report a vulnerability"
-   - Provide detailed information about the vulnerability
+### Alternate Reporting Channel
 
-2. **Email**
-   - Contact the repository maintainer directly
-   - Include "SECURITY" in the subject line
-   - Provide detailed information about the vulnerability
+If GitHub Advisories are unavailable, contact the maintainer privately and include `SECURITY` in the message subject.
 
-### What to Include
+## What To Include In A Report
 
-When reporting a vulnerability, please include:
+Please include the following whenever possible:
 
-- **Description**: A clear description of the vulnerability
-- **Impact**: The potential impact and severity of the issue
-- **Steps to Reproduce**: Detailed steps to reproduce the vulnerability
-- **Affected Versions**: Which versions are affected
-- **Proposed Fix**: If you have suggestions for fixing the issue
-- **Your Contact Information**: How we can reach you for follow-up
+- Vulnerability type and concise description
+- Affected components and paths (for example, `bin/rke2nodeinit.sh`, `scripts/`, or `configs/`)
+- Reproduction steps or proof-of-concept
+- Impact and likely exploitability
+- Suggested remediation (if available)
+- Contact details for follow-up
 
-### Response Timeline
+## Coordinated Disclosure Process
 
-- **Initial Response**: Within 48 hours of report submission
-- **Triage**: Within 5 business days
-- **Fix Timeline**: Depends on severity
+- We follow coordinated disclosure practices.
+- We will acknowledge receipt, triage, and provide status updates.
+- We ask reporters to avoid public disclosure until a fix or mitigation is available.
+- Reporter credit is provided unless anonymity is requested.
+
+## Response Targets
+
+These are targets, not guarantees:
+
+- Initial response: within 48 hours
+- Triage decision: within 5 business days
+- Remediation target by severity:
   - Critical: 7 days
   - High: 14 days
   - Medium: 30 days
   - Low: 90 days
 
-### Security Best Practices
+## Security Scope
 
-When using rke2-node-init:
+In-scope repository content includes:
 
-1. **Credential Management**
-   - Never commit certificates, private keys, or tokens to version control
-   - Use the provided `.gitignore` patterns to prevent accidental commits
-   - Store sensitive data in production paths (`configs/production/`) which are git-ignored
+- Runtime automation and orchestration code in `bin/` and `scripts/`
+- Manifest and configuration handling in `configs/`
+- Test helpers and validation scripts in `tests/`
+- CI validation logic in `.github/workflows/`
 
-2. **Certificate Handling**
-   - Rotate certificates regularly
-   - Use certificate generation scripts in `scripts/certs/`
-   - Keep private keys with restrictive permissions (600 or 400)
+Out-of-scope items generally include:
 
-3. **Air-Gapped Deployments**
-   - Verify checksums for all downloaded artifacts
-   - Use registry mirroring with authentication
-   - Implement custom CA trust chains properly
+- Third-party vulnerabilities that are not introduced by this repository
+- Misconfiguration of external infrastructure outside this project
+- Public data with no security impact
 
-4. **Script Execution**
-   - Always review scripts before execution
-   - Run with minimal required privileges (note: `bin/rke2nodeinit.sh` requires root for system modifications)
-   - Enable audit logging in production environments
+## Hardening And Safe Operation Guidance
 
-5. **Configuration Files**
-   - Use example configurations as templates only
-   - Sanitize configuration files before sharing
-   - Validate YAML syntax and content before deployment
+1. Secrets and key handling
+   - Never commit private keys, tokens, kubeconfigs, or registry credentials.
+   - Treat all material under environment-scoped paths (for example `configs/cotpa/certs/` and `configs/preprod/certs/`) as sensitive.
+   - Use restrictive permissions (`600` for sensitive files, `700` for private key directories).
 
-### Known Security Considerations
+2. Certificate lifecycle
+   - Generate and rotate certificates using `scripts/certs/` tooling.
+   - Validate trust chains before promotion to production-like environments.
 
-1. **Root Execution Required**: The script requires root privileges to modify system networking, install packages, and configure services. This is inherent to the operations performed.
+3. Air-gap artifact integrity
+   - Verify checksums/signatures of downloaded artifacts before staging.
+   - Keep staging inputs immutable after verification.
+   - Prefer internal registry mirroring with TLS and authenticated access.
 
-2. **Sensitive Data in Memory**: During execution, tokens and credentials are temporarily held in memory. The script uses best practices to minimize exposure.
+4. Privilege and execution controls
+   - Run scripts with least privilege; note that some actions require root for system changes.
+   - Execute from controlled administrative hosts and keep audit records of runs.
 
-3. **Registry Authentication**: Registry credentials are stored in `/etc/rancher/rke2/registries.yaml`. Ensure proper file permissions (600) are maintained.
+5. Configuration hygiene
+   - Use `configs/` manifests as templates and sanitize sensitive fields before sharing.
+   - Validate YAML and rendered runtime configuration before deployment.
 
-4. **Offline Operations**: Most operations are designed for air-gapped environments, minimizing external attack surface.
+6. Continuous verification
+   - Use repository test and validation scripts prior to merges and release cuts.
+   - Run `scripts/run_vuln_scan.sh` regularly in CI or controlled admin environments.
 
-### Disclosure Policy
+## Known Security Considerations
 
-- We follow **coordinated disclosure** principles
-- We will work with reporters to understand and fix the issue
-- Public disclosure will occur after a fix is available
-- We will credit reporters (unless they prefer to remain anonymous)
+1. Root-level operations are required for networking, package installation, and service management.
+2. Sensitive values may exist in process memory during execution.
+3. Registry authentication material may be written to `/etc/rancher/rke2/registries.yaml`; enforce strict permissions.
+4. Air-gapped operation reduces external dependency risk but increases importance of internal artifact integrity.
 
-### Security Updates
+## Security Updates
 
-Security updates will be:
-- Announced in the CHANGELOG.md
-- Tagged with appropriate version numbers
-- Communicated through GitHub Security Advisories
-- Documented with CVE identifiers when applicable
+Security-related fixes are communicated through:
 
-## Questions?
+- [CHANGELOG.md](CHANGELOG.md)
+- GitHub Security Advisories
+- Tagged releases (and CVE references when applicable)
 
-If you have questions about this security policy, please open a general issue (not for vulnerabilities) or contact the maintainer.
+## Questions
+
+For non-vulnerability security questions, open a standard GitHub issue.
 
 ---
 
-Last Updated: 2026-04-24
+Last Updated: 2026-04-25

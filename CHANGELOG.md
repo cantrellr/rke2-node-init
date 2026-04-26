@@ -9,11 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- No unreleased changes yet.
+
+## [2.0.0] - 2026-04-25
+
+### Added
+
+- Canonical v2.0 documentation set: `docs/CLI-REFERENCE.md`, `docs/OPERATIONAL-RUNBOOK.md`, `docs/TROUBLESHOOTING.md`, `docs/TESTING-GUIDE.md`, `docs/SCRIPTS-REFERENCE.md`, `docs/MIGRATION-v2.0.md`, and `docs/PR-VALIDATION-CHECKLIST.md`.
+
+### Changed
+
+- Refined the README header presentation with workflow/status badges, high-contrast project badges, and an updated ASCII banner that explicitly brands the project as RKE2 Node Init.
+- Updated ROADMAP metadata and planning status for April 2026, including active CI pipeline progress and current validation workflow coverage.
+- Rewrote SECURITY policy sections for clearer coordinated disclosure guidance, explicit scope boundaries, and repo-accurate environment-scoped certificate path references.
 - Reduced default CNI permissions remediation timer cadence for faster Multus/Canal bootstrap convergence: `OnBootSec=10s`, `OnUnitActiveSec=15s`, `AccuracySec=5s` in `scripts/systemd/rke2-cni-perms.timer`.
 - Refreshed repository documentation for technical accuracy against current codebase and workflows (README surfaces, config examples, cert generation guides, VM GitOps docs, WSL setup, and security policy metadata).
 - Normalized runtime `customCA` manifest paths to environment-scoped cert locations under `configs/<env>/certs/` for active COTPA and PREPROD manifests.
 - Standardized certificate utility references from legacy `certs/scripts/*` to `scripts/certs/*` across automation, CI, tests, and security guidance.
-- Added canonical v2.0 documentation set: `docs/CLI-REFERENCE.md`, `docs/OPERATIONAL-RUNBOOK.md`, `docs/TROUBLESHOOTING.md`, `docs/TESTING-GUIDE.md`, `docs/SCRIPTS-REFERENCE.md`, `docs/MIGRATION-v2.0.md`, and `docs/PR-VALIDATION-CHECKLIST.md`.
 
 ## [1.2.0] - 2026-02-13
 
@@ -335,7 +347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reorganized VM utilities into `vm/scripts/`, `vm/templates/`, and `vm/docs/`
 - Test infrastructure directories: `tests/unit/`, `tests/integration/`, `tests/fixtures/`
 - Documentation structure: `docs/` directory for comprehensive guides
- 
 
 ### Changed - Previous Changes
 
@@ -434,17 +445,7 @@ This symlink will be removed in a future release. Please update your scripts.
   flag is intentionally opt-in because it performs an exhaustive hash check
   of every image layer.
 
-## [1.2.0] - TBD
-
-### Initial Release
-- Full air-gapped RKE2 cluster deployment automation
-- Support for offline artifact caching and registry mirroring
-- Network configuration with multi-interface support
-- Certificate authority trust chain management
-- Server and agent node initialization
-- Comprehensive logging and error handling
-- YAML-based configuration with CLI override support
-
-[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/cantrellr/rke2-node-init/compare/v1.2.0...v2.0.0
 [0.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.2.0
 [1.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v1.2.0

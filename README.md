@@ -1,5 +1,31 @@
 # rke2nodeinit.sh
 
+[![RKE Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml)
+[![VM Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml)
+[![Certs CI](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml)
+[![Tokenfile Verification](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Air-Gap Ready](https://img.shields.io/badge/Air--Gap-Ready-0A9396?style=for-the-badge&labelColor=001219)](#workflow-overview)
+[![Offline First](https://img.shields.io/badge/Offline-First-EE9B00?style=for-the-badge&labelColor=9B2226)](#workflow-overview)
+[![Shell](https://img.shields.io/badge/Shell-Bash-2A9D8F?style=for-the-badge&logo=gnu-bash&logoColor=white&labelColor=1D3557)](#command-reference)
+[![RKE2](https://img.shields.io/badge/Kubernetes-RKE2-3A86FF?style=for-the-badge&logo=kubernetes&logoColor=white&labelColor=023047)](#key-capabilities)
+
+```text
+ ____  _  _______     _   _  ___  ____  _____              
+|  _ \| |/ / ____|   | \ | |/ _ \|  _ \| ____|
+| |_) | ' /|  _|     |  \| | | | | | | |  _|
+|  _ <| . \| |___    | |\  | |_| | |_| | |
+|_| \_\_|\_\_____|   |_| \_|\___/|____/|_____|
+
+ ___ _   _ ___ _____
+|_ _| \ | |_ _|_   _|
+ | ||  \| || |  | |
+ | || |\  || |  | |
+|___|_| \_|___| |_|
+
+offline bootstrap and lifecycle automation for air-gapped RKE2
+```
+
 `bin/rke2nodeinit.sh` is a production-focused automation framework for building, validating, and operating fully offline Rancher RKE2 clusters on Ubuntu/Debian hosts. It combines air-gap artifact staging, registry mirroring, node bootstrap, OS-level hardening, and repeatable server/agent provisioning into one consistent workflow driven by CLI flags or `rkeprep/v2` YAML manifests.
 
 This repository is designed for platform and infrastructure teams that need Kubernetes delivery in disconnected, regulated, or high-assurance environments where reliability, traceability, and deterministic behavior matter more than convenience.
