@@ -1,6 +1,24 @@
 # rke2nodeinit.sh
 
-`bin/rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without public Internet access.
+`bin/rke2nodeinit.sh` is a production-focused automation framework for building, validating, and operating fully offline Rancher RKE2 clusters on Ubuntu/Debian hosts. It combines air-gap artifact staging, registry mirroring, node bootstrap, OS-level hardening, and repeatable server/agent provisioning into one consistent workflow driven by CLI flags or `rkeprep/v2` YAML manifests.
+
+This repository is designed for platform and infrastructure teams that need Kubernetes delivery in disconnected, regulated, or high-assurance environments where reliability, traceability, and deterministic behavior matter more than convenience.
+
+At a glance, this project provides:
+
+- **Deterministic Air-Gap Operations**: Pull once in a connected environment, then install repeatedly offline with staged and validated artifacts.
+- **End-to-End Node Lifecycle Automation**: Move from image preparation to control-plane and worker provisioning using a single operational contract.
+- **Security-First Defaults**: Strong shell safety settings, strict input validation, secret masking, and hardened network/system behaviors.
+- **Operational Clarity**: Structured logs, explicit phase behavior, reproducible manifest-driven runs, and preflight verification support.
+
+Design principles for this repo:
+
+- **Offline-first execution model** for post-image workflows.
+- **Portable tooling** based on Bash and standard GNU/Linux utilities.
+- **Fail-fast validation** for missing images, bad tags, and invalid configuration.
+- **PR-friendly change control** with documentation, tests, and CI references aligned to production operations.
+
+Only the `image` action requires Internet access to gather artifacts. All other actions (`push`, `server`, `add-server`, `agent`, `verify`, and `airgap`) are intended to run without public Internet access when the environment is staged correctly.
 
 ---
 
@@ -320,7 +338,7 @@ Example certificate fixtures live in `examples/certs/`.
 
 Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` under `scripts/certs/`.
 
-2. Root + subordinate CA chain (recommended):
+1. Root + subordinate CA chain (recommended):
 
 ```bash
 # Create encrypted root CA
@@ -334,7 +352,7 @@ Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` unde
   --root-cert scripts/certs/outputs/root-ca/root-ca.crt
 ```
 
-3. Chain verification:
+1. Chain verification:
 
 ```bash
 ./scripts/certs/verify-chain.sh \
