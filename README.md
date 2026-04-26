@@ -365,6 +365,7 @@ Example certificate fixtures live in `examples/certs/`.
 Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` under `scripts/certs/`.
 
 1. Root + subordinate CA chain (recommended):
+1. Root + subordinate CA chain (recommended):
 
 ```bash
 # Create encrypted root CA
@@ -378,6 +379,7 @@ Creates `rke2ca-cert-key.pem`, `rke2ca-cert.crt`, and `rke2registry-ca.crt` unde
   --root-cert scripts/certs/outputs/root-ca/root-ca.crt
 ```
 
+1. Chain verification:
 1. Chain verification:
 
 ```bash
