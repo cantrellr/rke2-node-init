@@ -70,6 +70,14 @@ Examples:
                          -Credential $cred `
                          -PowerOn
 
+  Clone VMs, attach ISO files, and power them on
+  $cred = Get-Credential
+  .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
+                         -VCenter vcsa.lab.local `
+                         -Credential $cred `
+                         -IsoFolder D:\ISOs `
+                         -PowerOn
+
   Clone VMs, skip existing, and test with WhatIf
   .\Clone-VmsFromCsv.ps1 -CsvPath .\clone-matrix.csv `
                          -VCenter vcsa.lab.local `
@@ -120,12 +128,23 @@ Exit Codes:
 .PARAMETER SkipExisting
   If specified, skip VMs that already exist instead of failing.
 
+.PARAMETER IsoFolder
+  Optional path to a folder containing ISO files. If provided, the script searches for ISO files
+  matching the VM hostname and attaches them to the cloned VMs. ISO filenames should contain the
+  VM name for matching (e.g., "vmname.iso" or "vmname-boot.iso").
+
 .PARAMETER PowerOn
   If specified, power on VMs after cloning (unless overridden per-row).
 
 .EXAMPLE
   $cred = Get-Credential
   .\Clone-VmsFromCsv.ps1 -CsvPath .\vm-template.csv -VCenter vcsa.lab.local -Credential $cred -PowerOn
+
+.EXAMPLE
+  Clone VMs and attach ISO files from a specific folder
+  $cred = Get-Credential
+  .\Clone-VmsFromCsv.ps1 -CsvPath .\vm-template.csv -VCenter vcsa.lab.local -Credential $cred `
+                         -IsoFolder D:\ISOs -PowerOn
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -137,6 +156,9 @@ param(
 
   [Parameter(Mandatory)]
   [pscredential]$Credential,
+
+  [Parameter()]
+  [string]$IsoFolder,
 
   [switch]$SkipExisting,
 
@@ -154,6 +176,11 @@ Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confi
 # ==============================================================================
 if (-not (Test-Path -Path $CsvPath -PathType Leaf)) {
   throw "CSV file not found at $CsvPath"
+}
+
+# Validate ISO folder if provided
+if ($IsoFolder -and -not (Test-Path -Path $IsoFolder -PathType Container)) {
+  throw "ISO folder not found at $IsoFolder"
 }
 
 # ==============================================================================
@@ -257,6 +284,71 @@ function Resolve-ResourcePool {
   }
 
   return $null
+}
+
+# ------------------------------------------------------------------------------
+# Function: Attach-IsoToVm
+# Purpose : Find and attach an ISO file to a VM based on matching hostname.
+#           Searches ISO folder for files matching the VM name.
+# Arguments:
+#   $VmName   - Name of the VM to attach ISO to
+#   $IsoFolder - Path to folder containing ISO files
+#   $Vm       - The VM object to attach the ISO to
+# Returns :
+#   $true if ISO was found and attached, $false otherwise
+# Throws  :
+#   Exception if ISO attachment fails
+# ------------------------------------------------------------------------------
+function Attach-IsoToVm {
+  param(
+    [string]$VmName,
+    [string]$IsoFolder,
+    $Vm
+  )
+
+  if (-not $IsoFolder -or -not (Test-Path -Path $IsoFolder -PathType Container)) {
+    return $false
+  }
+
+  # Search for ISO files matching the VM name (case-insensitive)
+  $isoFiles = @(Get-ChildItem -Path $IsoFolder -Filter "*$VmName*" -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.iso' })
+
+  if ($isoFiles.Count -eq 0) {
+    Write-Host "No ISO file found matching '$VmName' in '$IsoFolder'."
+    return $false
+  }
+
+  if ($isoFiles.Count -gt 1) {
+    Write-Warning "Multiple ISO files found matching '$VmName'. Using the first match: $($isoFiles[0].Name)"
+  }
+
+  $isoFile = $isoFiles[0]
+  $datastore = $Vm | Get-Datastore | Select-Object -First 1
+
+  if (-not $datastore) {
+    throw "Unable to determine datastore for VM '$VmName'. Cannot attach ISO."
+  }
+
+  try {
+    # Get or create a CD/DVD drive on the VM
+    $cdDrive = Get-CDDrive -VM $Vm -ErrorAction SilentlyContinue
+    if (-not $cdDrive) {
+      # Create new CD/DVD drive if one doesn't exist
+      $cdDrive = New-CDDrive -VM $Vm -ErrorAction Stop
+      Write-Host "Created new CD/DVD drive for VM '$VmName'."
+    }
+
+    # Construct datastore path for ISO
+    $isoPath = "[$($datastore.Name)] $($isoFile.Name)"
+
+    # Attach ISO to the CD/DVD drive
+    Set-CDDrive -CDDrive $cdDrive -IsoPath $isoPath -Confirm:$false -ErrorAction Stop | Out-Null
+    Write-Host "ISO '$($isoFile.Name)' attached to VM '$VmName'."
+    return $true
+  }
+  catch {
+    throw "Failed to attach ISO to VM '$VmName': $_"
+  }
 }
 
 # ==============================================================================
@@ -386,6 +478,18 @@ foreach ($vmRow in $vmDefinitions) {
         $adapter = Get-NetworkAdapter -VM $newVm | Select-Object -First 1
         if ($adapter -and $adapter.NetworkName -ne $networkName) {
           Set-NetworkAdapter -NetworkAdapter $adapter -PortGroup $targetPortGroup -Confirm:$false | Out-Null
+        }
+      }
+
+      # ----------------------------------------------------------------------
+      # Post-clone customization: Attach ISO file if IsoFolder provided
+      # ----------------------------------------------------------------------
+      if ($IsoFolder) {
+        try {
+          Attach-IsoToVm -VmName $vmName -IsoFolder $IsoFolder -Vm $newVm
+        }
+        catch {
+          Write-Warning "ISO attachment failed for VM '$vmName': $_"
         }
       }
 
