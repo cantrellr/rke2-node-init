@@ -342,7 +342,7 @@ function Attach-IsoToVm {
     $isoPath = "[$($datastore.Name)] $($isoFile.Name)"
 
     # Attach ISO to the CD/DVD drive
-    Set-CDDrive -CDDrive $cdDrive -IsoPath $isoPath -Confirm:$false -ErrorAction Stop | Out-Null
+    Set-CDDrive -CD $cdDrive -IsoPath $isoPath -Connected:$true -StartConnected:$true -Confirm:$false -ErrorAction Stop | Out-Null
     Write-Host "ISO '$($isoFile.Name)' attached to VM '$VmName'."
     return $true
   }
