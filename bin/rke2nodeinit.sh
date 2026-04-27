@@ -3146,7 +3146,11 @@ detect_kubeconfig() {
 #   Prints the apiVersion string (without surrounding whitespace) to stdout.
 # ------------------------------------------------------------------------------
 yaml_get_api() {
-  grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
+  grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" \
+    | head -n1 \
+    | cut -d: -f2- \
+    | tr -d '\r' \
+    | sed -E "s/^[[:space:]]*[\"']?//; s/[\"']?[[:space:]]*$//"
 }
 
 # ------------------------------------------------------------------------------
@@ -3162,7 +3166,11 @@ yaml_get_api() {
 #   xargs to trim whitespace. Fast and sufficient for single-value extraction.
 # ------------------------------------------------------------------------------
 yaml_get_kind() {
-  grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
+  grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" \
+    | head -n1 \
+    | cut -d: -f2- \
+    | tr -d '\r' \
+    | sed -E "s/^[[:space:]]*[\"']?//; s/[\"']?[[:space:]]*$//"
 }
 
 # ------------------------------------------------------------------------------
