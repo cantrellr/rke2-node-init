@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block page_title %}Networks{% endblock %}
+
+{% block content %}
+  <section class="panel">
+    <div class="panel-header with-actions">
+      <h2>Tracked Networks</h2>
+      <a class="button" href="/networks/new">New Network</a>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Name</th>
+          <th>CIDR</th>
+          <th>VLAN</th>
+          <th>Gateway</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for network in networks %}
+          <tr>
+            <td>{{ network.site.name if network.site else '—' }}</td>
+            <td>{{ network.name or '—' }}</td>
+            <td>{{ network.cidr or '—' }}</td>
+            <td>{{ network.vlan_id or '—' }}</td>
+            <td>{{ network.gateway or '—' }}</td>
+            <td class="table-actions">
+              <a href="/networks/{{ network.id }}">View</a>
+              <a href="/networks/{{ network.id }}/edit">Edit</a>
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="6">No networks recorded.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

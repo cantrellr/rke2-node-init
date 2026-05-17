@@ -6,6 +6,7 @@ Thanks for contributing. This guide covers the current workflow, repository layo
 
 - Bash 4+
 - Python 3.11+ for validation tooling
+- Python package tooling (`pip`) for the internal IPAM app under `apps/ipam/`
 - `shellcheck`, `yamllint`, and `markdownlint` available locally
 - Familiarity with RKE2 air-gapped deployment patterns
 
@@ -54,6 +55,13 @@ python3 -c "import json; json.load(open('vm-configs/schema.json'))"
 markdownlint README.md docs/**/*.md scripts/**/*.md examples/**/*.md
 ```
 
+### Internal IPAM App
+
+```bash
+python -m pip install -e ./apps/ipam[dev]
+PYTHONPATH=apps/ipam/src python -m pytest apps/ipam/tests
+```
+
 ### Repository Tests
 
 ```bash
@@ -71,6 +79,7 @@ bash tests/ci/test_subordinate_encryption.sh
 - `.github/workflows/validate-vm-configs.yml`
 - `.github/workflows/verify-tokenfile.yml`
 - `.github/workflows/certs-ci.yml`
+- `.github/workflows/ipam-app-ci.yml`
 
 Changes to VM GitOps manifests may also interact with `.github/workflows/apply-vm-configs.yml` on self-hosted runners.
 

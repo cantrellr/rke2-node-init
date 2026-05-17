@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block page_title %}Sites{% endblock %}
+
+{% block content %}
+  <section class="panel">
+    <div class="panel-header with-actions">
+      <h2>Tracked Sites</h2>
+      <a class="button" href="/sites/new">New Site</a>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Code</th>
+          <th>Environment</th>
+          <th>Networks</th>
+          <th>Assignments</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for site in sites %}
+          <tr>
+            <td>
+              <strong>{{ site.name }}</strong>
+              <small>{{ site.location or 'No location set' }}</small>
+            </td>
+            <td>{{ site.code or '—' }}</td>
+            <td>{{ site.environment or '—' }}</td>
+            <td>{{ site_counts[site.id].networks }}</td>
+            <td>{{ site_counts[site.id].assignments }}</td>
+            <td class="table-actions">
+              <a href="/sites/{{ site.id }}">View</a>
+              <a href="/sites/{{ site.id }}/edit">Edit</a>
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="6">No sites recorded.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

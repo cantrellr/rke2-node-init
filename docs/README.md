@@ -35,6 +35,7 @@ For operational entrypoints, start with:
 | [HYPERV-VM-NAME-SETUP.md](HYPERV-VM-NAME-SETUP.md) | Hyper-V first-boot ISO workflow using virtual CD payloads (`/config/<yaml>`) |
 | [CONFIG-YAML-TRANSFER-ANALYSIS.md](CONFIG-YAML-TRANSFER-ANALYSIS.md) | YAML schema and migration analysis notes |
 | [GITOPS-IMPLEMENTATION-SUMMARY.md](GITOPS-IMPLEMENTATION-SUMMARY.md) | VM GitOps workflow implementation summary |
+| [IPAM-APP.md](IPAM-APP.md) | Internal web app for tracking sites, subnets, and IP assignments |
 
 ---
 

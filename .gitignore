@@ -7,6 +7,7 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Archives
 *.tar
@@ -25,4 +26,6 @@ __pycache__/
 /downloads/
 /code/
 /configs/devlocal/
+/apps/ipam/data/*
+!/apps/ipam/data/.gitkeep
 

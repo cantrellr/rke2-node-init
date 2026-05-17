@@ -36,6 +36,7 @@ At a glance, this project provides:
 - **End-to-End Node Lifecycle Automation**: Move from image preparation to control-plane and worker provisioning using a single operational contract.
 - **Security-First Defaults**: Strong shell safety settings, strict input validation, secret masking, and hardened network/system behaviors.
 - **Operational Clarity**: Structured logs, explicit phase behavior, reproducible manifest-driven runs, and preflight verification support.
+- **Internal IPAM Companion App**: `apps/ipam` adds a shared web UI for spreadsheet-driven site, subnet, and IP tracking that can later feed RKE2 node-manifest generation.
 
 Design principles for this repo:
 

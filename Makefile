@@ -16,7 +16,7 @@ export BOOT_ISO_YAML_DIR ?= configs/preprod/nodes
 export BOOT_ISO_OUTPUT_DIR ?= outputs/boot-isos
 export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 
-.PHONY: token sh kubeconfig boot-isos boot-isos-clean
+.PHONY: token sh kubeconfig boot-isos boot-isos-clean ipam-install ipam-run ipam-test ipam-import
 ## Generate a reusable base64 token and persist it for later use.
 token:
 	@set -euo pipefail; \
@@ -56,3 +56,25 @@ boot-isos:
 boot-isos-clean:
 	@set -euo pipefail; \
 		rm -rf "${BOOT_ISO_OUTPUT_DIR}"
+
+## Install the IPAM web app and development dependencies.
+ipam-install:
+	@set -euo pipefail; \
+		python -m pip install --upgrade pip; \
+		python -m pip install -e ./apps/ipam[dev]
+
+## Run the internal IPAM web application locally.
+ipam-run:
+	@set -euo pipefail; \
+		PYTHONPATH=apps/ipam/src python -m uvicorn ipam.main:app --host 127.0.0.1 --port 8091 --reload
+
+## Run the IPAM application test suite.
+ipam-test:
+	@set -euo pipefail; \
+		PYTHONPATH=apps/ipam/src python -m pytest apps/ipam/tests
+
+## Import an Excel workbook into the IPAM database.
+ipam-import:
+	@set -euo pipefail; \
+		test -n "${WORKBOOK:-}" || { echo "Set WORKBOOK=/absolute/path/to/workbook.xlsx"; exit 1; }; \
+		PYTHONPATH=apps/ipam/src python -m ipam.cli import-workbook "${WORKBOOK}"

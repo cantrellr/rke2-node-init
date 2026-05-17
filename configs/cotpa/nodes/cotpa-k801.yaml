@@ -1,25 +1,25 @@
 apiVersion: rkeprep/v2
 kind: Server
 metadata:
-  name: cotpa-k8admin
+  name: cotpa-k801
 spec:
   disable-default-system-registry: true
-  hostname: cotpa-k8admin
+  hostname: cotpa-k801
   # Bind to cluster communication interface
-  nodeIp: 172.16.15.121
-  bindAddress: 172.16.15.121
-  advertiseAddress: 172.16.15.121
+  nodeIp: 172.16.15.101
+  bindAddress: 172.16.15.101
+  advertiseAddress: 172.16.15.101
   cni:
    - multus
    - canal
   interfaces:
-    # vlan9 - management
+    # vlan9
     - name: eth0
-      ip: 172.16.15.121
+      ip: 172.16.15.101
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
-      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net"]
+      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan30 - cocloud-ad
     - name: eth1
       ip: 172.16.8.211
@@ -35,18 +35,20 @@ spec:
       dns: 
       searchDomains: 
   node-label:
-  - "env=prod"
+  - "env=development"
   tls-san:
-    - cotpa-k8admin
-    - cotpa-k8admin.k8.cantrellcloud.net
-    - 172.16.15.121
-  service-cidr: 10.94.0.0/16
-  cluster-cidr: 10.244.0.0/16
+    - cotpa-k801
+    - cotpa-k801.cantrellcloud.net
+    - cotpa-cluster
+    - cotpa-cluster.cantrellcloud.net
+    - 172.16.15.101
+  service-cidr: 10.1.0.0/16
+  cluster-cidr: 10.101.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  tokenFile: /rke2-node-init/outputs/cotpa-k8admin-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/cotpa-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
   customCA:
