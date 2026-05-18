@@ -1,0 +1,4 @@
+metadata_name	source_yaml	iso_path	sha256
+cotpakube01	configs/cotpa/nodes/cotpakube01.yaml	configs/cotpa/boot-isos/cotpakube01.iso	be6d6cb02bede0b08cfaff6eb13f33768298487fa058b2aee5b78fb5ccfb6e27
+cotpakube02	configs/cotpa/nodes/cotpakube02.yaml	configs/cotpa/boot-isos/cotpakube02.iso	ae5a162090005f931d0263b926629eb895ed119d1c3d11fe69391996f870ebc8
+cotpakube03	configs/cotpa/nodes/cotpakube03.yaml	configs/cotpa/boot-isos/cotpakube03.iso	8f5df21ff7ffaef2f591ad51fbf519a3574ebd805fdb2be4d3027366858f8686
