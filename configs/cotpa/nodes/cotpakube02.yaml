@@ -27,20 +27,20 @@ spec:
       gateway:
       dns:
       searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
-    # vlan210 - jtodev-ad
+    # vlan10 - cotpa_pub10
     - name: eth2
-      ip: 172.16.210.12
-      prefix: 27
+      ip: 172.16.1.102
+      prefix: 24
       gateway:
-      dns: 
-      searchDomains: 
+      dns: ["172.16.1.11", "172.16.1.12"]
+      searchDomains: ["cantrelloffice.home", "cantrelloffice.com"]
   node-label:
   - "env=production"
   tls-san:
     - cotpakube02
-    - cotpakube02.cantrellcloud.net
-    - cotpa-cluster
-    - cotpa-cluster.cantrellcloud.net
+    - cotpakube02.k8.cantrellcloud.net
+    - cotpakube
+    - cotpakube.cantrellcloud.net
     - 172.16.15.102
   service-cidr: 10.2.0.0/16
   cluster-cidr: 10.102.0.0/16
