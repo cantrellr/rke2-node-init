@@ -1,10 +1,10 @@
 apiVersion: rkeprep/v2
 kind: Server
 metadata:
-  name: cotpa-k801
+  name: cotpakube01
 spec:
   disable-default-system-registry: true
-  hostname: cotpa-k801
+  hostname: cotpakube01
   # Bind to cluster communication interface
   nodeIp: 172.16.15.101
   bindAddress: 172.16.15.101
@@ -37,8 +37,8 @@ spec:
   node-label:
   - "env=development"
   tls-san:
-    - cotpa-k801
-    - cotpa-k801.cantrellcloud.net
+    - cotpakube01
+    - cotpakube01.cantrellcloud.net
     - cotpa-cluster
     - cotpa-cluster.cantrellcloud.net
     - 172.16.15.101

@@ -1,35 +1,35 @@
 apiVersion: rkeprep/v2
-kind: Server
+kind: AddServer
 metadata:
-  name: cotpa-k803
+  name: cotpakube02
 spec:
   disable-default-system-registry: true
-  hostname: cotpa-k803
+  hostname: cotpakube02
   # Bind to cluster communication interface
-  nodeIp: 172.16.15.103
-  bindAddress: 172.16.15.103
-  advertiseAddress: 172.16.15.103
+  nodeIp: 172.16.15.102
+  bindAddress: 172.16.15.102
+  advertiseAddress: 172.16.15.102
   cni:
    - multus
    - canal
   interfaces:
     # vlan9
     - name: eth0
-      ip: 172.16.15.103
+      ip: 172.16.15.102
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan30 - cocloud-ad
     - name: eth1
-      ip: 172.16.8.213
+      ip: 172.16.8.212
       prefix: 24
       gateway:
       dns:
       searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
     # vlan210 - jtodev-ad
     - name: eth2
-      ip: 172.16.210.13
+      ip: 172.16.210.12
       prefix: 27
       gateway:
       dns: 
@@ -37,13 +37,13 @@ spec:
   node-label:
   - "env=production"
   tls-san:
-    - cotpa-k803
-    - cotpa-k803.cantrellcloud.net
+    - cotpakube02
+    - cotpakube02.cantrellcloud.net
     - cotpa-cluster
     - cotpa-cluster.cantrellcloud.net
-    - 172.16.15.103
-  service-cidr: 10.3.0.0/16
-  cluster-cidr: 10.103.0.0/16
+    - 172.16.15.102
+  service-cidr: 10.2.0.0/16
+  cluster-cidr: 10.102.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
   kube-apiserver-arg:

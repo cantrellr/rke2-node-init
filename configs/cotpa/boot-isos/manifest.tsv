@@ -1,4 +1,4 @@
 metadata_name	source_yaml	iso_path	sha256
-cotpa-k801	../configs/cotpa/nodes//cotpa-k801.yaml	../configs/cotpa/boot-isos//cotpa-k801.iso	5ff019d23000a31ba6e6cda741a0934df211faaea1f9c37e0424dddb6f96eb9a
-cotpa-k802	../configs/cotpa/nodes//cotpa-k802.yaml	../configs/cotpa/boot-isos//cotpa-k802.iso	2eb90d38cec718f160ef854d13f3a089b89ff7b20b9f9aa59129ee86cfe075ee
-cotpa-k803	../configs/cotpa/nodes//cotpa-k803.yaml	../configs/cotpa/boot-isos//cotpa-k803.iso	5bed745b29d232202c8d177615eec31a782ddbc65fd3ad801a548913c83746b7
+cotpakube01	../configs/cotpa/nodes//cotpakube01.yaml	../configs/cotpa/boot-isos//cotpakube01.iso	7d84e88f5ebd8d31554a76d65bbe50f78de96b533737826aa3b5d2d664fcd9c5
+cotpakube02	../configs/cotpa/nodes//cotpakube02.yaml	../configs/cotpa/boot-isos//cotpakube02.iso	b9b04c919dce2b38e577ed8788d1246618396067923ee894c4720d44976211d2
+cotpakube03	../configs/cotpa/nodes//cotpakube03.yaml	../configs/cotpa/boot-isos//cotpakube03.iso	05fb013c1d31d6ce0f0a595c27a50d8c44aed848bb166bb9225d5504587d48de
