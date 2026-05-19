@@ -3398,8 +3398,16 @@ append_spec_config_extras() {
   _cfg_has_key() { grep -Eq "^[[:space:]]*$1[[:space:]]*:" "$cfg" 2>/dev/null; }
 
   # Scalars we pass through as-is if present
-  local -a scalars=(
+  # Some options are cluster-wide (server-only). Detect the document kind and
+  # only transfer cluster-level keys when the YAML kind is a Server document.
+  local kind
+  kind="$(yaml_get_kind "$file" || true)"
+
+  local -a cluster_only=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
+  )
+
+  local -a scalars=(
     "system-default-registry" "embedded-registry" "disable-default-registry-endpoint" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
@@ -3407,6 +3415,11 @@ append_spec_config_extras() {
     "kube-proxy-image" "pause-image" "runtime-image"
     "enable-servicelb" "node-ip" "bind-address" "advertise-address"
   )
+
+  # If this is a Server kind (cluster-level manifest), include cluster-only keys
+  if [[ "$kind" == "Server" || "$kind" == "server" ]]; then
+    scalars=("${cluster_only[@]}" "${scalars[@]}")
+  fi
 
 
   local k v

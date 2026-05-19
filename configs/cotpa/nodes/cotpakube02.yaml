@@ -42,8 +42,8 @@ spec:
     - cotpakube
     - cotpakube.cantrellcloud.net
     - 172.16.15.102
-  service-cidr: 10.2.0.0/16
-  cluster-cidr: 10.102.0.0/16
+  service-cidr: 10.1.0.0/16
+  cluster-cidr: 10.101.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
   kube-apiserver-arg:

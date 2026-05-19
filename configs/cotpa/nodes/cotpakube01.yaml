@@ -48,7 +48,7 @@ spec:
   enable-servicelb: "false"
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  tokenFile: /rke2-node-init/outputs/cocloud-ca-chain-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/cotpa-hyperv-v1.36.0+rke2r1-image-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
   customCA:
