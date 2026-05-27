@@ -1,0 +1,9 @@
+apiVersion: rkeprep/v2
+kind: CustomCA
+metadata:
+  name: r01gitops-ca
+spec:
+  customCA:
+    rootCrt: /rke2-node-init/configs/devlocal/certs/dev-certa001-ca-dev-local.crt
+    rootKey: /rke2-node-init/configs/devlocal/certs/dev-certa001-ca-dev-local-key.pem
+    installToOSTrust: true
