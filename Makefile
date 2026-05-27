@@ -12,8 +12,8 @@ export TOKEN_SIZE ?= 32
 export TOKEN_OUTPUT_DIR := outputs/generated-token
 export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
-export BOOT_ISO_YAML_DIR ?= configs/cotpa/nodes
-export BOOT_ISO_OUTPUT_DIR ?= configs/cotpa/boot-isos
+export BOOT_ISO_YAML_DIR ?= configs/gitops/nodes
+export BOOT_ISO_OUTPUT_DIR ?= configs/gitops/boot-isos
 export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 
 .PHONY: token sh kubeconfig boot-isos boot-isos-clean ipam-install ipam-run ipam-test ipam-import
