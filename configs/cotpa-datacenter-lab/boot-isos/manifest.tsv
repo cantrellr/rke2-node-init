@@ -1,0 +1,4 @@
+metadata_name	source_yaml	iso_path	sha256
+dc1manager-ctrl01	/rke2-node-init/configs/cotpa-datacenter-lab/nodes/dc1manager-ctrl01.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.1+rke2r2-image/boot-isos/dc1manager-ctrl01.iso	7117dc4f139c71dee5dd66b8508da4dd9ba80d915a1170bf39c229eb0b34f766
+dc1manager-work01	/rke2-node-init/configs/cotpa-datacenter-lab/nodes/dc1manager-work01.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.1+rke2r2-image/boot-isos/dc1manager-work01.iso	7ae096ae0c6876c386ff82c27b117c26efa9331dbef4b022b80f6581153d22b2
+dc1manager-work02	/rke2-node-init/configs/cotpa-datacenter-lab/nodes/dc1manager-work02.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.1+rke2r2-image/boot-isos/dc1manager-work02.iso	0a71244f806fcd00fcb66c25bdac90bf8e89affc86ba12e1bf362f6a370aa1f7
