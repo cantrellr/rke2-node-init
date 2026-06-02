@@ -5705,6 +5705,8 @@ check_ufw() {
 install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs..."
   export DEBIAN_FRONTEND=noninteractive
+  log INFO "Reconciling dpkg package state..."
+  spinner_run "Reconciling dpkg package state" dpkg --configure -a
   log INFO "Updating APT package cache..."
   spinner_run "Updating APT package cache" apt-get update -y
   log INFO "Installing apt-utils..."
