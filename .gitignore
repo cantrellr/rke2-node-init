@@ -26,6 +26,7 @@ __pycache__/
 /downloads/
 /code/
 /configs/devlocal/
+/configs/gitops/
 /apps/ipam/data/*
 !/apps/ipam/data/.gitkeep
 
