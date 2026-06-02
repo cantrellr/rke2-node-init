@@ -36,7 +36,7 @@ spec:
   node-label:
   - "role=worker"
   - "env=production"
-  tokenFile: /rke2-node-init/outputs/cotpa-hyperv-v1.36.1+rke2r2-image-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/cotpa-hyperv-v1.36.0+rke2r1-image-bootstrap-token.txt
   customCA:
     rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
     rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
