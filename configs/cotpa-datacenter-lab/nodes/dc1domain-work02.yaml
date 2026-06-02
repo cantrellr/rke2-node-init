@@ -1,9 +1,9 @@
 apiVersion: rkeprep/v2
 kind: Agent
 metadata:
-  name: dc1manager-work02
+  name: dc1domain-work02
 spec:
-  hostname: dc1manager-work02
+  hostname: dc1domain-work02
   # Bind to cluster communication interface
   nodeIp: 172.16.15.108
   bindAddress: 172.16.15.108
