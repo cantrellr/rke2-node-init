@@ -1,7 +1,7 @@
 apiVersion: rkeprep/v2
 kind: Image
 metadata:
-  name: cotpa-hyperv-v1.36.0+rke2r1-image
+  name: hyperv-cotpa-datacenter-lab-image
 spec:
   rke2Version: v1.36.0+rke2r1
   cni:

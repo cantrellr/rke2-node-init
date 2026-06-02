@@ -1,39 +1,40 @@
 apiVersion: rkeprep/v2
-kind: Server
+kind: Agent
 metadata:
-  name: dc1manager-ctrl01
+  name: dc1domain-work01
 spec:
-  hostname: dc1manager-ctrl01
+  hostname: dc1domain-work01
   # Bind to cluster communication interface
-  nodeIp: 172.16.15.101
-  bindAddress: 172.16.15.101
-  advertiseAddress: 172.16.15.101
+  nodeIp: 172.16.15.107
+  bindAddress: 172.16.15.107
+  advertiseAddress: 172.16.15.107
   cni:
    - multus
    - canal
   interfaces:
     # vlan9
     - name: eth0
-      ip: 172.16.15.101
+      ip: 172.16.15.107
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
-      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net"]
+      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
     # vlan30 - cocloud-ad
     - name: eth1
-      ip: 172.16.8.211
+      ip: 172.16.8.107
       prefix: 24
       gateway:
       dns:
       searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
     # vlan10 - cotpa_pub10
     - name: eth2
-      ip: 172.16.1.101
+      ip: 172.16.1.107
       prefix: 24
       gateway:
       dns: ["172.16.1.11", "172.16.1.12"]
       searchDomains: ["cantrelloffice.home", "cantrelloffice.com"]
   node-label:
+  - "role=worker"
   - "env=production"
   tokenFile: /rke2-node-init/outputs/hyperv-cotpa-datacenter-lab-image-bootstrap-token.txt
   customCA:
@@ -45,16 +46,4 @@ spec:
   disable:
   - rke2-ingress-nginx
   - rke2-ingress-traefik
-  tls-san:
-    - dc1manager-ctrl01
-    - dc1manager-ctrl01.k8.cantrellcloud.net
-    - dc1manager-cluster
-    - dc1manager.cantrellcloud.net
-    - 172.16.15.101
-  service-cidr: 10.1.0.0/16
-  cluster-cidr: 10.101.0.0/16
-  cluster-domain: cluster.local
-  enable-servicelb: "false"
-  kube-apiserver-arg:
-    - "audit-log-maxage=15"
-  disable-default-system-registry: true
+  serverURL: https://172.16.15.106:9345

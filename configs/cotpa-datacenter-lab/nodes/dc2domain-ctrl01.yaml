@@ -1,34 +1,34 @@
 apiVersion: rkeprep/v2
 kind: Server
 metadata:
-  name: dc1manager-ctrl01
+  name: dc2domain-ctrl01
 spec:
-  hostname: dc1manager-ctrl01
+  hostname: dc2domain-ctrl01
   # Bind to cluster communication interface
-  nodeIp: 172.16.15.101
-  bindAddress: 172.16.15.101
-  advertiseAddress: 172.16.15.101
+  nodeIp: 172.16.15.110
+  bindAddress: 172.16.15.110
+  advertiseAddress: 172.16.15.110
   cni:
    - multus
    - canal
   interfaces:
     # vlan9
     - name: eth0
-      ip: 172.16.15.101
+      ip: 172.16.15.110
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net"]
     # vlan30 - cocloud-ad
     - name: eth1
-      ip: 172.16.8.211
+      ip: 172.16.8.110
       prefix: 24
       gateway:
       dns:
       searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
     # vlan10 - cotpa_pub10
     - name: eth2
-      ip: 172.16.1.101
+      ip: 172.16.1.110
       prefix: 24
       gateway:
       dns: ["172.16.1.11", "172.16.1.12"]
@@ -46,13 +46,13 @@ spec:
   - rke2-ingress-nginx
   - rke2-ingress-traefik
   tls-san:
-    - dc1manager-ctrl01
-    - dc1manager-ctrl01.k8.cantrellcloud.net
-    - dc1manager-cluster
-    - dc1manager.cantrellcloud.net
-    - 172.16.15.101
-  service-cidr: 10.1.0.0/16
-  cluster-cidr: 10.101.0.0/16
+    - dc2domain-ctrl01
+    - dc2domain-ctrl01.k8.cantrellcloud.net
+    - dc2domain-cluster
+    - dc2domain.cantrellcloud.net
+    - 172.16.15.110
+  service-cidr: 10.3.0.0/16
+  cluster-cidr: 10.103.0.0/16
   cluster-domain: cluster.local
   enable-servicelb: "false"
   kube-apiserver-arg:
