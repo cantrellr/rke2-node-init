@@ -194,6 +194,9 @@ CUSTOM_CA_INSTALL_TO_OS_TRUST=1
 # Optional bootstrap token file used to validate custom CA presence.
 BOOTSTRAP_TOKEN_FILE=""
 
+# Captures attempted token-file resolution candidates for diagnostics.
+TOKEN_FILE_RESOLUTION_ATTEMPTS=""
+
 # Track the CA file used when deriving full tokens so runs can archive it.
 AGENT_CA_CERT=""
 
@@ -412,7 +415,7 @@ Exit Codes:
   5 - Validation error (missing config, invalid kind, incomplete spec)
 
 Output Files:
-  outputs/<name>-bootstrap-token.txt  (permissions: 600)
+  outputs/<name>/<name>-bootstrap-token.txt  (permissions: 600)
 
 Examples:
   # Generate token from custom CA
@@ -4720,6 +4723,57 @@ resolve_boot_yaml_dir() {
 
   printf '%s\n' "$REPO_ROOT/$raw_path"
   return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: resolve_token_file_path
+# Purpose : Resolve a token-file path to a readable absolute path. Relative
+#           paths are evaluated against CONFIG_FILE directory, then REPO_ROOT,
+#           then current working directory.
+# Arguments:
+#   $1 - Raw token-file path
+# Returns :
+#   Prints resolved absolute path on stdout when successful.
+#   Populates TOKEN_FILE_RESOLUTION_ATTEMPTS for caller diagnostics.
+# ------------------------------------------------------------------------------
+resolve_token_file_path() {
+  local raw_path="$1"
+  local cfg_dir=""
+  local candidate=""
+  local resolved=""
+  local -a candidates=()
+  local -A seen=()
+
+  TOKEN_FILE_RESOLUTION_ATTEMPTS=""
+  [[ -n "$raw_path" ]] || return 1
+
+  if [[ "$raw_path" == /* ]]; then
+    candidates+=("$raw_path")
+  else
+    if [[ -n "${CONFIG_FILE:-}" ]]; then
+      cfg_dir="$(dirname -- "$CONFIG_FILE")"
+      candidates+=("$cfg_dir/$raw_path")
+    fi
+    candidates+=("$REPO_ROOT/$raw_path")
+    candidates+=("$raw_path")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -n "${seen["$candidate"]+x}" ]]; then
+      continue
+    fi
+    seen["$candidate"]=1
+    TOKEN_FILE_RESOLUTION_ATTEMPTS+="${TOKEN_FILE_RESOLUTION_ATTEMPTS:+, }$candidate"
+
+    if [[ -f "$candidate" && -r "$candidate" ]]; then
+      resolved="$(cd -- "$(dirname -- "$candidate")" && pwd -P)/$(basename -- "$candidate")"
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 # ------------------------------------------------------------------------------
@@ -9554,10 +9608,14 @@ action_image() {
   # Generate a custom-CA bootstrap token file in image outputs when custom CA exists.
   if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
     local image_token=""
-    local image_token_file="${OUT_DIR}/${SPEC_NAME:-image}-bootstrap-token.txt"
+    local image_name="${SPEC_NAME:-image}"
+    local image_output_dir="${RUN_OUT_DIR:-$OUT_DIR/$image_name}"
+    local image_token_file="${image_output_dir}/${image_name}-bootstrap-token.txt"
     local token_alias_yaml_dir=""
     local _alias_manifest=""
     local _alias_token_file=""
+    local _alias_dir_name=""
+    local _alias_expected_name=""
     local _created_targets=""
     local -A _written_token_targets=()
 
@@ -9606,8 +9664,15 @@ action_image() {
         _alias_token_file="$(yaml_spec_get "$_alias_manifest" tokenFile || true)"
         [[ -n "$_alias_token_file" ]] || continue
 
-        if [[ "$_alias_token_file" != /rke2-node-init/outputs/* ]]; then
-          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile is outside /rke2-node-init/outputs: $_alias_token_file"
+        if [[ "$_alias_token_file" != /rke2-node-init/outputs/*/*-bootstrap-token.txt ]]; then
+          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile must match /rke2-node-init/outputs/<image>/<image>-bootstrap-token.txt: $_alias_token_file"
+          continue
+        fi
+
+        _alias_dir_name="$(basename -- "$(dirname -- "$_alias_token_file")")"
+        _alias_expected_name="${_alias_dir_name}-bootstrap-token.txt"
+        if [[ "$(basename -- "$_alias_token_file")" != "$_alias_expected_name" ]]; then
+          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile filename must match containing image folder name ($_alias_expected_name): $_alias_token_file"
           continue
         fi
 
@@ -10689,13 +10754,6 @@ action_server() {
   metrics_increment "success"
   metrics_increment "hostname_set"
 
-  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
-  log_info "Seeding custom cluster CA..."
-  setup_custom_cluster_ca || true
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "custom_ca_configured"
-
   # Phase 6: Interface configuration
   report_progress "Configuring interfaces" 6 8
   local prompt_extra_ifaces=1
@@ -10747,19 +10805,17 @@ action_server() {
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN_FILE" ]]; then
-    local resolved_token_file="$TOKEN_FILE"
-    if [[ "$resolved_token_file" != /* ]]; then
-      if [[ -f "$REPO_ROOT/$resolved_token_file" ]]; then
-        resolved_token_file="$REPO_ROOT/$resolved_token_file"
-      fi
-    fi
-
-    if [[ -f "$resolved_token_file" && -r "$resolved_token_file" ]]; then
+    local resolved_token_file=""
+    resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
+    if [[ -n "$resolved_token_file" ]]; then
       TOKEN_FILE="$resolved_token_file"
       log_info "Token file provided and found; using token-file: $TOKEN_FILE"
       TOKEN=""
     else
       log_warn "Token file provided but unavailable: $TOKEN_FILE"
+      if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+        log_warn "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+      fi
       log_warn "Falling back to generated first-server bootstrap token."
       TOKEN_FILE=""
       TOKEN="$(generate_bootstrap_token)"
@@ -10789,6 +10845,13 @@ action_server() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "token_generated"
+
+  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
+  log_info "Seeding custom cluster CA..."
+  setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "custom_ca_configured"
 
   log_info "Writing file: /etc/rancher/rke2/config.yaml..."
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -11230,7 +11293,20 @@ action_agent() {
 
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN_FILE" ]]; then
-    log_info "Token file provided; skipping token expansion."
+    local resolved_token_file=""
+    resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
+    if [[ -z "$resolved_token_file" ]]; then
+      log_error "Token file provided but unavailable: $TOKEN_FILE"
+      if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+        log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+      fi
+      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+      metrics_increment "failed"
+      exit 1
+    fi
+
+    TOKEN_FILE="$resolved_token_file"
+    log_info "Token file provided and found; using token-file: $TOKEN_FILE"
     TOKEN=""
   elif [[ -n "$TOKEN" ]]; then
     local full_token=""
@@ -11617,13 +11693,6 @@ action_add_server() {
   metrics_increment "success"
   metrics_increment "hostname_set"
 
-  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
-  log_info "Seeding custom cluster CA..."
-  setup_custom_cluster_ca || true
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "custom_ca_configured"
-
   local prompt_extra_ifaces_add_server=1
   if (( ${#NET_INTERFACES[@]} )); then
     if (( yaml_has_interfaces_add_server )); then
@@ -11683,7 +11752,20 @@ action_add_server() {
 
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN_FILE" ]]; then
-    log_info "Token file provided; skipping token expansion."
+    local resolved_token_file=""
+    resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
+    if [[ -z "$resolved_token_file" ]]; then
+      log_error "Token file provided but unavailable: $TOKEN_FILE"
+      if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+        log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+      fi
+      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+      metrics_increment "failed"
+      exit 1
+    fi
+
+    TOKEN_FILE="$resolved_token_file"
+    log_info "Token file provided and found; using token-file: $TOKEN_FILE"
     TOKEN=""
   elif [[ -n "$TOKEN" ]]; then
     local full_token=""
@@ -11695,6 +11777,14 @@ action_add_server() {
       TOKEN="$full_token"
     fi
   fi
+
+  BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
+  log_info "Seeding custom cluster CA..."
+  setup_custom_cluster_ca || true
+  metrics_increment "total"
+  metrics_increment "success"
+  metrics_increment "custom_ca_configured"
+
   metrics_increment "token_configured"
 
   # Phase 7: Write RKE2 configuration
@@ -12146,8 +12236,10 @@ action_custom_ca() {
     exit 1
   fi
   
-  TOKEN_FILE="${OUT_DIR}/${SPEC_NAME}-bootstrap-token.txt"
-  echo "$TOKEN" > "$TOKEN_FILE"
+  local token_dir="${OUT_DIR}/${SPEC_NAME}"
+  TOKEN_FILE="${token_dir}/${SPEC_NAME}-bootstrap-token.txt"
+  mkdir -p "$token_dir"
+  printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
   chmod 600 "$TOKEN_FILE"
   
   log_success "Bootstrap token generated successfully"

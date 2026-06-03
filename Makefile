@@ -1,17 +1,15 @@
 # Utility helpers for project maintenance.
 #
 # Usage:
-#   make token [TOKEN_SIZE=24]
+#   make token TOKEN_IMAGE_NAME=<image-name> [TOKEN_SIZE=24]
 #
 # TOKEN_SIZE controls the number of random bytes (default: 12) used when
 # generating the base64 token. The resulting token is echoed to stdout and
-# persisted under outputs/generated-token/ with the invocation timestamp.
+# persisted under outputs/<image-name>/<image-name>-bootstrap-token.txt.
 
 export SHELL := /bin/bash
 export TOKEN_SIZE ?= 32
-export TOKEN_OUTPUT_DIR := outputs/generated-token
-export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
-export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
+export TOKEN_IMAGE_NAME ?=
 export BOOT_ISO_YAML_DIR ?= configs/gitops/nodes
 export BOOT_ISO_OUTPUT_DIR ?= configs/gitops/boot-isos
 export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
@@ -20,7 +18,17 @@ export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 ## Generate a reusable base64 token and persist it for later use.
 token:
 	@set -euo pipefail; \
-		install -d -m 700 ${TOKEN_OUTPUT_DIR}; \
+		if [[ -z "${TOKEN_IMAGE_NAME}" ]]; then \
+			echo "ERROR: TOKEN_IMAGE_NAME is required (example: make token TOKEN_IMAGE_NAME=vmware-devlocal-image)"; \
+			exit 1; \
+		fi; \
+		if [[ "${TOKEN_IMAGE_NAME}" == */* ]]; then \
+			echo "ERROR: TOKEN_IMAGE_NAME must be a single folder name, not a path: ${TOKEN_IMAGE_NAME}"; \
+			exit 1; \
+		fi; \
+		TOKEN_OUTPUT_DIR="outputs/${TOKEN_IMAGE_NAME}"; \
+		TOKEN_FILE="${TOKEN_OUTPUT_DIR}/${TOKEN_IMAGE_NAME}-bootstrap-token.txt"; \
+		install -d -m 700 "${TOKEN_OUTPUT_DIR}"; \
 		TOKEN="$$(openssl rand -base64 ${TOKEN_SIZE})"; \
 		printf '%s\n' "$${TOKEN}" | tee "${TOKEN_FILE}"; \
 		chmod 600 "${TOKEN_FILE}"; \

@@ -246,8 +246,8 @@ sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml -P se
 
 ### Makefile Helpers
 
-- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `32`) to control entropy, for example `make token TOKEN_SIZE=24`.
-- Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
+- `make token` generates a base64 token using OpenSSL and requires `TOKEN_IMAGE_NAME=<image-name>`. Override the byte length with `TOKEN_SIZE=<n>` (default `32`) to control entropy, for example `make token TOKEN_IMAGE_NAME=vmware-devlocal-image TOKEN_SIZE=24`.
+- Each invocation prints the token to stdout and stores it under `outputs/<image-name>/<image-name>-bootstrap-token.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
 - `make boot-isos` builds one ISO per YAML from `BOOT_ISO_YAML_DIR` (default `configs/preprod/nodes`) and writes a manifest to `BOOT_ISO_MANIFEST`.
@@ -319,9 +319,11 @@ Notes:
 
 - During the `image` action, `spec.customCA` paths can be relative or absolute and are resolved before trust/registry processing.
 - When `customCA.installToOSTrust: true`, both `customCA.rootCrt` and `customCA.intermediateCrt` (when present) are copied into `/usr/local/share/ca-certificates` as `*.crt`, then refreshed with `update-ca-certificates --verbose --fresh`.
-- When `spec.customCA` is present, `image` generates a bootstrap token file at `outputs/<metadata.name>-bootstrap-token.txt` using the same CA-hash token logic as the `custom-ca` action.
-- When boot service node manifests include `spec.tokenFile`, `image` also writes compatibility token aliases for token paths under `/rke2-node-init/outputs` so cloned nodes can consume a stable filename.
+- When `spec.customCA` is present, `image` generates a bootstrap token file at `outputs/<metadata.name>/<metadata.name>-bootstrap-token.txt` using the same CA-hash token logic as the `custom-ca` action.
+- `image` only writes token aliases for manifests whose `spec.tokenFile` follows `/rke2-node-init/outputs/<image>/<image>-bootstrap-token.txt`.
+- `server`, `add-server`, and `agent` resolve relative `spec.tokenFile` paths against the manifest directory and repository root before use.
 - In `server` flow, when `spec.tokenFile` is provided but unreadable at runtime, initialization falls back to a generated first-server token instead of blocking startup.
+- In `add-server` and `agent` flows, unreadable `spec.tokenFile` values now fail early with remediation guidance.
 - `/etc/rancher/rke2/registries.yaml` is rendered with mirrors, optional fallback endpoints, and auth blocks derived from the manifest.
 - Image pushes produce both `outputs/images-manifest.json` and `.txt` describing source → target retags, plus SBOM or inspect metadata per image under `outputs/sbom/`.
 - Registry hosts can be pinned into `/etc/hosts` when IP addresses are provided, ensuring offline name resolution.

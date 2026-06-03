@@ -52,7 +52,7 @@ spec:
   kube-apiserver-arg:
     - "audit-log-maxage=15"
   serverURL: https://10.0.4.151:9345
-  tokenFile: /rke2-node-init/outputs/devlocal-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/devlocal-ca/devlocal-ca-bootstrap-token.txt
   customCA:
     rootCrt: /rke2-node-init/configs/preprod/certs/dev-certa001-ca-dev-local.crt
     rootKey: /rke2-node-init/configs/preprod/certs/dev-certa001-ca-dev-local-key.pem

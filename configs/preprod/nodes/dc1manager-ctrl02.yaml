@@ -47,7 +47,7 @@ spec:
   kube-apiserver-arg:
     - "audit-log-maxage=15"
   serverURL: https://10.1.1.215:9345
-  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca/dc1manager-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
   customCA:

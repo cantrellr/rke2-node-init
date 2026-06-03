@@ -31,7 +31,7 @@ spec:
       dns: 
       searchDomains: 
   serverURL: https://10.1.1.215:9345
-  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca/dc1manager-ca-bootstrap-token.txt
   node-label:
   - "role=worker"
   - "env=preprod"

@@ -12,7 +12,9 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 ROOT_OUT="${OUTDIR}/root-${TIMESTAMP}"
 SUB_OUT="${OUTDIR}/subca-${TIMESTAMP}"
 STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}"
-TOKEN_DIR="${TOKEN_OUTPUT_DIR:-outputs/tokens}"
+TOKEN_IMAGE_NAME="${TOKEN_IMAGE_NAME:-}"
+TOKEN_DIR=""
+TOKEN_FILE=""
 GENERATE_TOKEN="${GENERATE_TOKEN:-true}"
 
 ROOT_CN="${ROOT_CN:-Offline Root CA}"
@@ -23,7 +25,20 @@ SUB_ENCRYPT="${SUB_ENCRYPT:-false}"
 SUB_PASSFILE="${SUB_PASSFILE:-}"
 SUB_PATHLEN="${SUB_PATHLEN:-1}"
 
-echo "certs-auto: OUTDIR=${OUTDIR} STAGE_DIR=${STAGE_DIR}"
+if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
+  if [[ -z "${TOKEN_IMAGE_NAME}" ]]; then
+    echo "ERROR: TOKEN_IMAGE_NAME is required when GENERATE_TOKEN=true (example: TOKEN_IMAGE_NAME=vmware-devlocal-image)" >&2
+    exit 1
+  fi
+  if [[ "${TOKEN_IMAGE_NAME}" == */* ]]; then
+    echo "ERROR: TOKEN_IMAGE_NAME must be a single folder name, not a path: ${TOKEN_IMAGE_NAME}" >&2
+    exit 1
+  fi
+  TOKEN_DIR="outputs/${TOKEN_IMAGE_NAME}"
+  TOKEN_FILE="${TOKEN_DIR}/${TOKEN_IMAGE_NAME}-bootstrap-token.txt"
+fi
+
+echo "certs-auto: OUTDIR=${OUTDIR} STAGE_DIR=${STAGE_DIR} TOKEN_IMAGE_NAME=${TOKEN_IMAGE_NAME:-<unset>}"
 
 # Helper: ensure directory exists and is owned by current user; if not, use sudo
 ensure_dir() {
@@ -137,7 +152,6 @@ if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
     FULL_TOKEN="K10${CA_HASH}::server:${PASSHEX}"
   fi
 
-  TOKEN_FILE="${TOKEN_DIR}/bootstrap-${TIMESTAMP}.token"
   echo "${FULL_TOKEN}" > "${TOKEN_FILE}"
   chmod 600 "${TOKEN_FILE}"
   echo "Staging token to ${STAGE_DIR}/bootstrap.token"

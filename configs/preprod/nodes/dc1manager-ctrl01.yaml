@@ -48,7 +48,7 @@ spec:
   disable-default-registry-endpoint: true
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  tokenFile: /rke2-node-init/outputs/dc1manager-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/dc1manager-ca/dc1manager-ca-bootstrap-token.txt
   disable:
   - rke2-ingress-nginx
   customCA:

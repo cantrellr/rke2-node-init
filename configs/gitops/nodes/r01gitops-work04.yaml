@@ -36,7 +36,7 @@ spec:
   embedded-registry: true
   disable-default-registry-endpoint: true
   serverURL: https://10.0.4.151:9345
-  tokenFile: /rke2-node-init/outputs/devlocal-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/devlocal-ca/devlocal-ca-bootstrap-token.txt
   node-label:
   - "role=worker"
   - "env=preprod-gitops"

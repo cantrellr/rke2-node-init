@@ -72,11 +72,14 @@ sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-ctrl01.yaml verif
 
 | Target | Purpose |
 | --- | --- |
-| `make token` | Generate reusable bootstrap token |
+| `make token TOKEN_IMAGE_NAME=<image-name>` | Generate reusable bootstrap token under image output folder |
 | `make sh` | Mark root-level shell scripts executable |
 | `make kubeconfig` | Install `kubectl` and copy local kubeconfig |
 | `make boot-isos` | Build node boot ISOs from YAMLs |
 | `make boot-isos-clean` | Remove generated ISO artifacts |
+
+Notes:
+- `make token` requires `TOKEN_IMAGE_NAME` and writes to `outputs/<image-name>/<image-name>-bootstrap-token.txt`.
 
 ### Certificate Tooling
 

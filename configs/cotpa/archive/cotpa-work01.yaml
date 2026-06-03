@@ -35,7 +35,7 @@ spec:
       dns: 
       searchDomains: 
   serverURL: https://172.16.15.101:9345
-  tokenFile: /rke2-node-init/outputs/cotpa-ca-bootstrap-token.txt
+  tokenFile: /rke2-node-init/outputs/cotpa-ca/cotpa-ca-bootstrap-token.txt
   node-label:
   - "role=worker"
   - "env=development"
