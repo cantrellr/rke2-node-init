@@ -4723,6 +4723,78 @@ resolve_boot_yaml_dir() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: resolve_invoking_user_owner
+# Purpose : Determine the non-root caller identity when this script is executed
+#           via sudo, returning numeric uid:gid for artifact ownership handoff.
+# Arguments:
+#   None
+# Returns :
+#   Prints "<uid>:<gid>" when a non-root invoking user is detected.
+# ------------------------------------------------------------------------------
+resolve_invoking_user_owner() {
+  local uid="${SUDO_UID:-}"
+  local gid="${SUDO_GID:-}"
+  local user="${SUDO_USER:-}"
+
+  if [[ -z "$uid" || ! "$uid" =~ ^[0-9]+$ || "$uid" -eq 0 ]]; then
+    return 1
+  fi
+
+  if [[ -z "$gid" || ! "$gid" =~ ^[0-9]+$ ]]; then
+    if [[ -n "$user" ]]; then
+      gid="$(id -g "$user" 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "$gid" || ! "$gid" =~ ^[0-9]+$ ]]; then
+    local passwd_entry=""
+    passwd_entry="$(getent passwd "$uid" 2>/dev/null || true)"
+    if [[ -n "$passwd_entry" ]]; then
+      gid="$(printf '%s\n' "$passwd_entry" | awk -F: '{print $4}')"
+    fi
+  fi
+
+  [[ -n "$gid" && "$gid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s:%s\n' "$uid" "$gid"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: ensure_boot_iso_artifact_ownership
+# Purpose : Re-assign generated boot ISO artifacts to the invoking non-root
+#           user when this script runs via sudo.
+# Arguments:
+#   $@ - One or more artifact paths (files/directories) to re-own
+# Returns :
+#   Always returns 0. Logs WARN on ownership adjustment failures.
+# ------------------------------------------------------------------------------
+ensure_boot_iso_artifact_ownership() {
+  local owner_spec=""
+  local target=""
+  local changed=0
+  local log_target="${LOG_FILE:-/dev/null}"
+
+  if ! owner_spec="$(resolve_invoking_user_owner)"; then
+    return 0
+  fi
+
+  for target in "$@"; do
+    [[ -n "$target" && -e "$target" ]] || continue
+    if chown -R "$owner_spec" "$target" >>"$log_target" 2>&1; then
+      changed=1
+    else
+      log WARN "Unable to set boot-service ISO ownership to $owner_spec for: $target"
+    fi
+  done
+
+  if [[ "$changed" -eq 1 ]]; then
+    log INFO "Boot-service ISO artifacts ownership set to invoking user ($owner_spec)"
+  fi
+
+  return 0
+}
+
+# ------------------------------------------------------------------------------
 # Function: generate_bootservice_isos
 # Purpose : Build one ISO per YAML config from a source directory using
 #           scripts/build-boot-isos.sh. ISO names are metadata.name.iso.
@@ -4768,6 +4840,8 @@ generate_bootservice_isos() {
     log ERROR "Boot ISO manifest was created but no ISO entries were found: $manifest_file"
     return 1
   fi
+
+  ensure_boot_iso_artifact_ownership "$out_dir" "$manifest_file"
 
   log INFO "Boot-service ISO build completed: $BOOT_ISO_COUNT file(s)"
   log INFO "Boot-service ISO manifest: $BOOT_ISO_MANIFEST"
