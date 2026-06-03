@@ -5038,7 +5038,14 @@ TARGET_FILE=""
 # Logging helper
 log() {
   local level="$1"; shift
-  echo "[$level] $*" | systemd-cat -t rke2-boot -p "${level,,}"
+  local priority="info"
+  case "${level^^}" in
+    INFO) priority="info" ;;
+    WARN|WARNING) priority="warning" ;;
+    ERROR) priority="err" ;;
+    DEBUG) priority="debug" ;;
+  esac
+  echo "[$level] $*" | systemd-cat -t rke2-boot -p "$priority"
   echo "[$level] $*"
 }
 
@@ -10835,14 +10842,23 @@ action_server() {
       log_info "Token file provided and found; using token-file: $TOKEN_FILE"
       TOKEN=""
     else
-      log_error "Token file provided but unavailable: $TOKEN_FILE"
-      if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
-        log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+      if [[ "$via_boot_service" -eq 1 ]]; then
+        log_warn "Token file provided but unavailable during boot-service run: $TOKEN_FILE"
+        if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+          log_warn "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+        fi
+        log_warn "Proceeding without token-file; generating a first-server bootstrap token for this run."
+        TOKEN_FILE=""
+      else
+        log_error "Token file provided but unavailable: $TOKEN_FILE"
+        if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+          log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+        fi
+        log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+        metrics_increment "total"
+        metrics_increment "failed"
+        exit 1
       fi
-      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
-      metrics_increment "total"
-      metrics_increment "failed"
-      exit 1
     fi
   elif [[ -n "$TOKEN" ]]; then
     local full_token
