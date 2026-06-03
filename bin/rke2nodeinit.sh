@@ -4730,6 +4730,8 @@ resolve_boot_yaml_dir() {
 # Purpose : Resolve a token-file path to a readable absolute path. Relative
 #           paths are evaluated against CONFIG_FILE directory, then REPO_ROOT,
 #           then current working directory.
+#           Legacy token-file paths under /outputs/<name>-bootstrap-token.txt
+#           are also mapped to /outputs/<name>/<name>-bootstrap-token.txt.
 # Arguments:
 #   $1 - Raw token-file path
 # Returns :
@@ -4741,21 +4743,42 @@ resolve_token_file_path() {
   local cfg_dir=""
   local candidate=""
   local resolved=""
+  local legacy_outputs_rel=""
+  local legacy_prefix=""
+  local legacy_name=""
   local -a candidates=()
   local -A seen=()
 
   TOKEN_FILE_RESOLUTION_ATTEMPTS=""
   [[ -n "$raw_path" ]] || return 1
 
+  if [[ "$raw_path" =~ (^|.*/)outputs/([^/]+)-bootstrap-token\.txt$ ]]; then
+    legacy_prefix="${BASH_REMATCH[1]}outputs"
+    legacy_name="${BASH_REMATCH[2]}"
+    legacy_outputs_rel="${legacy_prefix}/${legacy_name}/${legacy_name}-bootstrap-token.txt"
+  fi
+
   if [[ "$raw_path" == /* ]]; then
     candidates+=("$raw_path")
+    if [[ -n "$legacy_outputs_rel" ]]; then
+      candidates+=("$legacy_outputs_rel")
+    fi
   else
     if [[ -n "${CONFIG_FILE:-}" ]]; then
       cfg_dir="$(dirname -- "$CONFIG_FILE")"
       candidates+=("$cfg_dir/$raw_path")
+      if [[ -n "$legacy_outputs_rel" ]]; then
+        candidates+=("$cfg_dir/$legacy_outputs_rel")
+      fi
     fi
     candidates+=("$REPO_ROOT/$raw_path")
+    if [[ -n "$legacy_outputs_rel" ]]; then
+      candidates+=("$REPO_ROOT/$legacy_outputs_rel")
+    fi
     candidates+=("$raw_path")
+    if [[ -n "$legacy_outputs_rel" ]]; then
+      candidates+=("$legacy_outputs_rel")
+    fi
   fi
 
   for candidate in "${candidates[@]}"; do
@@ -10607,7 +10630,7 @@ action_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
+    TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     local fix_cni_permissions_yaml=""
     fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"
     if [[ -n "$fix_cni_permissions_yaml" ]]; then
@@ -10812,18 +10835,14 @@ action_server() {
       log_info "Token file provided and found; using token-file: $TOKEN_FILE"
       TOKEN=""
     else
-      log_warn "Token file provided but unavailable: $TOKEN_FILE"
+      log_error "Token file provided but unavailable: $TOKEN_FILE"
       if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
-        log_warn "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
+        log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
       fi
-      log_warn "Falling back to generated first-server bootstrap token."
-      TOKEN_FILE=""
-      TOKEN="$(generate_bootstrap_token)"
-      if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
-        log_info "Using fallback generated secure first-server token (custom CA fingerprint embedded)."
-      else
-        log_info "Using fallback generated short first-server bootstrap token."
-      fi
+      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
     fi
   elif [[ -n "$TOKEN" ]]; then
     local full_token
@@ -11548,7 +11567,7 @@ action_add_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && { TLS_SANS_IN="$(normalize_list_csv "$ts")"; TLS_SANS="$TLS_SANS_IN"; }
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
+    TOKEN_FILE="$(yaml_spec_get_any "$CONFIG_FILE" tokenFile token-file || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     local fix_cni_permissions_yaml=""
     fix_cni_permissions_yaml="$(yaml_spec_get_any "$CONFIG_FILE" fixCNIPermissions fixCniPermissions fix-cni-permissions || true)"

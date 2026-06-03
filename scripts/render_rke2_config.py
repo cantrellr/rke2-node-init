@@ -25,11 +25,13 @@ spec = doc.get('spec', {})
 out_lines = []
 out_lines.append('debug: true')
 
-# token precedence: token then tokenFile
+# token precedence: token then tokenFile/token-file
 if 'token' in spec and spec.get('token'):
     out_lines.append(f"token: {spec.get('token')}")
-elif 'tokenFile' in spec and spec.get('tokenFile'):
-    out_lines.append(f"token-file: \"{spec.get('tokenFile')}\"")
+else:
+    token_file = spec.get('tokenFile') or spec.get('token-file')
+    if token_file:
+        out_lines.append(f"token-file: \"{token_file}\"")
 
 # Scalars mapping
 scalars = [

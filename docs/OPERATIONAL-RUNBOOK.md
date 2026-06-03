@@ -80,6 +80,12 @@ Worker:
 sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-work01.yaml agent
 ```
 
+Token policy for node provisioning:
+- Use `spec.tokenFile` (or `spec.token-file`) with canonical paths under `/rke2-node-init/outputs/<image>/<image>-bootstrap-token.txt` when using generated token artifacts.
+- If a token file path is provided but unreadable/unresolvable, `server`, `add-server`, and `agent` all fail fast with remediation output.
+- `server` only generates a bootstrap token when neither `token` nor `token-file` is supplied.
+- `add-server` and `agent` are join workflows and therefore require operator-provided token material.
+
 ## Phase 6: Verification
 
 ```bash

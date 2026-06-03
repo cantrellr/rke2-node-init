@@ -41,11 +41,19 @@ sudo ./bin/rke2nodeinit.sh -f <manifest.yaml> [flags] <action>
 | `-y` | Non-interactive confirmations |
 | `-P` | Print sanitized manifest |
 | `--dry-push` | Simulate push action |
+| `--token <value>` | Provide cluster token directly (server, add-server, agent) |
+| `--token-file <path>` | Provide cluster token via file path (server, add-server, agent) |
 | `--enable-fips` | Enable FIPS mode (Ubuntu Pro) |
 | `--fix-cni-permissions` | Enable CNI permission remediation on image action |
 | `--enable-boot-service` | Enable first-boot ISO execution flow |
 | `--boot-yaml-path <dir>` | Directory used to generate boot ISOs |
 | `--boot-mode <oneshot|persistent>` | Boot service execution policy |
+
+Token handling notes:
+- Manifest keys `spec.tokenFile` and `spec.token-file` are both accepted for `server`, `add-server`, and `agent`.
+- Token precedence is `token` over `token-file`.
+- When `--token-file`/`spec.tokenFile` is provided but unreadable, all three actions fail fast with remediation guidance.
+- `server` auto-generates a bootstrap token only when neither `token` nor `token-file` is provided.
 
 ### Example Commands
 

@@ -25,6 +25,8 @@ Run from repository root:
 ```bash
 bash tests/test_generate_bootstrap_token_contract.sh
 bash tests/test_hardened_cni_fetch.sh
+bash tests/test_token_strict_policy.sh
+bash tests/test_token_yaml_key_normalization.sh
 bash tests/test_tokenfile_paths.sh
 bash tests/test_truncated_image_staging.sh
 bash tests/test_verify_stage_images.sh
