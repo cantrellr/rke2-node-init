@@ -27,6 +27,8 @@ __pycache__/
 /code/
 /configs/devlocal/
 /configs/gitops/
+/configs/r01preprod-jde/
+/configs/preprod/
 /apps/ipam/data/*
 !/apps/ipam/data/.gitkeep
 
