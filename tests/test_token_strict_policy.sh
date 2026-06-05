@@ -42,6 +42,21 @@ if grep -Fq 'Using fallback generated short first-server bootstrap token.' "$scr
   exit 1
 fi
 
+if grep -Fq 'setup_custom_cluster_ca || true' "$script"; then
+  echo "ERROR: customCA seeding failure is still being swallowed with || true." >&2
+  exit 1
+fi
+
+if ! grep -Fq 'validate_prebuilt_token_custom_ca()' "$script"; then
+  echo "ERROR: prebuilt customCA token validation helper is missing." >&2
+  exit 1
+fi
+
+if ! grep -Fq 'Prebuilt token CA hash matches configured custom CA' "$script"; then
+  echo "ERROR: prebuilt customCA token match logging is missing." >&2
+  exit 1
+fi
+
 if ! grep -Fq 'Using generated secure first-server token (custom CA fingerprint embedded).' "$script"; then
   echo "ERROR: First-server generation path appears to be missing." >&2
   exit 1

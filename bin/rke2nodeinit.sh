@@ -6340,6 +6340,68 @@ ensure_full_cluster_token() {
   printf 'K10%s::%s' "$ca_hash" "$trimmed"
 }
 
+# ----------------------------------------------------------------------------
+# Function: validate_prebuilt_token_custom_ca
+# Purpose : Ensure a provided prebuilt K10 token matches the configured custom
+#           CA hash without mutating the token itself.
+# Arguments:
+#   $1 - Token string or token-file path
+# Returns :
+#   0 when the token matches the expected custom CA hash, non-zero otherwise.
+# ----------------------------------------------------------------------------
+validate_prebuilt_token_custom_ca() {
+  local token_input="$1"
+  local token_line=""
+  local token_hash=""
+  local ca_cert=""
+  local expected_hash=""
+
+  if [[ -z "$token_input" ]]; then
+    log ERROR "Token validation requested without token input."
+    return 1
+  fi
+
+  if [[ -f "$token_input" ]]; then
+    token_line="$(head -n 1 "$token_input" | tr -d '\r\n')"
+  else
+    token_line="$(printf '%s' "$token_input" | tr -d '\r\n')"
+  fi
+
+  if [[ ! "$token_line" =~ ^K10([0-9a-fA-F]{64}):: ]]; then
+    log ERROR "Prebuilt customCA validation requires a full K10 token, but the provided token is not in full format."
+    return 1
+  fi
+
+  token_hash="${BASH_REMATCH[1]}"
+
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" && -f "${CUSTOM_CA_ROOT_CRT}" ]]; then
+    ca_cert="$CUSTOM_CA_ROOT_CRT"
+  elif [[ -n "${CUSTOM_CA_INT_CRT:-}" && -f "${CUSTOM_CA_INT_CRT}" ]]; then
+    ca_cert="$CUSTOM_CA_INT_CRT"
+  else
+    ca_cert="$(find_trusted_cluster_ca_certificate || true)"
+  fi
+
+  if [[ -z "$ca_cert" || ! -f "$ca_cert" ]]; then
+    log ERROR "Unable to locate a configured custom CA certificate for token hash validation."
+    return 1
+  fi
+
+  expected_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$expected_hash" ]]; then
+    log ERROR "Failed to compute custom CA hash from $ca_cert."
+    return 1
+  fi
+
+  if [[ "$token_hash" != "$expected_hash" ]]; then
+    log ERROR "Prebuilt token CA hash mismatch: token=$token_hash expected=$expected_hash from $ca_cert"
+    return 1
+  fi
+
+  log INFO "Prebuilt token CA hash matches configured custom CA: $expected_hash"
+  return 0
+}
+
 # ------------------------------------------------------------------------------
 # Function: generate_bootstrap_token
 # Purpose : Produce an appropriate bootstrap token for the very first RKE2
@@ -7243,6 +7305,11 @@ setup_custom_cluster_ca() {
   local GEN2="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
   local token_file="${BOOTSTRAP_TOKEN_FILE:-}"
   local root_ca_reason=""
+  local custom_ca_requested=0
+
+  if [[ -n "$ROOT_CRT" || -n "$INT_CRT" ]]; then
+    custom_ca_requested=1
+  fi
 
   # Optionally ensure OS trust (clients/servers on the host trust the root CA)
   local _bn=""
@@ -7274,6 +7341,14 @@ setup_custom_cluster_ca() {
       fi
     fi
     if [[ ! -f "$ROOT_CRT" ]]; then
+      if [[ "$custom_ca_requested" -eq 1 ]]; then
+        if [[ -n "$root_ca_reason" ]]; then
+          log ERROR "$root_ca_reason; custom cluster CA is required and cannot be skipped."
+        else
+          log ERROR "Root CA not found; custom cluster CA is required and cannot be skipped."
+        fi
+        return 1
+      fi
       if [[ -n "$root_ca_reason" ]]; then
         log WARN "$root_ca_reason; custom cluster CA will not be used."
       else
@@ -7304,6 +7379,10 @@ setup_custom_cluster_ca() {
     cp -f "$INT_KEY"  "$TLS_DIR/intermediate-ca.key"
     log INFO "Prepared root + intermediate for custom cluster CA generation."
   else
+    if [[ "$custom_ca_requested" -eq 1 ]]; then
+      log ERROR "No CA private key found (expected CUSTOM_CA_ROOT_KEY or CUSTOM_CA_INT_KEY); custom cluster CA is required and cannot be skipped."
+      return 1
+    fi
     log WARN "No CA private key found (expected CUSTOM_CA_ROOT_KEY or CUSTOM_CA_INT_KEY). "\
              "Will continue with RKE2 self-signed cluster CA."
     return 0
@@ -7378,6 +7457,8 @@ setup_custom_cluster_ca() {
   done
   if (( missing == 0 )); then
     log INFO "Custom cluster CA seeded successfully. New clusters will chain to provided root."
+  else
+    return 1
   fi
 
 }
@@ -10883,7 +10964,12 @@ action_server() {
 
   BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
   log_info "Seeding custom cluster CA..."
-  setup_custom_cluster_ca || true
+  if ! setup_custom_cluster_ca; then
+    log_error "Custom cluster CA seeding failed; refusing to continue because join tokens must trust the prebuilt CA hash."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 1
+  fi
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "custom_ca_configured"
@@ -11813,9 +11899,46 @@ action_add_server() {
     fi
   fi
 
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" || -n "${CUSTOM_CA_INT_CRT:-}" ]]; then
+    if [[ -n "$TOKEN_FILE" ]]; then
+      if ! validate_prebuilt_token_custom_ca "$TOKEN_FILE"; then
+        log_error "Prebuilt token does not trust the configured custom CA; refusing to continue."
+        metrics_increment "failed"
+        exit 1
+      fi
+    elif [[ -n "$TOKEN" ]]; then
+      if ! validate_prebuilt_token_custom_ca "$TOKEN"; then
+        log_error "Prebuilt token does not trust the configured custom CA; refusing to continue."
+        metrics_increment "failed"
+        exit 1
+      fi
+    fi
+  fi
+
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" || -n "${CUSTOM_CA_INT_CRT:-}" ]]; then
+    if [[ -n "$TOKEN_FILE" ]]; then
+      if ! validate_prebuilt_token_custom_ca "$TOKEN_FILE"; then
+        log_error "Prebuilt token does not trust the configured custom CA; refusing to continue."
+        metrics_increment "failed"
+        exit 1
+      fi
+    elif [[ -n "$TOKEN" ]]; then
+      if ! validate_prebuilt_token_custom_ca "$TOKEN"; then
+        log_error "Prebuilt token does not trust the configured custom CA; refusing to continue."
+        metrics_increment "failed"
+        exit 1
+      fi
+    fi
+  fi
+
   BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
   log_info "Seeding custom cluster CA..."
-  setup_custom_cluster_ca || true
+  if ! setup_custom_cluster_ca; then
+    log_error "Custom cluster CA seeding failed; refusing to continue because join tokens must trust the prebuilt CA hash."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 1
+  fi
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "custom_ca_configured"
