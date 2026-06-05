@@ -1,4 +1,0 @@
-mirrors:
-  "*":
-    endpoint:
-      - "https://kuberegistry.k8.cantrellcloud.net:8443"

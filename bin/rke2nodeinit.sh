@@ -7436,17 +7436,9 @@ setup_custom_cluster_ca() {
       return 1
     }
   else
-    if command -v curl >/dev/null 2>&1; then
-      log INFO "Downloading helper to generate custom CA set (one-time)."
-      curl -fsSL https://github.com/k3s-io/k3s/raw/master/contrib/util/generate-custom-ca-certs.sh \
-        | PRODUCT=rke2 DATA_DIR=/var/lib/rancher/rke2 bash - >>"$LOG_FILE" 2>&1 || {
-          log ERROR "Custom CA generation failed via curl; leaving defaults in place."
-          return 1
-        }
-    else
-      log ERROR "No offline helper found and curl not available; cannot generate custom cluster CA."
-      return 1
-    fi
+    log ERROR "No offline helper found for custom CA generation. Expected one of: $GEN1 or $GEN2"
+    log ERROR "Runtime customCA seeding is offline-only. Populate helper during image process."
+    return 1
   fi
 
   # Sanity: ensure the expected files exist
@@ -8152,14 +8144,38 @@ ensure_server_loopback_registry_safeguard() {
 #   Returns 0 on success.
 # ------------------------------------------------------------------------------
 fetch_rke2_ca_generator() {
-  # Prefetch custom-CA helper for offline use
-  if command -v curl >/dev/null 2>&1; then
-    local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
-    log INFO "Fetching custom-CA helper script for offline use."
-    curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
-    chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
-    log INFO "Staged custom-CA helper script for offline use."
+  local helper_path="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
+  local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
+
+  # Reuse cached helper if it already exists.
+  if [[ -x "$helper_path" ]]; then
+    log INFO "Using cached custom-CA helper script: $helper_path"
+    return 0
   fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log ERROR "curl is required during image process to fetch custom-CA helper: $GEN_URL"
+    return 1
+  fi
+
+  mkdir -p "$DOWNLOADS_DIR"
+  local tmp_helper="$DOWNLOADS_DIR/.tmp-generate-custom-ca-certs.sh.$$"
+  log INFO "Fetching custom-CA helper script for offline use."
+  if ! curl -fsSL -o "$tmp_helper" "$GEN_URL" >>"$LOG_FILE" 2>&1; then
+    rm -f "$tmp_helper" || true
+    log ERROR "Failed to fetch custom-CA helper script from $GEN_URL"
+    return 1
+  fi
+
+  chmod +x "$tmp_helper"
+  mv -f "$tmp_helper" "$helper_path"
+  if [[ ! -x "$helper_path" ]]; then
+    log ERROR "Fetched custom-CA helper is not executable: $helper_path"
+    return 1
+  fi
+
+  log INFO "Staged custom-CA helper script for offline use: $helper_path"
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -9597,11 +9613,24 @@ action_image() {
     log_info "Physical hardware detected - skipping VM tools installation"
   fi
 
-  # Fetch RKE2 CA generator utility
-  fetch_rke2_ca_generator
-  metrics_increment "total"
-  metrics_increment "success"
-  metrics_increment "ca_generator_fetched"
+  # Fetch RKE2 CA generator utility during image process only when custom CA is configured.
+  if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
+    if ! fetch_rke2_ca_generator; then
+      log_error "Failed to stage custom-CA helper script during image process."
+      log_error "Remediation: ensure Internet access for image process or pre-place helper at $DOWNLOADS_DIR/generate-custom-ca-certs.sh"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 3
+    fi
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "ca_generator_fetched"
+  else
+    log_info "customCA not configured for image action; skipping custom-CA helper prefetch"
+    metrics_increment "total"
+    metrics_increment "skipped"
+    metrics_increment "ca_generator_fetched"
+  fi
   
   # --- Cache RKE2 artifacts --------------------------------------------------
   # Downloads and stages required artifacts into DOWNLOADS_DIR and STAGE_DIR
@@ -12437,19 +12466,6 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       NODE_NAME="$2"
-      shift 2
-      ;;
-    --node-name=*)
-      NODE_NAME="${1#*=}"
-      shift
-      ;;
-    --enable-boot-service) ENABLE_BOOT_SERVICE=1; shift;;
-    --boot-yaml-path)
-      if [[ -z "${2:-}" ]]; then
-        echo "ERROR: --boot-yaml-path requires an argument" >&2
-        exit 1
-      fi
-      BOOT_YAML_PATH="$2"
       shift 2
       ;;
     --boot-yaml-path=*)

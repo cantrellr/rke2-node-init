@@ -57,6 +57,21 @@ if ! grep -Fq 'Prebuilt token CA hash matches configured custom CA' "$script"; t
   exit 1
 fi
 
+if grep -Fq 'Downloading helper to generate custom CA set (one-time).' "$script"; then
+  echo "ERROR: Runtime customCA helper network fallback is still present." >&2
+  exit 1
+fi
+
+if grep -Fq 'Custom CA generation failed via curl; leaving defaults in place.' "$script"; then
+  echo "ERROR: Runtime customCA curl fallback failure path is still present." >&2
+  exit 1
+fi
+
+if ! grep -Fq 'Runtime customCA seeding is offline-only. Populate helper during image process.' "$script"; then
+  echo "ERROR: Offline-only customCA runtime remediation message is missing." >&2
+  exit 1
+fi
+
 if ! grep -Fq 'Using generated secure first-server token (custom CA fingerprint embedded).' "$script"; then
   echo "ERROR: First-server generation path appears to be missing." >&2
   exit 1
