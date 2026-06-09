@@ -44,7 +44,7 @@ spec:
     installToOSTrust: true
   disable:
   - rke2-ingress-nginx
-  - rke2-ingress-traefik
+  - rke2-traefik
   tls-san:
     - dc3domain-ctrl01
     - dc3domain-ctrl01.k8.cantrellcloud.net
