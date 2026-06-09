@@ -1,0 +1,11 @@
+apiVersion: rkeprep/v2
+kind: CustomCA
+metadata:
+  name: cocloud-ca-chain
+spec:
+  customCA:
+    rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
+    installToOSTrust: true

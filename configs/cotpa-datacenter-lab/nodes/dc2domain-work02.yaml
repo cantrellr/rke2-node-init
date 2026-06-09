@@ -1,0 +1,49 @@
+apiVersion: rkeprep/v2
+kind: Agent
+metadata:
+  name: dc2domain-work02
+spec:
+  hostname: dc2domain-work02
+  # Bind to cluster communication interface
+  nodeIp: 172.16.15.112
+  bindAddress: 172.16.15.112
+  advertiseAddress: 172.16.15.112
+  cni:
+   - multus
+   - canal
+  interfaces:
+    # vlan9
+    - name: eth0
+      ip: 172.16.15.112
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
+      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan30 - cocloud-ad
+    - name: eth1
+      ip: 172.16.8.112
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
+    # vlan10 - cotpa_pub10
+    - name: eth2
+      ip: 172.16.1.112
+      prefix: 24
+      gateway:
+      dns: ["172.16.1.11", "172.16.1.12"]
+      searchDomains: ["cantrelloffice.home", "cantrelloffice.com"]
+  node-label:
+  - "role=worker"
+  - "env=production"
+  tokenFile: /rke2-node-init/outputs/hyperv-cotpa-datacenter-lab-image-bootstrap-token.txt
+  customCA:
+    rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
+    installToOSTrust: true
+  disable:
+  - rke2-ingress-nginx
+  - rke2-ingress-traefik
+  serverURL: https://172.16.15.110:9345
