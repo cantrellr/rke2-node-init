@@ -9846,7 +9846,7 @@ action_image() {
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     mkdir -p /etc/rancher/rke2
     : > /etc/rancher/rke2/config.yaml
-    echo "import-images: true" >> /etc/rancher/rke2/config.yaml
+    #echo "import-images: true" >> /etc/rancher/rke2/config.yaml
     # Honour embedded-registry setting from YAML spec if provided
     local _emb=""
     if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
