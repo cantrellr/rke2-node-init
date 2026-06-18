@@ -1,95 +1,91 @@
-# RKE2 Node Init Documentation Index
+# RKE2 Node Init Documentation
 
-**Last Updated:** April 24, 2026  
-**Project Status:** Active development (post-Phase 5 hardening/automation)
+`rke2-node-init` is the offline-first automation repo for preparing, validating, and bootstrapping RKE2 nodes in connected, staged, and air-gapped environments.
 
----
-
-## Documentation Scope
-
-This directory contains technical references for RKE2 node bootstrap, air-gapped image preparation, STIG hardening, first-boot ISO workflows, and historical redesign records.
-
-For operational entrypoints, start with:
-
-1. [Main README](../README.md) for script capabilities and action workflows
-2. [Configuration examples](../examples/config/README.md) for `rkeprep/v2` YAML usage
-3. [Roadmap](../ROADMAP.md) and [Changelog](../CHANGELOG.md) for delivery state
+This `docs/` folder now follows the same documentation standard used across the related air-gap repositories: one current-state design document, one operator runbook, one hardening/validation checklist, one documentation-maintenance guide, and one clear boundary for legacy reference material.
 
 ---
 
-## Core Technical Guides
+## Start Here
 
 | Document | Purpose |
 | --- | --- |
-| [CLI-REFERENCE.md](CLI-REFERENCE.md) | Canonical CLI actions, flags, and command patterns |
-| [OPERATIONAL-RUNBOOK.md](OPERATIONAL-RUNBOOK.md) | End-to-end operational workflow from image build through node provisioning |
-| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Failure signatures, triage flow, and remediation playbooks |
-| [TESTING-GUIDE.md](TESTING-GUIDE.md) | Local + CI validation workflow and required pre-PR test set |
-| [SCRIPTS-REFERENCE.md](SCRIPTS-REFERENCE.md) | Inventory of all operational scripts and utility tools |
-| [MIGRATION-v2.0.md](MIGRATION-v2.0.md) | Breaking path changes and migration checklist for v2.0 |
-| [PR-VALIDATION-CHECKLIST.md](PR-VALIDATION-CHECKLIST.md) | Merge-gate checklist for quality, path integrity, and release hygiene |
-| [HARDENED_CNI.md](HARDENED_CNI.md) | Hardened CNI plugin behavior, tag alignment, and offline staging guidance |
-| [RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md](RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md) | Golden image build flow for disconnected environments |
-| [STIG-README.md](STIG-README.md) | STIG helper execution model and persistent CNI permissions remediation |
-| [STIG-CHECKLIST.md](STIG-CHECKLIST.md) | STIG checklist references and operational checks |
-| [HYPERV-VM-NAME-SETUP.md](HYPERV-VM-NAME-SETUP.md) | Hyper-V first-boot ISO workflow using virtual CD payloads (`/config/<yaml>`) |
-| [CONFIG-YAML-TRANSFER-ANALYSIS.md](CONFIG-YAML-TRANSFER-ANALYSIS.md) | YAML schema and migration analysis notes |
-| [GITOPS-IMPLEMENTATION-SUMMARY.md](GITOPS-IMPLEMENTATION-SUMMARY.md) | VM GitOps workflow implementation summary |
-| [IPAM-APP.md](IPAM-APP.md) | Internal web app for tracking sites, subnets, and IP assignments |
+| [../README.md](../README.md) | Top-level project overview, action summary, command examples, and feature list. |
+| [System-Design-Document.md](System-Design-Document.md) | Current-state architecture, workflows, trust boundaries, artifact lifecycle, and Mermaid diagrams. |
+| [operator-runbook.md](operator-runbook.md) | Operator workflow for image staging, registry push, server/add-server/agent bootstrap, verify, rollback, and troubleshooting. |
+| [hardening-checklist.md](hardening-checklist.md) | Security, offline, artifact, registry, OS, certificate, and documentation integrity checklist. |
+| [documentation-maintenance.md](documentation-maintenance.md) | Rules for keeping docs, Mermaid sources, generated exports, and legacy references synchronized. |
+| [../examples/config/README.md](../examples/config/README.md) | `rkeprep/v2` YAML examples and configuration patterns. |
 
 ---
 
-## Historical Redesign Archive
+## Canonical Operating Model
 
-The redesign phase documentation lives under [docs/redesign](redesign/) and is intentionally retained as implementation history.
+The current documentation treats the repo as a node lifecycle automation system with these phases:
 
-- See [redesign/README.md](redesign/README.md) for archive usage guidance and current-behavior mapping notes.
+1. **Connected staging** using the `image` or `airgap` action to download and validate RKE2 artifacts, image archives, checksums, CNI images, container runtime bundles, optional CA material, and optional boot-service payloads.
+2. **Offline registry population** using the `push` action to load, retag, generate metadata/SBOM output, and push staged images into an internal registry.
+3. **Offline node bootstrap** using the `server`, `add-server`, or `agent` actions to configure host identity, static networking, RKE2 config, registry trust, custom CA trust, and install the correct RKE2 service.
+4. **Validation and lifecycle operations** using `verify`, `label-node`, `taint-node`, and `custom-ca` workflows.
 
-- Phase implementation, summary, and completion artifacts (`PHASE1` through `PHASE5`)
-- Quick references and progress reports
-- Design analysis and change rationale
-
-Use these documents for historical decisions and architecture evolution, not as the canonical source for current CLI behavior.
-
----
-
-## Validation & Reporting Artifacts
-
-| Location | Purpose |
-| --- | --- |
-| [report](report/) | Action-level implementation and behavior reports |
-| [report/README.md](report/README.md) | Notes on interpreting historical report snippets versus current behavior |
-| [validation-report.md](validation-report.md) | Consolidated validation notes and output snapshots |
-| [stigs](stigs/) | STIG-related resources and supporting material |
+Only connected artifact-gathering workflows should require public Internet access. Registry sync and node bootstrap workflows are designed to execute after the environment is staged.
 
 ---
 
-## CI/Workflow References
+## Diagrams
 
-Repository workflows that enforce configuration quality live under [../.github/workflows](../.github/workflows):
+Mermaid diagram sources live under [`../diagrams/mermaid-source`](../diagrams/mermaid-source). The design document embeds matching Mermaid blocks and links to generated SVG/PNG exports.
 
-- `validate-rke-configs.yml`: validates `rkeprep/v2` YAML files changed in PRs
-- `validate-vm-configs.yml`: validates VM config schema/semantics and detects name conflicts
-- `verify-tokenfile.yml`: checks duplicate token-file references in examples/configs
-- `certs-ci.yml`: runs certificate generation tests
-- `apply-vm-configs.yml`: applies changed VM configs on a self-hosted runner
+Use this workflow from the repo root:
 
----
+```bash
+./diagrams/apply-diagram-updates.sh . --install-deps --install-browser-deps
+./diagrams/apply-diagram-updates.sh .
+```
 
-## Documentation Maintenance Rules
+Generated exports are written to:
 
-When updating docs in this repository:
+```text
+diagrams/svg/
+diagrams/png/
+```
 
-1. Validate command paths against current tree (`bin/rke2nodeinit.sh`, `scripts/*`, `tests/*`).
-2. Prefer linking to current canonical docs (top-level README and examples/config README).
-3. Keep historical redesign docs scoped as archival references.
-4. Update date metadata when behavior/paths/flags change.
-5. Ensure examples align with current CLI help and workflow files.
+Commit Mermaid source, Markdown changes, and generated exports together.
 
 ---
 
-## Need Help
+## Legacy and Reference Material
 
-- Open an issue: [GitHub Issues](https://github.com/cantrellr/rke2-node-init/issues)
-- Security reports: see [../SECURITY.md](../SECURITY.md)
-- Contribution guidelines: see [../CONTRIBUTING.md](../CONTRIBUTING.md)
+The older docs are retained as implementation history and deep reference material. They are not the first-read operator path anymore.
+
+| Location | Status | Notes |
+| --- | --- | --- |
+| `CLI-REFERENCE.md` | Legacy reference | Use when checking historical CLI detail not yet folded into the runbook. |
+| `OPERATIONAL-RUNBOOK.md` | Legacy reference | Superseded by `operator-runbook.md`. |
+| `TROUBLESHOOTING.md` | Legacy reference | Mine for known failure signatures; fold active items into `operator-runbook.md`. |
+| `TESTING-GUIDE.md` | Legacy reference | Use for historical local/CI testing notes. |
+| `SCRIPTS-REFERENCE.md` | Legacy reference | Script inventory; should eventually be reduced into current docs. |
+| `HARDENED_CNI.md` | Legacy reference | Hardened CNI details; active checklist items belong in `hardening-checklist.md`. |
+| `RKE2_AIRGAP_GOLDEN_IMAGE_PLAN.md` | Legacy reference | Historical golden-image planning material. |
+| `STIG-README.md`, `STIG-CHECKLIST.md`, `STIG-MANUAL-ACTIONS.md` | STIG reference | Keep as supporting compliance material. |
+| `HYPERV-VM-NAME-SETUP.md` | Platform reference | Hyper-V/ISO workflow notes. |
+| `CONFIG-YAML-TRANSFER-ANALYSIS.md` | Historical analysis | Not canonical for current schema behavior. |
+| `GITOPS-IMPLEMENTATION-SUMMARY.md` | Historical implementation summary | Use for background only. |
+| `redesign/` | Archive | Design and phase history. |
+| `report/` | Archive | Historical reports and snapshots. |
+| `stigs/` | Reference payloads | STIG source content and supporting resources. |
+
+---
+
+## Maintenance Contract
+
+When behavior changes, update the docs in this order:
+
+1. `docs/System-Design-Document.md`
+2. `docs/operator-runbook.md`
+3. `docs/hardening-checklist.md`
+4. `diagrams/mermaid-source/*`
+5. `docs/documentation-maintenance.md`, if the doc process changes
+6. Top-level `README.md`, if the public entrypoint changes
+
+The old docs should not be expanded unless they are intentionally being preserved as archive notes. Active behavior belongs in the canonical set above.
