@@ -1,0 +1,12 @@
+flowchart TB
+    release["RKE2 release and chart metadata"] --> download["download artifacts"]
+    download --> checksum["verify checksums"]
+    checksum --> cni["validate CNI image requirements"]
+    cni --> required["validate required image:tag set"]
+    required --> cache["downloads/ cache"]
+    cache --> stage["/opt/rke2/stage"]
+    stage --> template["golden image or staged VM"]
+    stage --> push["push action"]
+    push --> registry["internal registry"]
+    push --> sbom["outputs/sbom metadata"]
+    registry --> nodes["server and agent installs"]
