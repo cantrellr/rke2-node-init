@@ -1,0 +1,42 @@
+flowchart TB
+    subgraph cluster_connected["Connected staging environment"]
+        operator["Platform operator"]
+        source["Rancher/RKE2 release sources"]
+        imageAction["image / airgap action"]
+    end
+
+    subgraph cluster_repo["rke2-node-init repo"]
+        script["bin/rke2nodeinit.sh"]
+        examples["examples/config rkeprep/v2 YAML"]
+        docs["docs and diagrams"]
+        tests["tests and CI validation"]
+    end
+
+    subgraph cluster_staged["Staged node artifacts"]
+        downloads["downloads/"]
+        outputs["outputs/"]
+        stage["/opt/rke2/stage"]
+        sbom["outputs/sbom"]
+    end
+
+    subgraph cluster_airgap["Air-gapped environment"]
+        registry["Internal registry"]
+        servers["RKE2 server nodes"]
+        agents["RKE2 agent nodes"]
+    end
+
+    operator --> script
+    examples --> script
+    source --> imageAction
+    script --> imageAction
+    imageAction --> downloads
+    imageAction --> stage
+    imageAction --> outputs
+    imageAction --> sbom
+    stage --> registry
+    registry --> servers
+    registry --> agents
+    script --> servers
+    script --> agents
+    docs --> operator
+    tests --> script
