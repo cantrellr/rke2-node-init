@@ -20,6 +20,11 @@ __pycache__/
 .vscode/
 .idea/
 
+# Local diagram tooling
+.diagram-tools/
+.diagram-sync-updated-files.txt
+node_modules/
+
 # Project artifacts
 /logs/
 /outputs/
@@ -31,4 +36,3 @@ __pycache__/
 /configs/preprod/
 /apps/ipam/data/*
 !/apps/ipam/data/.gitkeep
-
