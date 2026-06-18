@@ -1,0 +1,8 @@
+flowchart TB
+    change["Behavior or workflow change"] --> design["Update System-Design-Document.md"]
+    design --> source["Update diagrams/mermaid-source"]
+    source --> render["Run diagrams/apply-diagram-updates.sh"]
+    render --> runbook["Update operator-runbook.md"]
+    runbook --> hardening["Update hardening-checklist.md"]
+    hardening --> review["Review git diff"]
+    review --> commit["Commit docs, sources, and exports together"]
