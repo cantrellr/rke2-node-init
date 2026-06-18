@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant Operator
+    participant Script as rke2nodeinit.sh
+    participant Host as Target host
+    participant Stage as /opt/rke2/stage
+    participant Registry as Internal registry
+    participant RKE2 as RKE2 service
+
+    Operator->>Script: sudo bin/rke2nodeinit.sh -f node.yaml -y
+    Script->>Script: parse rkeprep/v2 manifest
+    Script->>Host: validate root, OS, tools, network inputs
+    Script->>Stage: validate staged artifacts and images
+    Script->>Host: write hostname, netplan, registries.yaml, CA trust
+    Script->>Registry: confirm private registry configuration
+    Script->>RKE2: install server or agent from cached installer
+    RKE2->>Registry: pull required images from internal registry
+    RKE2-->>Operator: node joins or reports failure
