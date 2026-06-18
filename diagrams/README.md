@@ -10,7 +10,6 @@ This folder follows the local Mermaid workflow used across the air-gap documenta
 | `svg/` | Generated SVG exports. |
 | `png/` | Generated PNG exports. |
 | `DIAGRAM-INDEX.md` | Human-readable diagram inventory. |
-| `DIAGRAM-INDEX.json` | Machine-readable diagram inventory. |
 | `render-mermaid-assets.sh` | Local Mermaid renderer. |
 | `apply-diagram-updates.sh` | Wrapper for rendering and staging diagram changes. |
 
@@ -19,8 +18,8 @@ This folder follows the local Mermaid workflow used across the air-gap documenta
 From the repo root:
 
 ```bash
-./diagrams/apply-diagram-updates.sh . --install-deps --install-browser-deps
-./diagrams/apply-diagram-updates.sh .
+bash diagrams/apply-diagram-updates.sh . --install-deps --install-browser-deps
+bash diagrams/apply-diagram-updates.sh .
 ```
 
 The first command installs local Mermaid CLI dependencies under `.diagram-tools/` if needed. The second command is the normal repeat run.
