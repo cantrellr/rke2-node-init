@@ -39,8 +39,8 @@ Mermaid diagram sources live under [`../diagrams/mermaid-source`](../diagrams/me
 Use this workflow from the repo root:
 
 ```bash
-./diagrams/apply-diagram-updates.sh . --install-deps --install-browser-deps
-./diagrams/apply-diagram-updates.sh .
+bash diagrams/apply-diagram-updates.sh . --install-deps --install-browser-deps
+bash diagrams/apply-diagram-updates.sh .
 ```
 
 Generated exports are written to:
