@@ -98,7 +98,7 @@ Use this checklist before building templates, pushing images to an internal regi
 ```bash
 bash -n bin/rke2nodeinit.sh
 sudo bin/rke2nodeinit.sh -h
-./diagrams/apply-diagram-updates.sh .
+bash diagrams/apply-diagram-updates.sh .
 git status --short
 git diff --check
 ```
