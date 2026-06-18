@@ -1,0 +1,21 @@
+flowchart LR
+    cfg["rkeprep/v2 YAML or CLI flags"] --> parse["parse and validate inputs"]
+    parse --> action{"selected action"}
+
+    action -->|image| image["download and stage artifacts"]
+    action -->|airgap| airgap["stage artifacts then power off/template"]
+    action -->|push| push["load retag push images"]
+    action -->|server| server["install first control-plane node"]
+    action -->|add-server| addserver["join additional server"]
+    action -->|agent| agent["join worker/agent node"]
+    action -->|verify| verify["non-mutating preflight checks"]
+    action -->|custom-ca| customca["generate token from custom CA"]
+
+    image --> staged["validated local stage"]
+    airgap --> staged
+    staged --> push
+    push --> registry["internal registry"]
+    registry --> server
+    registry --> addserver
+    registry --> agent
+    verify --> report["operator validation output"]
