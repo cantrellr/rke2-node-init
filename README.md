@@ -1,4 +1,4 @@
-# rke2nodeinit.sh
+# rke2-node-init
 
 [![RKE Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml)
 [![VM Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml)
@@ -51,7 +51,7 @@ Only the `image` action requires Internet access to gather artifacts. All other 
 
 ## Table of Contents
 
-- [rke2nodeinit.sh](#rke2nodeinitsh)
+- [rke2-node-init](#rke2-node-init)
   - [Table of Contents](#table-of-contents)
   - [Key Capabilities](#key-capabilities)
   - [Supported Platforms \& Requirements](#supported-platforms--requirements)
