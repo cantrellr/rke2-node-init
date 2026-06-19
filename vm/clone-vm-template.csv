@@ -1,4 +1,0 @@
-VMName,SourceVM,Cluster,VMHost,ResourcePool,Datastore,Folder,Network,CpuCount,MemoryGB,DiskGB,OSCustomizationSpec,PowerOn
-app-ctrl01,rke2-template,prod-cluster,esx-01.prod.lab,Production/ControlPlane,vsanDatastore,Prod/Servers,Prod-VM-Network,4,16,120,RKE2-Ubuntu,True
-app-work01,rke2-template,prod-cluster,,Production/Workers,vsanDatastore,Prod/Servers,Prod-VM-Network,4,16,120,RKE2-Ubuntu,True
-app-work02,rke2-template,prod-cluster,,Production/Workers,vsanDatastore,Prod/Servers,Prod-VM-Network,4,16,120,RKE2-Ubuntu,True
