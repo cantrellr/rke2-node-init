@@ -1,6 +1,22 @@
 # Production-style single-node RKE2 clusters
 
+Release version: v3.0.0
+Last updated: 2026-06-24
+
 This repository supports single-node RKE2 clusters for test, development, edge-style labs, and replacement clusters that need production-style guardrails without running a full HA control plane. The implementation extends the existing `rkeprep/v2` image, registry, server, verify, and YAML conventions. It does not fork the supply-chain process.
+
+## v3.0.0 release focus
+
+`v3.0.0` promotes the single-node implementation to a documented release feature. The core contract is explicit kind-driven dispatch from the public entrypoint:
+
+```bash
+sudo bash bin/rke2nodeinit.sh -f <rkeprep-v2-yaml> -y
+```
+
+New release-level kinds:
+
+- `singleNodeImage`
+- `singleNodeServer`
 
 ## Executive position
 
@@ -81,6 +97,8 @@ sudo bash bin/rke2nodeinit.sh server -f configs/single-node/production-server.ya
 The single-node helper writes:
 
 - `/etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml`
+- `/usr/local/sbin/rke2-single-node-swap-preflight.sh`
+- `/etc/systemd/system/rke2-server.service.d/05-single-node-swap-preflight.conf`
 - `/usr/local/sbin/rke2-single-node-preflight.sh`
 - `/etc/systemd/system/rke2-server.service.d/10-single-node-preflight.conf`
 - `/etc/sysctl.d/99-rke2-single-node-cis.conf` when CIS is enabled
@@ -169,6 +187,7 @@ RKE2 enforces expected kernel settings before it starts with those options. The 
 - applies `vm.overcommit_memory=1`
 - applies `kernel.panic=10`
 - applies `kernel.panic_on_oops=1`
+- runs `swapoff -a` when swap is active
 - removes unsupported stale `import-images:` keys from `/etc/rancher/rke2/config.yaml` and `/etc/rancher/rke2/config.yaml.d/*.yaml`
 
 This is intentionally a pre-start guard rather than only a one-time setup step. The base server action can rewrite config files right before service start, so the final validation point needs to be systemd `ExecStartPre`.
