@@ -21,8 +21,6 @@ spec:
     auditLogMaxSize: 100
 
   node-label:
-    - node-role.kubernetes.io/control-plane=true
-    - node-role.kubernetes.io/worker=true
     - cluster.cantrellnet.net/mode=single-node
     - topology.kubernetes.io/zone=single-node
 
