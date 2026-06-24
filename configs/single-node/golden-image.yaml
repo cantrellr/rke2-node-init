@@ -1,8 +1,10 @@
 apiVersion: rkeprep/v2
-kind: Image
+kind: singleNodeImage
 metadata:
   name: single-node-rke2-golden-image
 spec:
+  clusterMode: single-node
+
   # Pin this in real builds. Leaving it explicit makes artifacts deterministic.
   rke2Version: v1.34.1+rke2r1
 
