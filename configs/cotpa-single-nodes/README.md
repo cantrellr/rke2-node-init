@@ -1,5 +1,8 @@
 # COTPA single-node replacement clusters
 
+Release version: v3.0.0
+Last updated: 2026-06-24
+
 This folder contains the COTPA single-node replacement-cluster configuration set.
 
 ## Files
@@ -25,7 +28,7 @@ These are replacement clusters, not parallel clusters. The primary node IPs inte
 | `dc2domain` | `nodes/dc2domain.yaml` | `172.16.15.103` | `172.16.210.103` | `10.103.0.0/16` | `10.1.0.0/16` | `10.1.0.10` |
 | `dc3domain` | `nodes/dc3domain.yaml` | `172.16.15.104` | `172.16.210.104` | `10.104.0.0/16` | `10.1.0.0/16` | `10.1.0.10` |
 
-## Kind-driven flow
+## v3.0.0 kind-driven flow
 
 The public entrypoint is `bin/rke2nodeinit.sh`. It dispatches directly from `kind` when no explicit action is supplied:
 
