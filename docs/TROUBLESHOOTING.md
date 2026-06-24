@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-Last Updated: April 24, 2026
+Last Updated: June 24, 2026
 
 This guide maps common failures to targeted remediation.
 
@@ -10,6 +10,7 @@ This guide maps common failures to targeted remediation.
 2. Confirm custom CA files exist at referenced runtime path.
 3. Confirm staging artifacts are present for offline actions.
 4. Inspect log output under `logs/` and action output under `outputs/`.
+5. Inspect systemd state when a command appears to sit without new output.
 
 ## Common Issues
 
@@ -63,12 +64,46 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now rke2-cni-perms.timer
 ```
 
-### 4) Token file failures on server/agent join
+### 4) Command waits after `Ensuring CNI permission remediation`
+
+Symptoms:
+- server provisioning prints `Ensuring CNI permission remediation is enabled for offline CNI bootstrap reliability`
+- no next log line appears for an extended period
+- `rke2-server` is already starting, queued, or crash-looping from a prior attempt
+
+Cause:
+- older `rke2-cni-perms.service` units ordered the one-shot permission fix `After=rke2-server.service rke2-agent.service`
+- if RKE2 already had an active or queued job, systemd could block the remediation start behind RKE2
+- that is the wrong dependency direction because the permission helper is safe to run before CNI files exist
+
+Checks from another SSH session or VM console:
+
+```bash
+ps -eo pid,ppid,stat,etime,cmd | egrep 'rke2nodeinit|rke2-single|systemctl|rke2|fix-cni' | grep -v grep
+systemctl status rke2-cni-perms.service rke2-cni-perms.timer rke2-server --no-pager
+journalctl -u rke2-cni-perms.service -u rke2-server -b --no-pager | tail -200
+```
+
+Fix:
+
+```bash
+cd /rke2-node-init
+git pull
+sudo install -m 0644 scripts/systemd/rke2-cni-perms.service /etc/systemd/system/rke2-cni-perms.service
+sudo install -m 0644 scripts/systemd/rke2-cni-perms.timer /etc/systemd/system/rke2-cni-perms.timer
+sudo systemctl daemon-reload
+sudo systemctl reset-failed rke2-cni-perms.service rke2-server || true
+sudo systemctl enable --now rke2-cni-perms.timer
+```
+
+Then rerun the single-node server command.
+
+### 5) Token file failures on server/agent join
 
 Checks:
 
 ```bash
-grep -R "tokenFile:" configs/preprod configs/cotpa
+grep -R "tokenFile:" configs/preprod configs/cotpa configs/cotpa-single-nodes
 ls -la outputs
 ```
 
@@ -76,7 +111,7 @@ Fix:
 - confirm token path points to `/rke2-node-init/outputs/...`
 - regenerate bootstrap token if needed
 
-### 5) Registry push failures
+### 6) Registry push failures
 
 Checks:
 
@@ -89,7 +124,7 @@ Fix:
 - validate registry CA trust and mirror configuration
 - validate name resolution and firewall
 
-### 6) STIG script side effects
+### 7) STIG script side effects
 
 Use report-first mode:
 
