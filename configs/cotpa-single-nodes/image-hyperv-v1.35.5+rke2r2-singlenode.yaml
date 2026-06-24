@@ -24,8 +24,13 @@ spec:
     intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
     installToOSTrust: true
 
+  # COTPA single-node servers should be provisioned with:
+  #   sudo bash bin/rke2-single-node-profile.sh server -f <node-yaml> -y
+  # That wrapper applies the single-node overlay before delegating to the
+  # existing rke2nodeinit.sh server action. Keep bootService disabled here so a
+  # cloned VM does not bypass the overlay on first boot.
   bootService:
-    enabled: true
+    enabled: false
     yamlPath: configs/cotpa-single-nodes/nodes
     mode: oneshot
     platform: hyperv
