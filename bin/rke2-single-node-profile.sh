@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# Apply or render a production-style single-node RKE2 profile overlay.
+# Apply, render, verify, or execute a production-style single-node RKE2 profile
+# overlay for rkeprep/v2 manifests.
 #
 # This helper intentionally works beside bin/rke2nodeinit.sh instead of replacing
 # it. The golden-image, registry, network, and server workflows stay in the
 # existing rkeprep/v2 flow; this script only adds a config.yaml.d overlay and
 # low-resource packaged-component HelmChartConfig manifests before rke2-server
-# starts.
+# starts. The `server` action is a safe convenience wrapper that applies the
+# overlay first and then delegates to bin/rke2nodeinit.sh server.
 
 set -Eeuo pipefail
 trap 'rc=$?; echo "[ERROR] ${BASH_SOURCE[0]} failed at line ${LINENO} with exit ${rc}" >&2; exit ${rc}' ERR
@@ -26,6 +28,7 @@ ENABLE_LOW_RESOURCE_MANIFESTS=1
 ENABLE_DEFAULT_NETWORK_POLICY=1
 ENABLE_INGRESS=0
 FORCE=0
+declare -a NODEINIT_ARGS=()
 declare -A YAML_VALUES=()
 YAML_CACHE_FILE=""
 
@@ -34,13 +37,16 @@ usage() {
 Usage:
   sudo bin/rke2-single-node-profile.sh apply  -f <rkeprep-yaml> [options]
        bin/rke2-single-node-profile.sh render -f <rkeprep-yaml> [options]
-       bin/rke2-single-node-profile.sh verify [options]
+  sudo bin/rke2-single-node-profile.sh verify [options]
+  sudo bin/rke2-single-node-profile.sh server -f <rkeprep-yaml> [options] [-- <rke2nodeinit args>]
 
 Actions:
   apply     Write /etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml
             and packaged-component HelmChartConfig manifests.
   render    Print the RKE2 single-node overlay to stdout without writing files.
   verify    Inspect the generated overlay/manifests and report what is present.
+  server    Apply the single-node overlay, then execute:
+              bash bin/rke2nodeinit.sh server -f <rkeprep-yaml> ...
 
 Options:
   -f, --file FILE              rkeprep/v2 YAML manifest for the node.
@@ -49,12 +55,18 @@ Options:
                                Default: /etc/rancher/rke2/config.yaml.d
   --manifest-dir DIR           RKE2 auto-deploy manifest directory.
                                Default: /var/lib/rancher/rke2/server/manifests
-  --dry-run                    Show intended writes without touching disk.
+  --dry-run                    Show intended writes without touching disk. With
+                               the server action, also passes --dry-run to
+                               bin/rke2nodeinit.sh.
   --no-cis                     Do not set profile: cis in the overlay.
   --no-low-resource-manifests  Do not write HelmChartConfig manifests.
   --enable-ingress             Do not force ingress-controller: none.
   --disable-default-netpol     Do not write a default namespace deny policy.
   --force                      Run even when the YAML does not explicitly opt in.
+  -y, --yes                    Passed through to bin/rke2nodeinit.sh when using
+                               the server action.
+  --                           Pass remaining arguments through to
+                               bin/rke2nodeinit.sh when using the server action.
   -h, --help                   Show this help.
 
 YAML opt-in keys honored when present:
@@ -63,6 +75,7 @@ YAML opt-in keys honored when present:
   spec.singleNode.mode: production|dev
   spec.singleNode.enableCIS: true|false
   spec.singleNode.lowResourceAddons: true|false
+  spec.singleNode.defaultNetworkPolicy: true|false
   spec.singleNode.ingressController: none|traefik|ingress-nginx
   spec.singleNode.snapshotScheduleCron: "0 */6 * * *"
   spec.singleNode.snapshotRetention: 12
@@ -72,9 +85,12 @@ YAML opt-in keys honored when present:
   spec.singleNode.auditLogMaxSize: 100
 
 Recommended flow:
-  sudo bin/rke2nodeinit.sh image -f configs/single-node/golden-image.yaml -y
-  sudo bin/rke2-single-node-profile.sh apply -f configs/single-node/production-server.yaml
-  sudo bin/rke2nodeinit.sh server -f configs/single-node/production-server.yaml -y
+  sudo bash bin/rke2nodeinit.sh image -f configs/single-node/golden-image.yaml -y
+  sudo bash bin/rke2-single-node-profile.sh server -f configs/single-node/production-server.yaml -y
+
+Equivalent expanded flow:
+  sudo bash bin/rke2-single-node-profile.sh apply -f configs/single-node/production-server.yaml
+  sudo bash bin/rke2nodeinit.sh server -f configs/single-node/production-server.yaml -y
 USAGE
 }
 
@@ -97,9 +113,6 @@ bool_false() {
   esac
 }
 
-# Lightweight dotted-key lookup for simple rkeprep manifests. It intentionally
-# avoids a PyYAML dependency so the helper still works on a freshly staged VM.
-# The manifest is parsed once and cached in Bash to keep render/apply fast.
 load_yaml_cache() {
   [[ -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]] || return 0
   [[ "${YAML_CACHE_FILE}" == "${CONFIG_FILE}" ]] && return 0
@@ -132,7 +145,7 @@ for raw in lines:
     current = [part for _, part in stack] + [key]
     if value:
         value = value.strip('"\'')
-        print('{}.format'.format('') if False else '.'.join(current) + '\t' + value)
+        print('.'.join(current) + '\t' + value)
     else:
         stack.append((indent, key))
 PY
@@ -182,12 +195,20 @@ parse_args() {
       --enable-ingress) ENABLE_INGRESS=1; shift ;;
       --disable-default-netpol) ENABLE_DEFAULT_NETWORK_POLICY=0; shift ;;
       --force) FORCE=1; shift ;;
+      -y|--yes) NODEINIT_ARGS+=("-y"); shift ;;
+      --apply-netplan-now|--load-images|--verify-layers|--verbose|--quiet)
+        NODEINIT_ARGS+=("$1"); shift ;;
+      --)
+        shift
+        NODEINIT_ARGS+=("$@")
+        break
+        ;;
       -h|--help) usage; exit 0 ;;
       *) fatal "Unknown argument: $1" ;;
     esac
   done
 
-  case "$ACTION" in apply|render|verify) ;; *) fatal "Unsupported action: $ACTION" ;; esac
+  case "$ACTION" in apply|render|verify|server) ;; *) fatal "Unsupported action: $ACTION" ;; esac
   case "$PROFILE_MODE" in production|dev) ;; *) fatal "--mode must be production or dev" ;; esac
 }
 
@@ -442,7 +463,7 @@ apply_profile() {
     tmp="$(mktemp)"; render_default_network_policy > "$tmp"; write_file "${MANIFEST_DIR}/single-node-default-deny-ingress.yaml" 0644 "$tmp"; rm -f "$tmp"
   fi
 
-  info "Single-node RKE2 profile applied. Continue with: sudo bin/rke2nodeinit.sh server -f ${CONFIG_FILE:-<manifest>} -y"
+  info "Single-node RKE2 profile applied. Continue with: sudo bash bin/rke2nodeinit.sh server -f ${CONFIG_FILE:-<manifest>} -y"
 }
 
 verify_profile() {
@@ -472,6 +493,25 @@ verify_profile() {
   return "$rc"
 }
 
+run_server_flow() {
+  [[ -n "$CONFIG_FILE" ]] || fatal "server action requires -f <rkeprep-yaml>"
+  [[ -f "$CONFIG_FILE" ]] || fatal "Config file not found: $CONFIG_FILE"
+
+  apply_profile
+
+  local nodeinit="${REPO_ROOT}/bin/rke2nodeinit.sh"
+  [[ -f "$nodeinit" ]] || fatal "Cannot find ${nodeinit}"
+
+  local -a args=(server -f "$CONFIG_FILE")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    args+=(--dry-run)
+  fi
+  args+=("${NODEINIT_ARGS[@]}")
+
+  info "Executing: bash ${nodeinit} ${args[*]}"
+  exec bash "$nodeinit" "${args[@]}"
+}
+
 main() {
   parse_args "$@"
   load_yaml_cache
@@ -481,6 +521,7 @@ main() {
     render) render_overlay ;;
     apply) apply_profile ;;
     verify) verify_profile ;;
+    server) run_server_flow ;;
   esac
 }
 
