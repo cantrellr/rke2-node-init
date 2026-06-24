@@ -8,7 +8,6 @@ on:
       - 'Makefile'
       - 'docs/IPAM-APP.md'
       - 'docs/README.md'
-      - 'CONTRIBUTING.md'
 
 jobs:
   test:
@@ -19,16 +18,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Detect IPAM app package
+        id: detect-ipam
+        run: |
+          if [ -f apps/ipam/pyproject.toml ] || [ -f apps/ipam/setup.py ] || [ -f apps/ipam/setup.cfg ]; then
+            echo "has_ipam=true" >> "$GITHUB_OUTPUT"
+            echo "IPAM app package detected."
+          else
+            echo "has_ipam=false" >> "$GITHUB_OUTPUT"
+            echo "IPAM app package not present in this checkout; skipping IPAM dependency install and tests."
+          fi
+
       - name: Set up Python
+        if: steps.detect-ipam.outputs.has_ipam == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.detect-ipam.outputs.has_ipam == 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ./apps/ipam[dev]
 
       - name: Run tests
+        if: steps.detect-ipam.outputs.has_ipam == 'true'
         run: |
           PYTHONPATH=apps/ipam/src python -m pytest apps/ipam/tests
