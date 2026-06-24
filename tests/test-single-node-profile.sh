@@ -39,6 +39,16 @@ grep -q '^kind: singleNodeServer$' "$COTPA_CONFIG"
 grep -q '^  defaultDns: 172.16.10.11,172.16.10.12$' "$COTPA_IMAGE_CONFIG"
 grep -q '^  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net$' "$COTPA_IMAGE_CONFIG"
 
+for manifest in \
+  "$CONFIG" \
+  "${ROOT}/configs/cotpa-single-nodes/nodes/dc1manager.yaml" \
+  "${ROOT}/configs/cotpa-single-nodes/nodes/dc1domain.yaml" \
+  "${ROOT}/configs/cotpa-single-nodes/nodes/dc2domain.yaml" \
+  "${ROOT}/configs/cotpa-single-nodes/nodes/dc3domain.yaml"; do
+  ! grep -q 'node-role.kubernetes.io/control-plane' "$manifest"
+  ! grep -q 'node-role.kubernetes.io/worker' "$manifest"
+done
+
 bash "$MAIN" --help | grep -q 'singleNodeImage'
 bash "$MAIN" --help | grep -q 'singleNodeServer'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
