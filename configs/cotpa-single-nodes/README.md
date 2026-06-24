@@ -32,7 +32,7 @@ The single-node wrapper dispatches directly from `kind`:
 | Kind | Process |
 | --- | --- |
 | `singleNodeImage` | Delegates to the existing image process |
-| `singleNodeServer` | Applies the single-node overlay, then delegates to the existing server process |
+| `singleNodeServer` | Applies the single-node overlay, installs the preflight guard, then delegates to the existing server process |
 
 This keeps the operator flow consistent: supply a manifest and let the kind choose the process.
 
@@ -62,7 +62,7 @@ Equivalent explicit form:
 sudo bash bin/rke2-single-node-profile.sh image -f configs/cotpa-single-nodes/image-hyperv-v1.35.5+rke2r2-singlenode.yaml -y
 ```
 
-The image manifest keeps `bootService.enabled: false`. That is intentional. The safe single-node path must apply the single-node overlay before the base server action runs.
+The image manifest keeps `bootService.enabled: false`. That is intentional. The safe single-node path must apply the single-node overlay and preflight guard before the base server action runs.
 
 ## Provision a replacement cluster
 
@@ -82,6 +82,22 @@ Equivalent explicit form:
 ```bash
 sudo bash bin/rke2-single-node-profile.sh server -f configs/cotpa-single-nodes/nodes/dc1manager.yaml -y
 ```
+
+## CIS and config preflight
+
+`spec.singleNode.enableCIS: true` enables RKE2 `profile: "cis"` and `protect-kernel-defaults: true`. RKE2 will refuse to start if required kernel parameters are not already set. The wrapper now installs a systemd `ExecStartPre` guard for `rke2-server` so the final pre-start state is corrected even after the base server action rewrites `/etc/rancher/rke2/config.yaml`.
+
+The preflight guard manages:
+
+- `/usr/local/sbin/rke2-single-node-preflight.sh`
+- `/etc/systemd/system/rke2-server.service.d/10-single-node-preflight.conf`
+- `/etc/sysctl.d/99-rke2-single-node-cis.conf`
+- `vm.overcommit_memory=1`
+- `kernel.panic=10`
+- `kernel.panic_on_oops=1`
+- cleanup of stale or invalid `import-images:` keys from RKE2 config files
+
+This directly protects against the two observed dc1manager failures: RKE2 rejecting `import-images` as an unknown config key and RKE2 refusing CIS startup because kernel parameters were still at OS defaults.
 
 ## Validation
 
