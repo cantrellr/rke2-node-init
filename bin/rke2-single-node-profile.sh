@@ -3,14 +3,18 @@
 # Apply, render, verify, or execute a production-style single-node RKE2 profile
 # overlay for rkeprep/v2 manifests.
 #
-# This helper owns the explicit single-node kind flow:
+# Explicit rkeprep/v2 single-node kinds:
 #   kind: singleNodeImage  -> delegate to bin/rke2nodeinit.sh image
 #   kind: singleNodeServer -> apply the single-node overlay, then delegate to
 #                             bin/rke2nodeinit.sh server
 #
-# The existing golden-image, registry, network, and base server workflows stay in
-# bin/rke2nodeinit.sh. This script only adds the single-node contract, RKE2
-# config.yaml.d overlay, and low-resource packaged-component manifests.
+# Important implementation detail:
+#   bin/rke2nodeinit.sh parses -f/-y/-v/-r/... before the action. This helper
+#   intentionally delegates as:
+#     bin/rke2nodeinit.sh [long opts] [short opts] -f <manifest> <action>
+#   instead of:
+#     bin/rke2nodeinit.sh <action> -f <manifest>
+#   so CONFIG_FILE is populated by the base engine before action_image/server run.
 
 set -Eeuo pipefail
 trap 'rc=$?; echo "[ERROR] ${BASH_SOURCE[0]} failed at line ${LINENO} with exit ${rc}" >&2; exit ${rc}' ERR
@@ -31,7 +35,10 @@ ENABLE_LOW_RESOURCE_MANIFESTS=1
 ENABLE_DEFAULT_NETWORK_POLICY=1
 ENABLE_INGRESS=0
 FORCE=0
-declare -a NODEINIT_ARGS=()
+
+declare -a NODEINIT_LONG_ARGS=()
+declare -a NODEINIT_SHORT_ARGS=()
+declare -a NODEINIT_POST_ARGS=()
 declare -A YAML_VALUES=()
 YAML_CACHE_FILE=""
 
@@ -47,9 +54,9 @@ Usage:
 
 rkeprep/v2 single-node kinds:
   kind: singleNodeImage   Prepare the single-node golden image by delegating to
-                          bin/rke2nodeinit.sh image -f <rkeprep-yaml> ...
+                          bin/rke2nodeinit.sh -f <rkeprep-yaml> image ...
   kind: singleNodeServer  Apply the single-node overlay, then delegate to
-                          bin/rke2nodeinit.sh server -f <rkeprep-yaml> ...
+                          bin/rke2nodeinit.sh -f <rkeprep-yaml> server ...
 
 Actions:
   image     Execute the single-node image process. This intentionally reuses
@@ -78,8 +85,8 @@ Options:
   --force                      Run overlay actions even when YAML does not
                                explicitly opt in.
   -y, --yes                    Passed through to bin/rke2nodeinit.sh.
-  --                           Pass remaining arguments through to
-                               bin/rke2nodeinit.sh when using image/server.
+  --                           Pass remaining arguments after the delegated
+                               rke2nodeinit action when using image/server.
   -h, --help                   Show this help.
 
 YAML opt-in keys honored when present:
@@ -133,6 +140,10 @@ normalize_kind() {
 load_yaml_cache() {
   [[ -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]] || return 0
   [[ "${YAML_CACHE_FILE}" == "${CONFIG_FILE}" ]] && return 0
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    fatal "python3 is required to parse rkeprep/v2 manifests"
+  fi
 
   YAML_VALUES=()
   while IFS=$'\t' read -r key value; do
@@ -206,24 +217,30 @@ parse_args() {
       --mode) PROFILE_MODE="${2:-production}"; shift 2 ;;
       --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
       --manifest-dir) MANIFEST_DIR="${2:-}"; shift 2 ;;
-      --dry-run) DRY_RUN=1; NODEINIT_ARGS+=("--dry-run"); shift ;;
+      --dry-run) DRY_RUN=1; NODEINIT_LONG_ARGS+=("--dry-run"); shift ;;
       --no-cis) ENABLE_CIS=0; shift ;;
       --no-low-resource-manifests) ENABLE_LOW_RESOURCE_MANIFESTS=0; shift ;;
       --enable-ingress) ENABLE_INGRESS=1; shift ;;
       --disable-default-netpol) ENABLE_DEFAULT_NETWORK_POLICY=0; shift ;;
       --force) FORCE=1; shift ;;
-      -y|--yes) NODEINIT_ARGS+=("-y"); shift ;;
-      -v|-r|-u|-p|-n|--boot-yaml-path|--boot-mode|--vm-platform)
+      -y|--yes) NODEINIT_SHORT_ARGS+=("-y"); shift ;;
+      -v|-r|-u|-p|-n)
         [[ -n "${2:-}" ]] || fatal "$1 requires an argument"
-        NODEINIT_ARGS+=("$1" "$2")
+        NODEINIT_SHORT_ARGS+=("$1" "$2")
         shift 2
         ;;
-      --boot-yaml-path=*|--boot-mode=*|--vm-platform=*) NODEINIT_ARGS+=("$1"); shift ;;
-      -P|--apply-netplan-now|--load-images|--verify-layers|--verbose|--quiet|--enable-boot-service|--fix-cni-permissions|--enable-fips)
-        NODEINIT_ARGS+=("$1"); shift ;;
+      -P) NODEINIT_SHORT_ARGS+=("-P"); shift ;;
+      --boot-yaml-path|--boot-mode|--vm-platform)
+        [[ -n "${2:-}" ]] || fatal "$1 requires an argument"
+        NODEINIT_LONG_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --boot-yaml-path=*|--boot-mode=*|--vm-platform=*) NODEINIT_LONG_ARGS+=("$1"); shift ;;
+      --apply-netplan-now|--load-images|--verify-layers|--verbose|--quiet|--enable-boot-service|--fix-cni-permissions|--enable-fips)
+        NODEINIT_LONG_ARGS+=("$1"); shift ;;
       --)
         shift
-        NODEINIT_ARGS+=("$@")
+        NODEINIT_POST_ARGS+=("$@")
         break
         ;;
       -h|--help) usage; exit 0 ;;
@@ -250,6 +267,33 @@ load_yaml_metadata() {
 
   YAML_KIND="$(first_yaml_scalar "${CONFIG_FILE}" kind || true)"
   [[ -n "${YAML_KIND}" ]] || fatal "Missing YAML kind in ${CONFIG_FILE}"
+}
+
+is_single_node_image_hint() {
+  [[ "$FORCE" -eq 1 ]] && return 0
+  [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
+  local value
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
+  [[ "$value" == "single-node" || "$value" == "singleNode" || "$value" == "single" ]] && return 0
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.singleNodeImage spec.single-node-image || true)"
+  bool_true "$value" && return 0
+  return 1
+}
+
+is_single_node_enabled() {
+  [[ "$FORCE" -eq 1 ]] && return 0
+  [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
+
+  case "$(normalize_kind "$YAML_KIND")" in singlenodeserver) return 0 ;; esac
+
+  local value
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
+  [[ "$value" == "single-node" || "$value" == "singleNode" || "$value" == "single" ]] && return 0
+
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.singleNode.enabled spec.single-node.enabled || true)"
+  bool_true "$value" && return 0
+
+  return 1
 }
 
 derive_action_from_kind() {
@@ -302,33 +346,6 @@ load_yaml_overrides() {
   if [[ -n "$value" && "$value" != "none" ]]; then
     ENABLE_INGRESS=1
   fi
-}
-
-is_single_node_image_hint() {
-  [[ "$FORCE" -eq 1 ]] && return 0
-  [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
-  local value
-  value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
-  [[ "$value" == "single-node" || "$value" == "singleNode" || "$value" == "single" ]] && return 0
-  value="$(first_yaml_scalar "$CONFIG_FILE" spec.singleNodeImage spec.single-node-image || true)"
-  bool_true "$value" && return 0
-  return 1
-}
-
-is_single_node_enabled() {
-  [[ "$FORCE" -eq 1 ]] && return 0
-  [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
-
-  case "$(normalize_kind "$YAML_KIND")" in singlenodeserver) return 0 ;; esac
-
-  local value
-  value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
-  [[ "$value" == "single-node" || "$value" == "singleNode" || "$value" == "single" ]] && return 0
-
-  value="$(first_yaml_scalar "$CONFIG_FILE" spec.singleNode.enabled spec.single-node.enabled || true)"
-  bool_true "$value" && return 0
-
-  return 1
 }
 
 cfg_value() {
@@ -537,7 +554,7 @@ apply_profile() {
     tmp="$(mktemp)"; render_default_network_policy > "$tmp"; write_file "${MANIFEST_DIR}/single-node-default-deny-ingress.yaml" 0644 "$tmp"; rm -f "$tmp"
   fi
 
-  info "Single-node RKE2 profile applied. Continue with: sudo bash bin/rke2nodeinit.sh server -f ${CONFIG_FILE:-<manifest>} -y"
+  info "Single-node RKE2 profile applied. Continue with: sudo bash bin/rke2nodeinit.sh -f ${CONFIG_FILE:-<manifest>} server -y"
 }
 
 verify_profile() {
@@ -576,8 +593,11 @@ run_nodeinit() {
   local nodeinit="${REPO_ROOT}/bin/rke2nodeinit.sh"
   [[ -f "$nodeinit" ]] || fatal "Cannot find ${nodeinit}"
 
-  local -a args=("${delegated_action}" -f "$CONFIG_FILE")
-  args+=("${NODEINIT_ARGS[@]}")
+  local -a args=()
+  args+=("${NODEINIT_LONG_ARGS[@]}")
+  args+=("${NODEINIT_SHORT_ARGS[@]}")
+  args+=(-f "$CONFIG_FILE" "$delegated_action")
+  args+=("${NODEINIT_POST_ARGS[@]}")
 
   info "Executing: bash ${nodeinit} ${args[*]}"
   exec bash "$nodeinit" "${args[@]}"
@@ -585,7 +605,10 @@ run_nodeinit() {
 
 run_image_flow() {
   case "$(normalize_kind "$YAML_KIND")" in
-    singlenodeimage|image) ;;
+    singlenodeimage) ;;
+    image)
+      is_single_node_image_hint || fatal "kind: Image requires spec.clusterMode: single-node or --force when used with this helper"
+      ;;
     *) fatal "image action requires kind: singleNodeImage or Image; found '${YAML_KIND:-<none>}'" ;;
   esac
   run_nodeinit image
