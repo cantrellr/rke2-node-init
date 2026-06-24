@@ -13,7 +13,7 @@ umask 022
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CORE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-core.sh"
-SINGLE_NODE_SCRIPT="${SCRIPT_DIR}/rke2-single-node-profile.sh"
+SINGLE_NODE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-single-node.sh"
 
 usage() {
   cat <<'USAGE'
