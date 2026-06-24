@@ -3,12 +3,14 @@
 # Apply, render, verify, or execute a production-style single-node RKE2 profile
 # overlay for rkeprep/v2 manifests.
 #
-# This helper intentionally works beside bin/rke2nodeinit.sh instead of replacing
-# it. The golden-image, registry, network, and server workflows stay in the
-# existing rkeprep/v2 flow; this script only adds a config.yaml.d overlay and
-# low-resource packaged-component HelmChartConfig manifests before rke2-server
-# starts. The `server` action is a safe convenience wrapper that applies the
-# overlay first and then delegates to bin/rke2nodeinit.sh server.
+# This helper owns the explicit single-node kind flow:
+#   kind: singleNodeImage  -> delegate to bin/rke2nodeinit.sh image
+#   kind: singleNodeServer -> apply the single-node overlay, then delegate to
+#                             bin/rke2nodeinit.sh server
+#
+# The existing golden-image, registry, network, and base server workflows stay in
+# bin/rke2nodeinit.sh. This script only adds the single-node contract, RKE2
+# config.yaml.d overlay, and low-resource packaged-component manifests.
 
 set -Eeuo pipefail
 trap 'rc=$?; echo "[ERROR] ${BASH_SOURCE[0]} failed at line ${LINENO} with exit ${rc}" >&2; exit ${rc}' ERR
@@ -17,8 +19,9 @@ umask 022
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
-ACTION="apply"
+ACTION=""
 CONFIG_FILE=""
+YAML_KIND=""
 PROFILE_MODE="production"
 OUTPUT_DIR="/etc/rancher/rke2/config.yaml.d"
 MANIFEST_DIR="/var/lib/rancher/rke2/server/manifests"
@@ -35,38 +38,48 @@ YAML_CACHE_FILE=""
 usage() {
   cat <<'USAGE'
 Usage:
-  sudo bin/rke2-single-node-profile.sh apply  -f <rkeprep-yaml> [options]
+  sudo bin/rke2-single-node-profile.sh -f <rkeprep-yaml> [options]
+  sudo bin/rke2-single-node-profile.sh image  -f <rkeprep-yaml> [options]
+  sudo bin/rke2-single-node-profile.sh server -f <rkeprep-yaml> [options]
        bin/rke2-single-node-profile.sh render -f <rkeprep-yaml> [options]
+  sudo bin/rke2-single-node-profile.sh apply  -f <rkeprep-yaml> [options]
   sudo bin/rke2-single-node-profile.sh verify [options]
-  sudo bin/rke2-single-node-profile.sh server -f <rkeprep-yaml> [options] [-- <rke2nodeinit args>]
+
+rkeprep/v2 single-node kinds:
+  kind: singleNodeImage   Prepare the single-node golden image by delegating to
+                          bin/rke2nodeinit.sh image -f <rkeprep-yaml> ...
+  kind: singleNodeServer  Apply the single-node overlay, then delegate to
+                          bin/rke2nodeinit.sh server -f <rkeprep-yaml> ...
 
 Actions:
+  image     Execute the single-node image process. This intentionally reuses
+            the existing rke2nodeinit image action.
+  server    Apply the single-node overlay, then execute the existing
+            rke2nodeinit server action.
   apply     Write /etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml
             and packaged-component HelmChartConfig manifests.
   render    Print the RKE2 single-node overlay to stdout without writing files.
   verify    Inspect the generated overlay/manifests and report what is present.
-  server    Apply the single-node overlay, then execute:
-              bash bin/rke2nodeinit.sh server -f <rkeprep-yaml> ...
 
 Options:
-  -f, --file FILE              rkeprep/v2 YAML manifest for the node.
+  -f, --file FILE              rkeprep/v2 YAML manifest.
   --mode production|dev        Profile mode. production is default.
   --output-dir DIR             RKE2 config drop-in directory.
                                Default: /etc/rancher/rke2/config.yaml.d
   --manifest-dir DIR           RKE2 auto-deploy manifest directory.
                                Default: /var/lib/rancher/rke2/server/manifests
   --dry-run                    Show intended writes without touching disk. With
-                               the server action, also passes --dry-run to
+                               image/server, also passes --dry-run to
                                bin/rke2nodeinit.sh.
   --no-cis                     Do not set profile: cis in the overlay.
   --no-low-resource-manifests  Do not write HelmChartConfig manifests.
   --enable-ingress             Do not force ingress-controller: none.
   --disable-default-netpol     Do not write a default namespace deny policy.
-  --force                      Run even when the YAML does not explicitly opt in.
-  -y, --yes                    Passed through to bin/rke2nodeinit.sh when using
-                               the server action.
+  --force                      Run overlay actions even when YAML does not
+                               explicitly opt in.
+  -y, --yes                    Passed through to bin/rke2nodeinit.sh.
   --                           Pass remaining arguments through to
-                               bin/rke2nodeinit.sh when using the server action.
+                               bin/rke2nodeinit.sh when using image/server.
   -h, --help                   Show this help.
 
 YAML opt-in keys honored when present:
@@ -84,13 +97,13 @@ YAML opt-in keys honored when present:
   spec.singleNode.auditLogMaxBackup: 10
   spec.singleNode.auditLogMaxSize: 100
 
-Recommended flow:
-  sudo bash bin/rke2nodeinit.sh image -f configs/single-node/golden-image.yaml -y
-  sudo bash bin/rke2-single-node-profile.sh server -f configs/single-node/production-server.yaml -y
+Recommended kind-driven flow:
+  sudo bash bin/rke2-single-node-profile.sh -f configs/single-node/golden-image.yaml -y
+  sudo bash bin/rke2-single-node-profile.sh -f configs/single-node/production-server.yaml -y
 
-Equivalent expanded flow:
-  sudo bash bin/rke2-single-node-profile.sh apply -f configs/single-node/production-server.yaml
-  sudo bash bin/rke2nodeinit.sh server -f configs/single-node/production-server.yaml -y
+Equivalent explicit-action flow:
+  sudo bash bin/rke2-single-node-profile.sh image -f configs/single-node/golden-image.yaml -y
+  sudo bash bin/rke2-single-node-profile.sh server -f configs/single-node/production-server.yaml -y
 USAGE
 }
 
@@ -111,6 +124,10 @@ bool_false() {
     0|false|no|n|off|disabled) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+normalize_kind() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]_-'
 }
 
 load_yaml_cache() {
@@ -189,14 +206,20 @@ parse_args() {
       --mode) PROFILE_MODE="${2:-production}"; shift 2 ;;
       --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
       --manifest-dir) MANIFEST_DIR="${2:-}"; shift 2 ;;
-      --dry-run) DRY_RUN=1; shift ;;
+      --dry-run) DRY_RUN=1; NODEINIT_ARGS+=("--dry-run"); shift ;;
       --no-cis) ENABLE_CIS=0; shift ;;
       --no-low-resource-manifests) ENABLE_LOW_RESOURCE_MANIFESTS=0; shift ;;
       --enable-ingress) ENABLE_INGRESS=1; shift ;;
       --disable-default-netpol) ENABLE_DEFAULT_NETWORK_POLICY=0; shift ;;
       --force) FORCE=1; shift ;;
       -y|--yes) NODEINIT_ARGS+=("-y"); shift ;;
-      --apply-netplan-now|--load-images|--verify-layers|--verbose|--quiet)
+      -v|-r|-u|-p|-n|--boot-yaml-path|--boot-mode|--vm-platform)
+        [[ -n "${2:-}" ]] || fatal "$1 requires an argument"
+        NODEINIT_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --boot-yaml-path=*|--boot-mode=*|--vm-platform=*) NODEINIT_ARGS+=("$1"); shift ;;
+      -P|--apply-netplan-now|--load-images|--verify-layers|--verbose|--quiet|--enable-boot-service|--fix-cni-permissions|--enable-fips)
         NODEINIT_ARGS+=("$1"); shift ;;
       --)
         shift
@@ -208,8 +231,46 @@ parse_args() {
     esac
   done
 
-  case "$ACTION" in apply|render|verify|server) ;; *) fatal "Unsupported action: $ACTION" ;; esac
-  case "$PROFILE_MODE" in production|dev) ;; *) fatal "--mode must be production or dev" ;; esac
+  case "${PROFILE_MODE}" in production|dev) ;; *) fatal "--mode must be production or dev" ;; esac
+}
+
+load_yaml_metadata() {
+  [[ -n "${CONFIG_FILE}" ]] || return 0
+  [[ -f "${CONFIG_FILE}" ]] || fatal "Config file not found: ${CONFIG_FILE}"
+
+  if [[ "${CONFIG_FILE}" != /* ]]; then
+    CONFIG_FILE="$(cd -- "$(dirname -- "${CONFIG_FILE}")" && pwd -P)/$(basename -- "${CONFIG_FILE}")"
+  fi
+
+  load_yaml_cache
+
+  local api
+  api="$(first_yaml_scalar "${CONFIG_FILE}" apiVersion || true)"
+  [[ "${api}" == "rkeprep/v2" ]] || fatal "Unsupported apiVersion: '${api:-<none>}' (expected rkeprep/v2)"
+
+  YAML_KIND="$(first_yaml_scalar "${CONFIG_FILE}" kind || true)"
+  [[ -n "${YAML_KIND}" ]] || fatal "Missing YAML kind in ${CONFIG_FILE}"
+}
+
+derive_action_from_kind() {
+  [[ -n "${CONFIG_FILE}" ]] || return 0
+  [[ -z "${ACTION}" ]] || return 0
+
+  case "$(normalize_kind "${YAML_KIND}")" in
+    singlenodeimage) ACTION="image" ;;
+    singlenodeserver) ACTION="server" ;;
+    image)
+      if is_single_node_image_hint; then ACTION="image"; else fatal "kind: Image is not an explicit single-node kind. Use kind: singleNodeImage for this helper."; fi
+      ;;
+    server)
+      if is_single_node_enabled; then ACTION="server"; else fatal "kind: Server is not an explicit single-node kind and is not opted into single-node mode."; fi
+      ;;
+    *) fatal "Unsupported YAML kind for single-node helper: '${YAML_KIND}'" ;;
+  esac
+}
+
+validate_action() {
+  case "${ACTION:-}" in image|server|apply|render|verify) ;; *) fatal "Unsupported or missing action: ${ACTION:-<none>}" ;; esac
 }
 
 load_yaml_overrides() {
@@ -243,9 +304,22 @@ load_yaml_overrides() {
   fi
 }
 
+is_single_node_image_hint() {
+  [[ "$FORCE" -eq 1 ]] && return 0
+  [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
+  local value
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
+  [[ "$value" == "single-node" || "$value" == "singleNode" || "$value" == "single" ]] && return 0
+  value="$(first_yaml_scalar "$CONFIG_FILE" spec.singleNodeImage spec.single-node-image || true)"
+  bool_true "$value" && return 0
+  return 1
+}
+
 is_single_node_enabled() {
   [[ "$FORCE" -eq 1 ]] && return 0
   [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 1
+
+  case "$(normalize_kind "$YAML_KIND")" in singlenodeserver) return 0 ;; esac
 
   local value
   value="$(first_yaml_scalar "$CONFIG_FILE" spec.clusterMode spec.cluster-mode || true)"
@@ -442,7 +516,7 @@ apply_cis_host_prereqs() {
 
 apply_profile() {
   if ! is_single_node_enabled; then
-    fatal "YAML is not opted into single-node mode. Set spec.clusterMode: single-node or spec.singleNode.enabled: true, or pass --force."
+    fatal "YAML is not opted into single-node mode. Use kind: singleNodeServer, set spec.clusterMode: single-node, set spec.singleNode.enabled: true, or pass --force."
   fi
 
   local tmp
@@ -493,35 +567,52 @@ verify_profile() {
   return "$rc"
 }
 
-run_server_flow() {
-  [[ -n "$CONFIG_FILE" ]] || fatal "server action requires -f <rkeprep-yaml>"
+run_nodeinit() {
+  local delegated_action="$1"
+  shift || true
+  [[ -n "$CONFIG_FILE" ]] || fatal "${delegated_action} action requires -f <rkeprep-yaml>"
   [[ -f "$CONFIG_FILE" ]] || fatal "Config file not found: $CONFIG_FILE"
-
-  apply_profile
 
   local nodeinit="${REPO_ROOT}/bin/rke2nodeinit.sh"
   [[ -f "$nodeinit" ]] || fatal "Cannot find ${nodeinit}"
 
-  local -a args=(server -f "$CONFIG_FILE")
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    args+=(--dry-run)
-  fi
+  local -a args=("${delegated_action}" -f "$CONFIG_FILE")
   args+=("${NODEINIT_ARGS[@]}")
 
   info "Executing: bash ${nodeinit} ${args[*]}"
   exec bash "$nodeinit" "${args[@]}"
 }
 
+run_image_flow() {
+  case "$(normalize_kind "$YAML_KIND")" in
+    singlenodeimage|image) ;;
+    *) fatal "image action requires kind: singleNodeImage or Image; found '${YAML_KIND:-<none>}'" ;;
+  esac
+  run_nodeinit image
+}
+
+run_server_flow() {
+  case "$(normalize_kind "$YAML_KIND")" in
+    singlenodeserver|server) ;;
+    *) fatal "server action requires kind: singleNodeServer or Server; found '${YAML_KIND:-<none>}'" ;;
+  esac
+  apply_profile
+  run_nodeinit server
+}
+
 main() {
   parse_args "$@"
-  load_yaml_cache
+  load_yaml_metadata
   load_yaml_overrides
+  derive_action_from_kind
+  validate_action
 
   case "$ACTION" in
+    image) run_image_flow ;;
+    server) run_server_flow ;;
     render) render_overlay ;;
     apply) apply_profile ;;
     verify) verify_profile ;;
-    server) run_server_flow ;;
   esac
 }
 
