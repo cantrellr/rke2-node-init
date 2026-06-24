@@ -36,6 +36,18 @@ The single-node wrapper dispatches directly from `kind`:
 
 This keeps the operator flow consistent: supply a manifest and let the kind choose the process.
 
+## Image-level DNS format
+
+The `singleNodeImage` manifest intentionally defines image-level DNS values as scalar CSV:
+
+```yaml
+spec:
+  defaultDns: 172.16.10.11,172.16.10.12
+  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net
+```
+
+That format is deliberate because the base image action consumes these values as shell CSV when preparing the golden image and logging the effective `DEFAULT_DNS` / `DEFAULT_SEARCH_DOMAINS`. Node-level interface DNS can still use YAML list syntax in the `singleNodeServer` manifests.
+
 ## Build the golden image
 
 Run this on the connected image/template host:
