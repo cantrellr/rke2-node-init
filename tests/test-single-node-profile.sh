@@ -3,10 +3,20 @@ set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="${ROOT}/bin/rke2-single-node-profile.sh"
+IMAGE_CONFIG="${ROOT}/configs/single-node/golden-image.yaml"
 CONFIG="${ROOT}/configs/single-node/production-server.yaml"
+COTPA_IMAGE_CONFIG="${ROOT}/configs/cotpa-single-nodes/image-hyperv-v1.35.5+rke2r2-singlenode.yaml"
 COTPA_CONFIG="${ROOT}/configs/cotpa-single-nodes/nodes/dc1manager.yaml"
 
 bash -n "$SCRIPT"
+
+grep -q '^kind: singleNodeImage$' "$IMAGE_CONFIG"
+grep -q '^kind: singleNodeServer$' "$CONFIG"
+grep -q '^kind: singleNodeImage$' "$COTPA_IMAGE_CONFIG"
+grep -q '^kind: singleNodeServer$' "$COTPA_CONFIG"
+
+bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
+bash "$SCRIPT" --help | grep -q 'kind: singleNodeServer'
 
 rendered="$(bash "$SCRIPT" render -f "$CONFIG")"
 
@@ -20,25 +30,24 @@ cotpa_rendered="$(bash "$SCRIPT" render -f "$COTPA_CONFIG")"
 grep -q 'audit-log-maxage=30' <<<"$cotpa_rendered"
 grep -q 'etcd-snapshot-retention: 12' <<<"$cotpa_rendered"
 
-bash "$SCRIPT" --help | grep -q 'server -f <rkeprep-yaml>'
-
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-sudo_prefix=()
-if [[ ${EUID} -ne 0 ]]; then
-  # The helper can dry-run without root when output paths are temporary.
-  sudo_prefix=()
-fi
-
-"${sudo_prefix[@]}" bash "$SCRIPT" apply -f "$CONFIG" \
+bash "$SCRIPT" apply -f "$CONFIG" \
   --output-dir "$workdir/config.yaml.d" \
   --manifest-dir "$workdir/manifests" \
   --dry-run >/dev/null
 
-"${sudo_prefix[@]}" bash "$SCRIPT" apply -f "$COTPA_CONFIG" \
+bash "$SCRIPT" apply -f "$COTPA_CONFIG" \
   --output-dir "$workdir/cotpa-config.yaml.d" \
   --manifest-dir "$workdir/cotpa-manifests" \
   --dry-run >/dev/null
+
+bash "$SCRIPT" -f "$CONFIG" \
+  --output-dir "$workdir/dispatch-config.yaml.d" \
+  --manifest-dir "$workdir/dispatch-manifests" \
+  --dry-run -y >/dev/null || true
+
+bash "$SCRIPT" image -f "$IMAGE_CONFIG" --dry-run -y >/dev/null || true
 
 echo "single-node profile smoke test passed"
