@@ -16,8 +16,10 @@ spec:
   embedded-registry: true
   disable-default-registry-endpoint: true
 
-  defaultDns: [172.16.10.11, 172.16.10.12]
-  defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net]
+  # Keep image-level DNS in scalar CSV form for the base image engine.
+  # Node-level interface DNS can still use YAML list syntax.
+  defaultDns: 172.16.10.11,172.16.10.12
+  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net
 
   customCA:
     rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
