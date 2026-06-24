@@ -1,146 +1,80 @@
-## 📝 Description
+## Problem Statement
 
-<!-- Provide a clear description of your changes -->
-
-## 🎯 Related Issue
-
-<!-- Link to the issue this PR addresses -->
+Describe the problem, gap, or operational need this PR addresses.
 
 Fixes #
 Closes #
 Relates to #
 
-## 🔄 Type of Change
+## Technical Summary
 
-<!-- Select all that apply -->
+Describe the implementation at a practical level. Include affected scripts, manifests, docs, workflows, or generated artifacts.
 
-- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)
-- [ ] ✨ New feature (non-breaking change that adds functionality)
-- [ ] 💥 Breaking change (fix or feature that changes existing functionality)
-- [ ] 📚 Documentation update
-- [ ] 🧹 Code cleanup/refactoring
-- [ ] 🔒 Security fix
-- [ ] ⚡ Performance improvement
-- [ ] 🧪 Test addition/improvement
+## Type Of Change
 
-## 🧪 Testing Performed
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [ ] Documentation update
+- [ ] Code cleanup/refactoring
+- [ ] Security fix previously reported through private security advisory
+- [ ] Test addition/improvement
+- [ ] Operational/configuration change
 
-<!-- Describe how you tested these changes -->
+## Validation Evidence
 
-**Test Environment:**
-- OS/Distribution: <!-- e.g., Ubuntu 22.04 -->
-- RKE2 Version: <!-- e.g., v1.28.5+rke2r1 -->
-- Test Method: <!-- e.g., manual, automated, ShellSpec -->
+Commands run:
 
-**Test Scenarios:**
-- [ ] Fresh RKE2 installation
-- [ ] Upgrade from previous version
-- [ ] Multiple node types (control/worker)
-- [ ] Various network configurations
-- [ ] Error handling
-
-**Test Results:**
 ```bash
-# Paste test output or screenshots
+# paste relevant commands here
 ```
 
-## 📋 Checklist
+Results:
 
-**Code Quality:**
-- [ ] My code follows the project's style guidelines
-- [ ] I've run ShellCheck and fixed all warnings
-- [ ] I've added/updated comments for complex logic
-- [ ] I've removed debugging/console.log statements
-
-**Testing:**
-- [ ] I've tested my changes locally
-- [ ] I've added tests that prove my fix/feature works
-- [ ] Existing tests pass with my changes
-- [ ] I've tested edge cases and error conditions
-
-**Documentation:**
-- [ ] I've updated README.md (if applicable)
-- [ ] I've updated YAML schema documentation (if applicable)
-- [ ] I've added/updated function documentation
-- [ ] I've updated CHANGELOG.md
-
-**Security:**
-- [ ] No hardcoded credentials added
-- [ ] No sensitive data in logs
-- [ ] Input validation added where needed
-- [ ] No new ShellCheck security warnings
-
-**Breaking Changes:**
-- [ ] This PR introduces breaking changes
-- [ ] I've documented the migration path
-- [ ] I've updated the version number appropriately
-
-## 🔍 Code Review Focus Areas
-
-<!-- Point reviewers to specific areas that need extra attention -->
-
-**Please review carefully:**
-1. <!-- e.g., Line 345: New YAML parsing logic -->
-2. <!-- e.g., Function `configure_network()`: Complex regex -->
-3. <!-- e.g., Error handling in certificate validation -->
-
-## 📸 Screenshots/Logs
-
-<!-- If applicable, add screenshots or log output -->
-
-**Before:**
-```
-# Original behavior
+```text
+# paste relevant output here
 ```
 
-**After:**
-```
-# New behavior
-```
+## Documentation Updated
 
-## 🚀 Deployment Notes
+List all docs updated, or explain why docs were not required.
 
-<!-- Any special considerations for deploying this change -->
+- [ ] README or relevant docs updated
+- [ ] Command examples are current
+- [ ] Security-safe examples only; no real credentials or private keys
+- [ ] CHANGELOG updated, if applicable
 
-**Migration Required:**
-- [ ] Yes - see instructions below
-- [ ] No
+## Security And Sensitive Data Checklist
 
-**Migration Instructions:**
+- [ ] No private keys, kubeconfigs, tokens, registry passwords, or production credentials are committed
+- [ ] No production-only topology, hostnames, IP plans, or certificate material are exposed unnecessarily
+- [ ] Security-sensitive behavior is documented
+- [ ] Vulnerability details, if any, were reported privately first through GitHub Security Advisories
+- [ ] Generated files, logs, and manifests were reviewed for accidental secrets
+
+## Operational Risk And Rollback
+
+Describe operational risk and rollback steps.
+
 ```bash
-# Steps to migrate from old version
+# rollback commands, revert steps, or mitigation notes
 ```
 
-**Rollback Plan:**
-```bash
-# How to revert if issues occur
-```
+## Contributor Type
 
-## 💭 Additional Context
+- [ ] Repository maintainer / approved automation
+- [ ] External contributor from fork
 
-<!-- Any other information reviewers should know -->
+## Review Focus Areas
 
-## 🔗 References
+Call out anything reviewers should focus on, including compatibility, rollback, CI impact, air-gapped behavior, and security-sensitive paths.
 
-<!-- Links to documentation, RFCs, related PRs, etc. -->
+1.
+2.
+3.
 
-- RKE2 Documentation: <!-- link -->
-- Related PR: <!-- link -->
-- Design Document: <!-- link -->
+## Post-Merge Notes
 
----
-
-**Reviewer Notes:**
-
-<!-- For maintainers -->
-
-**Merge Strategy:**
-- [ ] Squash and merge
-- [ ] Create merge commit
-- [ ] Rebase and merge
-
-**Post-Merge Actions:**
-- [ ] Update CHANGELOG.md
-- [ ] Create release notes
-- [ ] Update documentation site
-- [ ] Notify users of breaking changes
+- [ ] Delete feature branch after merge, if it is an upstream branch
+- [ ] Update release notes, if applicable
+- [ ] Notify users of breaking or operationally significant changes
