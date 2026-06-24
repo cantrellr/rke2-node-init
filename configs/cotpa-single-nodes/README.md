@@ -48,6 +48,17 @@ spec:
 
 That format is deliberate because the base image action consumes these values as shell CSV when preparing the golden image and logging the effective `DEFAULT_DNS` / `DEFAULT_SEARCH_DOMAINS`. Node-level interface DNS can still use YAML list syntax in the `singleNodeServer` manifests.
 
+## Safe node labels
+
+Values under `spec.node-label` are rendered into RKE2/kubelet startup flags. Do not put reserved Kubernetes role labels there, including:
+
+```yaml
+node-role.kubernetes.io/control-plane
+node-role.kubernetes.io/worker
+```
+
+Kubelet rejects those labels during startup because they are in the reserved `kubernetes.io` namespace. Use custom labels such as `cluster.cantrellnet.net/mode=single-node` in the manifest. If a role label is still needed for display purposes, apply it after the node registers with `kubectl label node ...`.
+
 ## Build the golden image
 
 Run this on the connected image/template host:
@@ -100,7 +111,7 @@ The preflight guards manage:
 - `kernel.panic_on_oops=1`
 - cleanup of stale or invalid `import-images:` keys from RKE2 config files
 
-This protects against the observed single-node failures: RKE2 rejecting `import-images`, RKE2 refusing CIS startup because kernel parameters were still at OS defaults, and kubelet exiting when the VM template booted with swap active.
+This protects against the observed single-node failures: RKE2 rejecting `import-images`, RKE2 refusing CIS startup because kernel parameters were still at OS defaults, kubelet exiting when the VM template booted with swap active, and kubelet rejecting reserved role labels passed through `--node-labels`.
 
 ## Validation
 
@@ -108,6 +119,7 @@ Render and dry-run before deployment:
 
 ```bash
 bash bin/rke2-single-node-profile.sh render -f configs/cotpa-single-nodes/nodes/dc1manager.yaml
+bash bin/rke2nodeinit.sh -f configs/cotpa-single-nodes/nodes/dc1manager.yaml --dry-run -y
 bash tests/test-single-node-profile.sh
 ```
 
