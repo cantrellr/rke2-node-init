@@ -1,17 +1,16 @@
 # rke2-node-init
 
-[![RKE Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-rke-configs.yml)
-[![VM Config Validation](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/validate-vm-configs.yml)
-[![Certs CI](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/certs-ci.yml)
-[![Tokenfile Verification](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml/badge.svg?branch=main)](https://github.com/cantrellr/rke2-node-init/actions/workflows/verify-tokenfile.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Air-Gap Ready](https://img.shields.io/badge/Air--Gap-Ready-0A9396?style=for-the-badge&labelColor=001219)](#workflow-overview)
-[![Offline First](https://img.shields.io/badge/Offline-First-EE9B00?style=for-the-badge&labelColor=9B2226)](#workflow-overview)
-[![Shell](https://img.shields.io/badge/Shell-Bash-2A9D8F?style=for-the-badge&logo=gnu-bash&logoColor=white&labelColor=1D3557)](#command-reference)
-[![RKE2](https://img.shields.io/badge/Kubernetes-RKE2-3A86FF?style=for-the-badge&logo=kubernetes&logoColor=white&labelColor=023047)](#key-capabilities)
+[![rkeprep/v2](https://img.shields.io/badge/rkeprep%2Fv2-kind--driven-brightgreen?style=for-the-badge)](docs/REPOSITORY-CONFIGURATION.md)
+[![Single Node](https://img.shields.io/badge/Single--Node-ready-brightgreen?style=for-the-badge&logo=kubernetes&logoColor=white)](docs/SINGLE-NODE-CLUSTERS.md)
+[![RKE2](https://img.shields.io/badge/RKE2-v1.35.5%2Brke2r2-brightgreen?style=for-the-badge&logo=rancher&logoColor=white)](#key-capabilities)
+[![Air Gap](https://img.shields.io/badge/Air--Gap-ready-brightgreen?style=for-the-badge)](#workflow-overview)
+[![Offline First](https://img.shields.io/badge/Offline--First-supported-brightgreen?style=for-the-badge)](#workflow-overview)
+[![Shell](https://img.shields.io/badge/Shell-Bash-brightgreen?style=for-the-badge&logo=gnu-bash&logoColor=white)](#command-reference)
+[![Platform](https://img.shields.io/badge/Ubuntu%2024.04-supported-brightgreen?style=for-the-badge&logo=ubuntu&logoColor=white)](#supported-platforms--requirements)
+[![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](LICENSE)
 
 ```text
- ____  _  _______     _   _  ___  ____  _____              
+ ____  _  _______     _   _  ___  ____  _____
 |  _ \| |/ / ____|   | \ | |/ _ \|  _ \| ____|
 | |_) | ' /|  _|     |  \| | | | | | | |  _|
 |  _ <| . \| |___    | |\  | |_| | |_| | |
