@@ -41,6 +41,12 @@ spec:
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net", "cantrellcloud.net"]
     - name: eth1
+      ip: 172.17.0.103
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains: []
+    - name: eth2
       ip: 172.16.210.103
       prefix: 24
       gateway:
