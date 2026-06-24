@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v2
-kind: Server
+kind: singleNodeServer
 metadata:
   name: rke2-single01
 spec:
