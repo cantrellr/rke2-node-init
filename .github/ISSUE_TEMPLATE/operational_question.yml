@@ -1,0 +1,54 @@
+name: Operational question
+description: Ask a sanitized non-security usage or deployment question
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for non-security operational questions. Do not include secrets, private keys, kubeconfigs, registry credentials, or production-only topology details.
+
+        If your question reveals a vulnerability or unsafe behavior, use private vulnerability reporting instead:
+        https://github.com/cantrellr/rke2-node-init/security/advisories/new
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand or accomplish?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Sanitized context
+      description: Provide relevant sanitized details.
+      value: |
+        - OS/distribution:
+        - RKE2 version:
+        - Action/kind used:
+        - Air-gapped: yes/no
+        - Relevant docs already reviewed:
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands or manifests involved
+      description: Paste sanitized commands or manifest snippets.
+      render: bash
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, private keys, kubeconfigs, registry credentials, and production-only details.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

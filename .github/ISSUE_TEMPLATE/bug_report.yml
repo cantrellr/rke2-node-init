@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a non-security bug in rke2-node-init
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include secrets, private keys, kubeconfigs, registry credentials, or production-only topology details.
+
+        If this is a security vulnerability, stop here and use GitHub private vulnerability reporting instead:
+        https://github.com/cantrellr/rke2-node-init/security/advisories/new
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened?
+      placeholder: Describe the observed behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide safe lab reproduction steps.
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide sanitized environment details.
+      value: |
+        - OS/distribution:
+        - RKE2 version:
+        - Action/kind used:
+        - Runtime/containerd version:
+        - Air-gapped: yes/no
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or output
+      description: Paste only sanitized logs. Remove tokens, passwords, keys, kubeconfigs, registry credentials, and private hostnames/IPs.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, private keys, kubeconfigs, registry credentials, and production-only details.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

@@ -1,0 +1,22 @@
+# Repository-wide ownership for rke2-node-init.
+#
+# CODEOWNERS is used by GitHub branch protection when "Require review from
+# Code Owners" is enabled. Keep this file on the default branch.
+#
+# Direct upstream write access remains restricted to explicitly approved
+# maintainers and approved automation. External contributors should open PRs
+# from forks.
+
+* @cantrellr
+
+# Keep repository policy and automation changes under explicit owner review.
+/.github/ @cantrellr
+/SECURITY.md @cantrellr
+/CONTRIBUTING.md @cantrellr
+/docs/REPOSITORY-SECURITY-MODEL.md @cantrellr
+
+# Runtime and deployment automation are operationally sensitive.
+/bin/ @cantrellr
+/scripts/ @cantrellr
+/configs/ @cantrellr
+/.github/workflows/ @cantrellr

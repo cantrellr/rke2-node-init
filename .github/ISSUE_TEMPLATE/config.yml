@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/cantrellr/rke2-node-init/security/advisories/new
+    about: Please do not open public issues for vulnerabilities. Use private security reporting.
+  - name: Contribution and access model
+    url: https://github.com/cantrellr/rke2-node-init/blob/main/CONTRIBUTING.md
+    about: Read how to fork, request review, and open a pull request.
+  - name: Repository security model
+    url: https://github.com/cantrellr/rke2-node-init/blob/main/docs/REPOSITORY-SECURITY-MODEL.md
+    about: Review maintainer access, branch protection, and recommended repository security controls.
