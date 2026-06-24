@@ -15,6 +15,9 @@ grep -q '^kind: singleNodeServer$' "$CONFIG"
 grep -q '^kind: singleNodeImage$' "$COTPA_IMAGE_CONFIG"
 grep -q '^kind: singleNodeServer$' "$COTPA_CONFIG"
 
+grep -q '^  defaultDns: 172.16.10.11,172.16.10.12$' "$COTPA_IMAGE_CONFIG"
+grep -q '^  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net$' "$COTPA_IMAGE_CONFIG"
+
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeServer'
 
