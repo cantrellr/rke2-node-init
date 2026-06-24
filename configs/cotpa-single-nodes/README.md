@@ -27,12 +27,12 @@ These are replacement clusters, not parallel clusters. The primary node IPs inte
 
 ## Kind-driven flow
 
-The public command is now `bin/rke2nodeinit.sh`. It reads `kind:` from the manifest and dispatches directly:
+The public entrypoint is `bin/rke2nodeinit.sh`. It dispatches directly from `kind` when no explicit action is supplied:
 
 | Kind | Process |
 | --- | --- |
-| `singleNodeImage` | Routes through `bin/rke2nodeinit-single-node.sh`, then delegates to the preserved image process |
-| `singleNodeServer` | Applies the single-node overlay, installs the preflight guard, then delegates to the preserved server process |
+| `singleNodeImage` | Delegates to the existing image process |
+| `singleNodeServer` | Applies the single-node overlay, installs the preflight guards, then delegates to the existing server process |
 
 This keeps the operator flow consistent: supply a manifest and let the kind choose the process.
 
@@ -62,11 +62,11 @@ Equivalent explicit form:
 sudo bash bin/rke2nodeinit.sh image -f configs/cotpa-single-nodes/image-hyperv-v1.35.5+rke2r2-singlenode.yaml -y
 ```
 
-The image manifest keeps `bootService.enabled: false`. That is intentional. The safe single-node path must apply the single-node overlay and preflight guard before the base server action runs.
+The image manifest keeps `bootService.enabled: false`. That is intentional. The safe single-node path must apply the single-node overlay and preflight guards before the base server action runs.
 
 ## Provision a replacement cluster
 
-Run the kind-driven public entrypoint on the cloned target VM for the specific replacement cluster:
+Run the kind-driven wrapper on the cloned target VM for the specific replacement cluster:
 
 ```bash
 sudo bash bin/rke2nodeinit.sh -f configs/cotpa-single-nodes/nodes/dc1manager.yaml -y
@@ -83,21 +83,24 @@ Equivalent explicit form:
 sudo bash bin/rke2nodeinit.sh server -f configs/cotpa-single-nodes/nodes/dc1manager.yaml -y
 ```
 
-## CIS and config preflight
+## CIS, swap, and config preflight
 
-`spec.singleNode.enableCIS: true` enables RKE2 `profile: "cis"` and `protect-kernel-defaults: true`. RKE2 will refuse to start if required kernel parameters are not already set. The single-node helper installs a systemd `ExecStartPre` guard for `rke2-server` so the final pre-start state is corrected even after the base server action rewrites `/etc/rancher/rke2/config.yaml`.
+`spec.singleNode.enableCIS: true` enables RKE2 `profile: "cis"` and `protect-kernel-defaults: true`. RKE2 will refuse to start if required kernel parameters are not already set. Kubelet can also exit immediately if the Ubuntu VM template boots with `/swap.img` active. The single-node helper installs systemd `ExecStartPre` guards for `rke2-server` so the final pre-start state is corrected even after reboot or after the base server action rewrites `/etc/rancher/rke2/config.yaml`.
 
-The preflight guard manages:
+The preflight guards manage:
 
+- `/usr/local/sbin/rke2-single-node-swap-preflight.sh`
+- `/etc/systemd/system/rke2-server.service.d/05-single-node-swap-preflight.conf`
 - `/usr/local/sbin/rke2-single-node-preflight.sh`
 - `/etc/systemd/system/rke2-server.service.d/10-single-node-preflight.conf`
 - `/etc/sysctl.d/99-rke2-single-node-cis.conf`
+- `swapoff -a` when swap is active
 - `vm.overcommit_memory=1`
 - `kernel.panic=10`
 - `kernel.panic_on_oops=1`
 - cleanup of stale or invalid `import-images:` keys from RKE2 config files
 
-This directly protects against the observed dc1manager failures: RKE2 rejecting `import-images` as an unknown config key and RKE2 refusing CIS startup because kernel parameters were still at OS defaults.
+This protects against the observed single-node failures: RKE2 rejecting `import-images`, RKE2 refusing CIS startup because kernel parameters were still at OS defaults, and kubelet exiting when the VM template booted with swap active.
 
 ## Validation
 
