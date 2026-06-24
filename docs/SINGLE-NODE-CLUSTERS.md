@@ -132,6 +132,16 @@ Build the image:
 sudo bash bin/rke2-single-node-profile.sh -f configs/cotpa-single-nodes/image-hyperv-v1.35.5+rke2r2-singlenode.yaml -y
 ```
 
+The COTPA `singleNodeImage` manifest uses scalar CSV for image-level DNS so the base image action logs and applies the intended values:
+
+```yaml
+spec:
+  defaultDns: 172.16.10.11,172.16.10.12
+  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net
+```
+
+Node-level interface DNS inside `singleNodeServer` manifests can still use YAML list syntax.
+
 Provision each replacement cluster with the kind-driven wrapper:
 
 ```bash
@@ -218,74 +228,3 @@ bash bin/rke2-single-node-profile.sh render -f configs/cotpa-single-nodes/nodes/
 ```
 
 This is useful in pull requests and troubleshooting because it shows the configuration RKE2 will read after the base `config.yaml` from `bin/rke2nodeinit.sh`.
-
-## Low-resource defaults
-
-The single-node profile keeps add-on requests intentionally small:
-
-| Component | CPU request | Memory request | CPU limit | Memory limit |
-| --- | ---: | ---: | ---: | ---: |
-| CoreDNS | `25m` | `64Mi` | `100m` | `128Mi` |
-| Metrics Server | `25m` | `64Mi` | `100m` | `128Mi` |
-| Snapshot Controller | `10m` | `32Mi` | `50m` | `96Mi` |
-
-Do not over-optimize the control plane itself until the node is measured under representative workload. Starving etcd or kube-apiserver creates ugly failure modes and false negatives during platform testing.
-
-## Security baseline
-
-Single-node does not mean soft target. The baseline is:
-
-- Use a pinned RKE2 version and mirror all required images to the private registry.
-- Keep `disable-default-registry-endpoint: true` for strict offline behavior.
-- Use `systemDefaultRegistry` when RKE2 system images must resolve through an internal registry namespace.
-- Keep `write-kubeconfig-mode: "0600"`.
-- Enable `profile: cis` and satisfy host-level prerequisites before first start.
-- Keep `tls-san-security: true` and explicitly list node DNS/IP SANs.
-- Enable secrets-at-rest encryption and record the rotation procedure.
-- Keep compressed etcd snapshots and copy them off-node if the cluster matters.
-- Start with no packaged ingress controller unless the workload requires it.
-- Apply namespace network policies for anything beyond the default namespace.
-- Patch default service accounts to avoid automatic token mounting in operator-created namespaces.
-
-## Recovery and lifecycle
-
-A single-node cluster has one recovery contract: snapshots plus rebuild discipline.
-
-Minimum operating rhythm:
-
-```bash
-sudo rke2 etcd-snapshot save --name pre-change-$(date +%Y%m%d%H%M%S)
-sudo rke2 etcd-snapshot ls
-sudo rke2 secrets-encrypt status
-```
-
-Before major upgrades, certificate changes, registry changes, CNI changes, or secrets-encryption rotation, take an on-demand snapshot and copy it off-node.
-
-For restoration, use the standard RKE2 snapshot restore flow on a rebuilt node with the same RKE2 version and the same private registry reachability. Keep node manifests, generated config overlays, registry CA, bootstrap token material, and snapshots together in your operational evidence package.
-
-## Migration path to multi-node
-
-Do not mutate a single-node dev cluster into an HA cluster casually. It is safer to promote the manifest pattern and rebuild as multi-node than to keep layering exceptions.
-
-Recommended migration path:
-
-1. Keep the golden-image and registry artifacts.
-2. Copy shared fields from the single-node server manifest into the multi-node server manifest set.
-3. Change `kind: singleNodeServer` to `kind: Server`.
-4. Remove `spec.clusterMode: single-node` and the `spec.singleNode` block.
-5. Use `server` for the first control-plane node and `add-server` for additional control-plane nodes.
-6. Use `agent` for workers.
-7. Re-evaluate snapshot schedules, PodDisruptionBudgets, storage, ingress, monitoring, and failure-domain labels.
-
-## Hard stop criteria
-
-Use a multi-node cluster instead of this profile when any of the following is true:
-
-- The workload has uptime commitments.
-- The cluster is a shared platform dependency.
-- Multiple engineers or teams depend on it simultaneously.
-- It hosts persistent data that cannot be rebuilt quickly.
-- It needs rolling upgrades without downtime.
-- It is exposed to untrusted networks.
-
-Single-node is a cost-optimized engineering pattern, not an HA architecture. Keep that line bright.
