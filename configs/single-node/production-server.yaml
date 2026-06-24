@@ -12,7 +12,6 @@ spec:
   systemDefaultRegistry: registry.example.internal/rke2
   disableDefaultRegistryEndpoint: true
 
-  # Replace with the real node IP, DNS, and search domain values for the site.
   interfaces:
     - name: ens33
       ip: 10.0.4.21
@@ -40,12 +39,10 @@ spec:
     - canal
 
   node-label:
-    - node-role.kubernetes.io/control-plane=true
-    - node-role.kubernetes.io/worker=true
     - cluster.cantrellcloud.net/mode=single-node
     - topology.kubernetes.io/zone=single-node
 
-  # Consumed by bin/rke2-single-node-profile.sh before the normal server action.
+  # Consumed by bin/rke2nodeinit.sh before the normal server action.
   singleNode:
     enabled: true
     mode: production
@@ -59,3 +56,13 @@ spec:
     auditLogMaxAge: 30
     auditLogMaxBackup: 10
     auditLogMaxSize: 100
+
+  disable:
+    - rke2-ingress-nginx
+    - rke2-traefik
+    - rke2-traefik-crd
+
+  service-cidr: 10.43.0.0/16
+  cluster-cidr: 10.42.0.0/16
+  cluster-dns: 10.43.0.10
+  cluster-domain: cluster.local
