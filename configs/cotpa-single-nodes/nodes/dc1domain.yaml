@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v2
-kind: Server
+kind: singleNodeServer
 metadata:
   name: dc1domain
 spec:
@@ -26,10 +26,6 @@ spec:
     - cluster.cantrellnet.net/mode=single-node
     - topology.kubernetes.io/zone=single-node
 
-#  registry: registry.example.internal/rke2
-#  registryUsername: admin
-#  registryPassword: CHANGE_ME
-#  systemDefaultRegistry: registry.example.internal/rke2
   disable-default-system-registry: true
 
   hostname: dc1domain
@@ -40,14 +36,12 @@ spec:
     - multus
     - canal
   interfaces:
-    # vlan9
     - name: eth0
       ip: 172.16.15.102
       prefix: 24
       gateway: 172.16.15.1
       dns: ["172.16.10.11", "172.16.10.12"]
       searchDomains: ["k8.cantrellcloud.net", "cantrellcloud.net"]
-    # vlan210
     - name: eth1
       ip: 172.16.210.102
       prefix: 24
