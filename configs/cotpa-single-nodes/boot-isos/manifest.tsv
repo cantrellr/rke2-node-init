@@ -1,0 +1,5 @@
+metadata_name	source_yaml	iso_path	sha256
+dc1domain	/rke2-node-init/configs/cotpa-single-nodes/nodes/dc1domain.yaml	/rke2-node-init/outputs/image-hyperv-v1.35.5+rke2r2-singlenode/boot-isos/dc1domain.iso	82ed028ff125f2fd9dc224459d9bcc7c564fddcb01ab25d6c32b3edd1a1e3132
+dc1manager	/rke2-node-init/configs/cotpa-single-nodes/nodes/dc1manager.yaml	/rke2-node-init/outputs/image-hyperv-v1.35.5+rke2r2-singlenode/boot-isos/dc1manager.iso	89929f4f96ca5421d1010fb71272f1100c87b45e7369a2419c42648673645e86
+dc2domain	/rke2-node-init/configs/cotpa-single-nodes/nodes/dc2domain.yaml	/rke2-node-init/outputs/image-hyperv-v1.35.5+rke2r2-singlenode/boot-isos/dc2domain.iso	b5ea429b2cdbf062e5b285abea2df65c14419282554dfedb91adcb169846cda9
+dc3domain	/rke2-node-init/configs/cotpa-single-nodes/nodes/dc3domain.yaml	/rke2-node-init/outputs/image-hyperv-v1.35.5+rke2r2-singlenode/boot-isos/dc3domain.iso	1835ab0ae21b18e44665b91907302ffde73fdf3f141e18c38a70b73f6e6dfa8d
