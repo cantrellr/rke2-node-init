@@ -21,10 +21,19 @@ grep -q '^  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net$' "$COT
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeServer'
 bash "$SCRIPT" --help | grep -q 'bin/rke2nodeinit.sh -f <rkeprep-yaml> image'
+bash "$SCRIPT" --help | grep -q 'preflight guard'
+
+grep -q '99-rke2-single-node-cis.conf' "$SCRIPT"
+grep -q 'vm.overcommit_memory = 1' "$SCRIPT"
+grep -q 'kernel.panic = 10' "$SCRIPT"
+grep -q 'kernel.panic_on_oops = 1' "$SCRIPT"
+grep -q 'import-images' "$SCRIPT"
+grep -q 'ExecStartPre=/usr/local/sbin/rke2-single-node-preflight.sh' "$SCRIPT"
 
 rendered="$(bash "$SCRIPT" render -f "$CONFIG")"
 
 grep -q 'profile: "cis"' <<<"$rendered"
+grep -q 'protect-kernel-defaults: true' <<<"$rendered"
 grep -q 'secrets-encryption: true' <<<"$rendered"
 grep -q 'etcd-snapshot-compress: true' <<<"$rendered"
 grep -q 'ingress-controller: "none"' <<<"$rendered"
@@ -41,6 +50,11 @@ grep -q ' image' <<<"$image_dispatch"
 cotpa_image_dispatch="$(bash "$SCRIPT" -f "$COTPA_IMAGE_CONFIG" --dry-run -y 2>&1 || true)"
 grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$cotpa_image_dispatch"
 grep -q ' image' <<<"$cotpa_image_dispatch"
+
+server_dispatch="$(bash "$SCRIPT" -f "$COTPA_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'DRY-RUN would install rke2-server ExecStartPre preflight guard' <<<"$server_dispatch"
+grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$server_dispatch"
+grep -q ' server' <<<"$server_dispatch"
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
