@@ -62,10 +62,10 @@ jobs:
             echo "has_files=false" >> $GITHUB_OUTPUT
           else
             echo "Changed rkeprep/v2 configuration files:"
-            echo "$changed_files" | sed 's/^/  - /'
+            echo "$changed_files" | sed '/^$/d; s/^/  - /'
             echo "has_files=true" >> $GITHUB_OUTPUT
             # Save to file for next step
-            echo "$changed_files" > /tmp/changed_files.txt
+            printf "%s" "$changed_files" | sed '/^$/d' > /tmp/changed_files.txt
           fi
       
       - name: Validate YAML syntax
@@ -143,14 +143,15 @@ jobs:
               
               # Validate kind (case-insensitive check)
               kind_lower=$(echo "$kind" | tr '[:upper:]' '[:lower:]')
-              valid_kinds="server|agent|addserver|image|push|verify|airgap|customca|labelnode|taintnode|serverconfig|agentconfig"
+              valid_kinds="server|agent|addserver|image|singlenodeimage|singlenodeserver|push|verify|airgap|customca|labelnode|taintnode|serverconfig|agentconfig"
               
               if echo "$kind_lower" | grep -qE "^($valid_kinds)$"; then
                 echo "  ✓ Valid: apiVersion=$api_version, kind=$kind"
               else
                 echo "  ✗ ERROR: Invalid kind '$kind'"
-                echo "     Valid kinds: Server, Agent, AddServer, Image, Push, Verify, Airgap,"
-                echo "                  CustomCA, LabelNode, TaintNode, ServerConfig, AgentConfig"
+                echo "     Valid kinds: Server, Agent, AddServer, Image, singleNodeImage,"
+                echo "                  singleNodeServer, Push, Verify, Airgap, CustomCA,"
+                echo "                  LabelNode, TaintNode, ServerConfig, AgentConfig"
                 exit_code=1
               fi
             fi
@@ -206,7 +207,7 @@ jobs:
                   warnings.append("Missing 'spec' section (may be intentional for some configs)")
               
               # Kind-specific validations
-              if kind in ['server', 'serverconfig']:
+              if kind in ['server', 'serverconfig', 'singlenodeserver']:
                   # Server node validations
                   if 'nodeIp' not in spec and 'node-ip' not in spec:
                       warnings.append("Missing nodeIp/node-ip (recommended for server nodes)")
@@ -244,7 +245,7 @@ jobs:
                   if 'tokenFile' not in spec and 'token-file' not in spec:
                       warnings.append("Missing tokenFile/token-file (required for cluster authentication)")
               
-              elif kind == 'image':
+              elif kind in ['image', 'singlenodeimage']:
                   # Image preparation validations
                   if 'rke2Version' not in spec and 'rke2-version' not in spec:
                       errors.append("Missing rke2Version/rke2-version (required for image preparation)")
@@ -346,18 +347,17 @@ jobs:
           
           echo "## Validated Files" >> validation-report.md
           if [ -f /tmp/changed_files.txt ]; then
-            cat /tmp/changed_files.txt | sed 's/^/- /' >> validation-report.md
+            sed '/^$/d; s/^/- /' /tmp/changed_files.txt >> validation-report.md
           else
             echo "- (no files to validate)" >> validation-report.md
           fi
           
           echo "" >> validation-report.md
           echo "## Validation Steps" >> validation-report.md
-          echo "- ✓ YAML syntax validation" >> validation-report.md
-          echo "- ✓ apiVersion: rkeprep/v2 validation" >> validation-report.md
-          echo "- ✓ kind field validation" >> validation-report.md
-          echo "- ✓ Required fields check" >> validation-report.md
-          echo "- ✓ Sensitive data scan" >> validation-report.md
+          echo "- YAML syntax validation: see workflow step result" >> validation-report.md
+          echo "- apiVersion/kind validation: see workflow step result" >> validation-report.md
+          echo "- Required fields check: see workflow step result" >> validation-report.md
+          echo "- Sensitive data scan: see workflow step result" >> validation-report.md
           
           cat validation-report.md
       
@@ -376,5 +376,5 @@ jobs:
           echo "Validation Complete"
           echo "=================================="
           echo ""
-          echo "All rkeprep/v2 configuration files have been validated."
+          echo "All rkeprep/v2 configuration validation steps have completed."
           echo "Report artifact: rke2-config-validation-report"

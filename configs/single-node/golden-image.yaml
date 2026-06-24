@@ -1,0 +1,26 @@
+apiVersion: rkeprep/v2
+kind: singleNodeImage
+metadata:
+  name: single-node-rke2-golden-image
+spec:
+  clusterMode: single-node
+
+  # Pin this in real builds. Leaving it explicit makes artifacts deterministic.
+  rke2Version: v1.34.1+rke2r1
+
+  # Use the same private registry pattern as multi-node clusters.
+  registry: registry.example.internal/rke2
+  registryUsername: admin
+  registryPassword: CHANGE_ME
+
+  # Keep the default RKE2 CNI path boring and supportable unless the lab requires
+  # Cilium/Calico. The image action validates CNI-required staged images.
+  cni:
+    - canal
+
+  # Golden-image behavior stays in the existing rke2nodeinit image/airgap flow.
+  fixCNIPermissions: true
+  enableBootService: true
+  bootService:
+    yamlPath: configs/single-node
+    mode: oneshot
