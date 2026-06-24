@@ -1,16 +1,32 @@
 # Repository configuration model
 
+Release version: v3.0.0
+Last updated: 2026-06-24
+
 This repo supports two provisioning tracks from the same automation base:
 
 1. **Multi-node RKE2 clusters** using `image`, `push`, `server`, `add-server`, `agent`, and `verify` actions from `bin/rke2nodeinit.sh`.
 2. **Single-node RKE2 clusters** using explicit `rkeprep/v2` kinds: `singleNodeImage` and `singleNodeServer`.
 
+## v3.0.0 release status
+
+`v3.0.0` is the first release where production-style single-node clusters are documented as a release feature.
+
+The public entrypoint is:
+
+```bash
+sudo bash bin/rke2nodeinit.sh -f <rkeprep-v2-yaml> -y
+```
+
+When no explicit action is supplied, `bin/rke2nodeinit.sh` reads `kind:` and dispatches accordingly.
+
 ## Current top-level workflow
 
 ```text
 connected host / template VM
-  └─ bin/rke2-single-node-profile.sh -f <kind: singleNodeImage>
-       └─ delegates to bin/rke2nodeinit.sh image
+  └─ bin/rke2nodeinit.sh -f <kind: singleNodeImage> -y
+       └─ dispatches by kind
+       └─ delegates to the preserved image process
        └─ downloads and stages RKE2 artifacts
        └─ validates required images and CNI artifacts
        └─ prepares golden image artifacts
@@ -20,11 +36,12 @@ offline registry host
        └─ loads, retags, records SBOM/inspect data, and pushes staged images
 
 single-node target host
-  └─ bin/rke2-single-node-profile.sh -f <kind: singleNodeServer>
+  └─ bin/rke2nodeinit.sh -f <kind: singleNodeServer> -y
+       └─ dispatches by kind
+       └─ applies single-node overlay and preflight guards
        └─ writes /etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml
        └─ writes low-resource HelmChartConfig manifests
-       └─ prepares CIS host prerequisites where possible
-       └─ delegates to bin/rke2nodeinit.sh server
+       └─ delegates to the preserved server process
             └─ writes base RKE2 config, network, registry trust, and installs rke2-server
 
 multi-node target hosts
@@ -35,9 +52,9 @@ multi-node target hosts
 
 ## Important design decision
 
-The single-node implementation is a profile overlay, not a fork of `bin/rke2nodeinit.sh`. The repo keeps one golden-image supply chain and one server provisioning contract. The overlay uses RKE2's native `config.yaml.d/*.yaml` support so it can add production-style guardrails without fighting the existing base `config.yaml` generator.
+The single-node implementation is a profile overlay, not a fork of the provisioning engine. The repo keeps one golden-image supply chain and one server provisioning contract. The overlay uses RKE2's native `config.yaml.d/*.yaml` support so it can add production-style guardrails without fighting the existing base `config.yaml` generator.
 
-The single-node helper exists to prevent operator sequencing mistakes. It dispatches `kind: singleNodeImage` to the image process, and `kind: singleNodeServer` to the overlay-plus-server process.
+The public dispatcher prevents operator sequencing mistakes. It dispatches `kind: singleNodeImage` to the image process, and `kind: singleNodeServer` to the overlay-plus-server process.
 
 ## COTPA single-node configuration
 
@@ -61,7 +78,10 @@ The node manifests are replacement clusters, not parallel clusters. The reused p
 
 | Path | Purpose |
 | --- | --- |
-| `bin/rke2-single-node-profile.sh` | Applies/renders/verifies the single-node profile overlay and dispatches `singleNodeImage` / `singleNodeServer` manifests. |
+| `bin/rke2nodeinit.sh` | Canonical public kind-aware entrypoint. |
+| `bin/rke2nodeinit-core.sh` | Preserved legacy implementation delegated to by the dispatcher. |
+| `bin/rke2nodeinit-single-node.sh` | Single-node dispatch helper. |
+| `bin/rke2-single-node-profile.sh` | Compatibility/helper script for render/apply/verify profile operations. |
 | `configs/single-node/golden-image.yaml` | Example `kind: singleNodeImage` manifest. |
 | `configs/single-node/production-server.yaml` | Production-style `kind: singleNodeServer` manifest. |
 | `configs/single-node/dev-low-resource-server.yaml` | Lower-retention dev `kind: singleNodeServer` manifest. |
@@ -69,13 +89,15 @@ The node manifests are replacement clusters, not parallel clusters. The reused p
 | `configs/cotpa-single-nodes/nodes/*.yaml` | COTPA replacement `kind: singleNodeServer` manifests. |
 | `configs/cotpa-single-nodes/README.md` | Operator runbook for the COTPA replacement set. |
 | `docs/SINGLE-NODE-CLUSTERS.md` | Detailed operator guide and decision framework. |
-| `docs/REPOSITORY-CONFIGURATION.md` | Current repo configuration and workflow map. |
+| `docs/releases/v3.0.0.md` | v3.0.0 release notes. |
+| `scripts/package-release.sh` | Release package builder. |
+| `.github/workflows/release-package.yml` | Tag/workflow-dispatch package workflow. |
 | `tests/test-single-node-profile.sh` | Lightweight syntax/render/kind smoke test for the helper and COTPA manifests. |
 | `make/single-node.mk` | Optional make-style helper targets for local operators. |
 
 ## Optional make helper
 
-The GitHub contents API may not preserve executable bits for newly-added shell scripts. The examples therefore call the helper through `bash`.
+The GitHub contents API may not preserve executable bits for newly-added shell scripts. The examples therefore call shell scripts through `bash`.
 
 ```bash
 make -f make/single-node.mk single-node-image
@@ -95,10 +117,10 @@ make -f make/single-node.mk single-node-server SINGLE_NODE_CONFIG=configs/cotpa-
 
 ## Boot service guidance
 
-The existing boot service path remains appropriate for standard multi-node manifests. For single-node clusters, use the kind-driven wrapper command so the profile is applied before server provisioning:
+The existing boot service path remains appropriate for standard multi-node manifests. For single-node clusters, use the kind-driven public entrypoint so the profile is applied before server provisioning:
 
 ```bash
-sudo bash bin/rke2-single-node-profile.sh -f <single-node-server.yaml> -y
+sudo bash bin/rke2nodeinit.sh -f <single-node-server.yaml> -y
 ```
 
 The COTPA single-node image manifest keeps `bootService.enabled: false` to avoid a first-boot sequence that skips the single-node overlay.
@@ -109,4 +131,4 @@ Use `configs/single-node/production-server.yaml` as the template for long-lived 
 
 ## Backward compatibility
 
-Existing multi-node manifests do not need `spec.clusterMode` or `spec.singleNode`. The single-node helper refuses to run overlay/server paths unless the manifest uses `kind: singleNodeServer`, opts into single-node mode, or `--force` is passed.
+Existing multi-node manifests do not need `spec.clusterMode` or `spec.singleNode`. The single-node overlay/server path is selected by `kind: singleNodeServer` or through explicit helper opt-in workflows.

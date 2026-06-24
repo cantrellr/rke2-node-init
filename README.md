@@ -1,5 +1,6 @@
 # rke2-node-init
 
+[![Release](https://img.shields.io/badge/Release-v3.0.0-brightgreen?style=for-the-badge)](docs/releases/v3.0.0.md)
 [![rkeprep/v2](https://img.shields.io/badge/rkeprep%2Fv2-kind--driven-brightgreen?style=for-the-badge)](docs/REPOSITORY-CONFIGURATION.md)
 [![Single Node](https://img.shields.io/badge/Single--Node-ready-brightgreen?style=for-the-badge&logo=kubernetes&logoColor=white)](docs/SINGLE-NODE-CLUSTERS.md)
 [![RKE2](https://img.shields.io/badge/RKE2-v1.35.5%2Brke2r2-brightgreen?style=for-the-badge&logo=rancher&logoColor=white)](#key-capabilities)
@@ -25,6 +26,10 @@
 offline bootstrap and lifecycle automation for air-gapped RKE2
 ```
 
+Current release: **v3.0.0**  
+Release date: **2026-06-24**  
+Release notes: [`docs/releases/v3.0.0.md`](docs/releases/v3.0.0.md)
+
 `bin/rke2nodeinit.sh` is a production-focused automation framework for building, validating, and operating fully offline Rancher RKE2 clusters on Ubuntu/Debian hosts. It combines air-gap artifact staging, registry mirroring, node bootstrap, OS-level hardening, and repeatable server/agent provisioning into one consistent workflow driven by CLI flags or `rkeprep/v2` YAML manifests.
 
 This repository is designed for platform and infrastructure teams that need Kubernetes delivery in disconnected, regulated, or high-assurance environments where reliability, traceability, and deterministic behavior matter more than convenience.
@@ -32,6 +37,7 @@ This repository is designed for platform and infrastructure teams that need Kube
 At a glance, this project provides:
 
 - **Deterministic Air-Gap Operations**: Pull once in a connected environment, then install repeatedly offline with staged and validated artifacts.
+- **Kind-Driven Single-Node Clusters**: `v3.0.0` adds `singleNodeImage` and `singleNodeServer` manifests for production-style single-node RKE2 clusters.
 - **End-to-End Node Lifecycle Automation**: Move from image preparation to control-plane and worker provisioning using a single operational contract.
 - **Security-First Defaults**: Strong shell safety settings, strict input validation, secret masking, and hardened network/system behaviors.
 - **Operational Clarity**: Structured logs, explicit phase behavior, reproducible manifest-driven runs, and preflight verification support.
@@ -90,6 +96,7 @@ Only the `image` action requires Internet access to gather artifacts. All other 
 - **Required Image/Tag Enforcement** – Builds a required image:tag set from chart/release metadata and strictly verifies that staged on-node archives contain every required reference before allowing `image`, `server`, or `agent` workflows to continue.
 - **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
+- **Single-Node Cluster Profiles** – Supports `singleNodeImage` and `singleNodeServer` manifests with production-style defaults for CIS preflight, snapshots, secrets encryption, low-resource add-ons, and default network policy.
 - **First-Boot ISO Automation** – Optional boot service mode builds one ISO per node YAML (`metadata.name.iso`) and executes `rke2nodeinit.sh -f` from YAML discovered under `/config` on attached virtual CD media.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
@@ -116,8 +123,9 @@ Only the `image` action requires Internet access to gather artifacts. All other 
 1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, validate CNI-required staged images from `spec.cni`, strictly validate required image:tag references against staged archives, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
 2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
 3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer. Before install, staged artifacts are revalidated, including strict required image:tag presence checks.
-4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
-5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
+4. **Single-node server (offline host):** Use `kind: singleNodeServer` to apply the single-node overlay and preflight guards before the preserved server workflow runs.
+5. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`. The same strict staged image:tag validation runs before install.
+6. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
 When `image`/`airgap` is run with boot service enabled, the script also generates per-node boot ISOs from a YAML directory (`bootService.yamlPath` or `--boot-yaml-path`). At first boot, the service mounts attached ISO media, selects the first YAML under `/config`, copies it into `/root/server-config`, and executes `rke2nodeinit.sh -f <copied-yaml> -y`.
 
@@ -289,6 +297,7 @@ spec:
 - **Registry:** `registry`, `registryUsername`, `registryPassword`, `customCA.*`
 - **Image prep:** `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - **CNI remediation:** `fixCNIPermissions` (boolean; when true, `image` enables CNI permission remediation service+timer)
+- **Single-node:** `kind: singleNodeImage`, `kind: singleNodeServer`, `spec.clusterMode`, and `spec.singleNode.*`
 - **RKE2 Config:** `cluster-cidr`, `service-cidr`, `cluster-dns`, `cluster-domain`, `system-default-registry`, `node-taint`, `node-label`, `disable`, etc.
 - **Boot service:** `bootService.enabled`, `bootService.yamlPath` (directory), `bootService.mode`, `bootService.platform`
 

@@ -11,6 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [3.0.0] - 2026-06-24
+
+### Added
+
+- Production-style single-node RKE2 cluster support using explicit `rkeprep/v2` kinds: `singleNodeImage` and `singleNodeServer`.
+- Kind-driven public dispatcher behavior in `bin/rke2nodeinit.sh`, allowing operators to run `sudo bash bin/rke2nodeinit.sh -f <manifest> -y` and let the manifest `kind:` select the action.
+- Preserved legacy implementation as `bin/rke2nodeinit-core.sh` while introducing helper libraries for single-node, config, CNI, YAML/router, and system concerns.
+- COTPA single-node replacement-cluster manifests for `dc1manager`, `dc1domain`, `dc2domain`, and `dc3domain`.
+- Generic single-node sample manifests under `configs/single-node/`.
+- Single-node preflight guards for CIS sysctls, swap-off before RKE2/kubelet start, stale `import-images` cleanup, low-resource packaged add-ons, secrets encryption, snapshot defaults, and default network-policy guardrails.
+- CI validation support for `singleNodeImage` and `singleNodeServer` manifests.
+- Repository security and contribution policy documentation, CODEOWNERS, issue templates, and PR template updates.
+- Release packaging support through `scripts/package-release.sh`, `.github/workflows/release-package.yml`, and `docs/releases/v3.0.0.md`.
+
+### Changed
+
+- `bin/rke2nodeinit.sh` is now the canonical public entrypoint for both legacy and single-node flows.
+- Root README banner now reflects the current release/configuration state.
+- Single-node operator documentation now highlights the v3.0.0 release contract and 2026-06-24 release date.
+- IPAM CI now skips dependency installation/tests when the installable `apps/ipam` package is absent.
+
+### Fixed
+
+- Prevented kubelet startup failures caused by reserved Kubernetes role labels being passed through `--node-labels`.
+- Prevented RKE2 startup failures caused by active swap on Ubuntu VM templates.
+- Prevented CIS-profile RKE2 startup failures caused by missing kernel sysctl prerequisites.
+- Prevented stale unsupported `import-images:` keys from blocking RKE2 startup.
+- Fixed CNI permission remediation ordering so setup does not wait on `rke2-server` or `rke2-agent`.
+
+### Release Notes
+
+See [`docs/releases/v3.0.0.md`](docs/releases/v3.0.0.md).
+
 ## [2.0.0] - 2026-04-25
 
 ### Added
@@ -445,7 +478,8 @@ This symlink will be removed in a future release. Please update your scripts.
   flag is intentionally opt-in because it performs an exhaustive hash check
   of every image layer.
 
-[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/cantrellr/rke2-node-init/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/cantrellr/rke2-node-init/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/cantrellr/rke2-node-init/compare/v1.2.0...v2.0.0
-[0.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.2.0
 [1.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v1.2.0
+[0.2.0]: https://github.com/cantrellr/rke2-node-init/releases/tag/v0.2.0
