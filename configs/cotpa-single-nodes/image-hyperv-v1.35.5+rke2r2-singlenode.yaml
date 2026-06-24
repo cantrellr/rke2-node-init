@@ -1,0 +1,31 @@
+apiVersion: rkeprep/v2
+kind: Image
+metadata:
+  name: image-hyperv-v1.35.5+rke2r2-singlenode
+spec:
+  rke2Version: v1.35.5+rke2r2
+
+  cni:
+   - multus
+   - canal
+
+  fixCNIPermissions: false
+
+  embedded-registry: true
+  disable-default-registry-endpoint: true
+
+  defaultDns: [172.16.10.11, 172.16.10.12]
+  defaultSearchDomains: [k8.cantrellcloud.net, cantrellcloud.net]
+
+  customCA:
+    rootCrt: /rke2-node-init/configs/cotpa-datacenter-lab/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa-datacenter-lab/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa-datacenter-lab/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa-datacenter-lab/certs/cocloud-issue-ca2-key.pem
+    installToOSTrust: true
+
+  bootService:
+    enabled: true
+    yamlPath: configs/cotpa-single-nodes/nodes
+    mode: oneshot
+    platform: hyperv
