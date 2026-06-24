@@ -1,0 +1,60 @@
+name: Feature request
+description: Request a non-security enhancement or operational improvement
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for non-security enhancements. Do not include secrets, private keys, kubeconfigs, registry credentials, or production-only topology details.
+
+  - type: textarea
+    id: need
+    attributes:
+      label: Operational need
+      description: What problem or workflow gap should this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired behavior or interface.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - bin/rke2nodeinit.sh and helpers
+        - configs / rkeprep manifests
+        - docs / runbooks
+        - CI / validation
+        - certificates / CA handling
+        - registry / air-gap images
+        - VM / boot ISO workflows
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Suggested validation
+      description: How should maintainers test or verify this?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, private keys, kubeconfigs, registry credentials, and production-only details.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
