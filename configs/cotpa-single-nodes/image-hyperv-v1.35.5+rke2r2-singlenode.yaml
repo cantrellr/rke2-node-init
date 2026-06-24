@@ -35,7 +35,7 @@ spec:
   # Keep bootService disabled here so a cloned VM does not bypass the overlay on
   # first boot.
   bootService:
-    enabled: false
+    enabled: true
     yamlPath: configs/cotpa-single-nodes/nodes
     mode: oneshot
     platform: hyperv
