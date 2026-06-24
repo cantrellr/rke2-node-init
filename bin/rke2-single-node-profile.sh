@@ -55,16 +55,18 @@ Usage:
 rkeprep/v2 single-node kinds:
   kind: singleNodeImage   Prepare the single-node golden image by delegating to
                           bin/rke2nodeinit.sh -f <rkeprep-yaml> image ...
-  kind: singleNodeServer  Apply the single-node overlay, then delegate to
-                          bin/rke2nodeinit.sh -f <rkeprep-yaml> server ...
+  kind: singleNodeServer  Apply the single-node overlay, install the CIS/preflight
+                          service guard, then delegate to bin/rke2nodeinit.sh
+                          -f <rkeprep-yaml> server ...
 
 Actions:
   image     Execute the single-node image process. This intentionally reuses
             the existing rke2nodeinit image action.
-  server    Apply the single-node overlay, then execute the existing
-            rke2nodeinit server action.
-  apply     Write /etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml
-            and packaged-component HelmChartConfig manifests.
+  server    Apply the single-node overlay, install the preflight guard, then
+            execute the existing rke2nodeinit server action.
+  apply     Write /etc/rancher/rke2/config.yaml.d/20-single-node-production.yaml,
+            install the rke2-server ExecStartPre guard, and write packaged
+            component HelmChartConfig manifests.
   render    Print the RKE2 single-node overlay to stdout without writing files.
   verify    Inspect the generated overlay/manifests and report what is present.
 
@@ -78,7 +80,8 @@ Options:
   --dry-run                    Show intended writes without touching disk. With
                                image/server, also passes --dry-run to
                                bin/rke2nodeinit.sh.
-  --no-cis                     Do not set profile: cis in the overlay.
+  --no-cis                     Do not set profile: cis in the overlay and do not
+                               enforce CIS sysctls in the preflight guard.
   --no-low-resource-manifests  Do not write HelmChartConfig manifests.
   --enable-ingress             Do not force ingress-controller: none.
   --disable-default-netpol     Do not write a default namespace deny policy.
@@ -107,10 +110,6 @@ YAML opt-in keys honored when present:
 Recommended kind-driven flow:
   sudo bash bin/rke2-single-node-profile.sh -f configs/single-node/golden-image.yaml -y
   sudo bash bin/rke2-single-node-profile.sh -f configs/single-node/production-server.yaml -y
-
-Equivalent explicit-action flow:
-  sudo bash bin/rke2-single-node-profile.sh image -f configs/single-node/golden-image.yaml -y
-  sudo bash bin/rke2-single-node-profile.sh server -f configs/single-node/production-server.yaml -y
 USAGE
 }
 
@@ -497,11 +496,100 @@ write_file() {
   info "Wrote ${path}"
 }
 
+write_preflight_script() {
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'SCRIPT'
+#!/bin/sh
+set -eu
+
+SYSCTL_FILE="/etc/sysctl.d/99-rke2-single-node-cis.conf"
+
+if [ "${RKE2_SINGLE_NODE_ENABLE_CIS:-1}" = "1" ]; then
+  cat > "$SYSCTL_FILE" <<'EOF'
+# Managed by rke2-single-node-profile.sh.
+# Required before RKE2 starts with profile: cis and protect-kernel-defaults: true.
+vm.overcommit_memory = 1
+kernel.panic = 10
+kernel.panic_on_oops = 1
+EOF
+  sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
+  sysctl -w kernel.panic=10 >/dev/null 2>&1 || true
+  sysctl -w kernel.panic_on_oops=1 >/dev/null 2>&1 || true
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY'
+from pathlib import Path
+import re
+
+paths = [Path('/etc/rancher/rke2/config.yaml')]
+paths.extend(sorted(Path('/etc/rancher/rke2/config.yaml.d').glob('*.yaml')))
+key = re.compile(r'^\s*import-images\s*:')
+for path in paths:
+    if not path.exists() or not path.is_file():
+        continue
+    lines = path.read_text(encoding='utf-8').splitlines()
+    out = []
+    i = 0
+    changed = False
+    while i < len(lines):
+        line = lines[i]
+        if key.match(line):
+            changed = True
+            base_indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if not nxt.strip():
+                    i += 1
+                    continue
+                indent = len(nxt) - len(nxt.lstrip())
+                if indent > base_indent:
+                    i += 1
+                    continue
+                break
+            continue
+        out.append(line)
+        i += 1
+    if changed:
+        path.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+PY
+else
+  sed -i '/^[[:space:]]*import-images[[:space:]]*:/d' /etc/rancher/rke2/config.yaml 2>/dev/null || true
+  for f in /etc/rancher/rke2/config.yaml.d/*.yaml; do
+    [ -f "$f" ] && sed -i '/^[[:space:]]*import-images[[:space:]]*:/d' "$f" || true
+  done
+fi
+SCRIPT
+  write_file /usr/local/sbin/rke2-single-node-preflight.sh 0755 "$tmp"
+  rm -f "$tmp"
+}
+
+install_preflight_service_guard() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "DRY-RUN would install rke2-server ExecStartPre preflight guard"
+    return 0
+  fi
+
+  write_preflight_script
+  install -d -m 0755 /etc/systemd/system/rke2-server.service.d
+  cat > /etc/systemd/system/rke2-server.service.d/10-single-node-preflight.conf <<EOF
+# Managed by bin/rke2-single-node-profile.sh.
+[Service]
+Environment=RKE2_SINGLE_NODE_ENABLE_CIS=${ENABLE_CIS}
+ExecStartPre=/usr/local/sbin/rke2-single-node-preflight.sh
+EOF
+  systemctl daemon-reload || true
+  /usr/local/sbin/rke2-single-node-preflight.sh || true
+  info "Installed rke2-server single-node preflight guard"
+}
+
 apply_cis_host_prereqs() {
   [[ "$ENABLE_CIS" -eq 1 ]] || return 0
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "DRY-RUN would ensure local etcd user/group and install RKE2 CIS sysctl config when present"
+    info "DRY-RUN would ensure local etcd user/group and enforce RKE2 CIS sysctls"
     return 0
   fi
 
@@ -514,21 +602,7 @@ apply_cis_host_prereqs() {
     info "Created system user: etcd"
   fi
 
-  local src=""
-  for candidate in /usr/local/share/rke2/rke2-cis-sysctl.conf /usr/share/rke2/rke2-cis-sysctl.conf; do
-    if [[ -f "$candidate" ]]; then
-      src="$candidate"
-      break
-    fi
-  done
-
-  if [[ -n "$src" ]]; then
-    install -m 0644 "$src" /etc/sysctl.d/60-rke2-cis.conf
-    systemctl restart systemd-sysctl.service 2>/dev/null || sysctl -p /etc/sysctl.d/60-rke2-cis.conf || true
-    info "Installed RKE2 CIS sysctl configuration from ${src}"
-  else
-    warn "RKE2 CIS sysctl source not found yet; run this helper again after image staging or before first rke2-server start"
-  fi
+  install_preflight_service_guard
 }
 
 apply_profile() {
@@ -542,6 +616,7 @@ apply_profile() {
   write_file "${OUTPUT_DIR}/20-single-node-production.yaml" 0644 "$tmp"
   rm -f "$tmp"
 
+  install_preflight_service_guard
   apply_cis_host_prereqs
 
   if [[ "$ENABLE_LOW_RESOURCE_MANIFESTS" -eq 1 ]]; then
@@ -578,8 +653,10 @@ verify_profile() {
 
   if [[ "$ENABLE_CIS" -eq 1 ]]; then
     getent passwd etcd >/dev/null 2>&1 || { warn "Missing etcd user required by CIS profile"; rc=1; }
-    [[ -f /etc/sysctl.d/60-rke2-cis.conf ]] || warn "RKE2 CIS sysctl drop-in not present yet"
+    [[ -f /etc/sysctl.d/99-rke2-single-node-cis.conf ]] || warn "Single-node CIS sysctl drop-in not present yet"
   fi
+  [[ -x /usr/local/sbin/rke2-single-node-preflight.sh ]] || warn "Single-node preflight script not installed yet"
+  [[ -f /etc/systemd/system/rke2-server.service.d/10-single-node-preflight.conf ]] || warn "rke2-server preflight drop-in not installed yet"
 
   return "$rc"
 }
