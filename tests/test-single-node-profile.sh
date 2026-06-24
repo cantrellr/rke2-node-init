@@ -20,6 +20,7 @@ grep -q '^  defaultSearchDomains: k8.cantrellcloud.net,cantrellcloud.net$' "$COT
 
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeServer'
+bash "$SCRIPT" --help | grep -q 'bin/rke2nodeinit.sh -f <rkeprep-yaml> image'
 
 rendered="$(bash "$SCRIPT" render -f "$CONFIG")"
 
@@ -32,6 +33,14 @@ grep -q 'kube-apiserver-arg+:' <<<"$rendered"
 cotpa_rendered="$(bash "$SCRIPT" render -f "$COTPA_CONFIG")"
 grep -q 'audit-log-maxage=30' <<<"$cotpa_rendered"
 grep -q 'etcd-snapshot-retention: 12' <<<"$cotpa_rendered"
+
+image_dispatch="$(bash "$SCRIPT" image -f "$IMAGE_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$image_dispatch"
+grep -q ' image' <<<"$image_dispatch"
+
+cotpa_image_dispatch="$(bash "$SCRIPT" -f "$COTPA_IMAGE_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$cotpa_image_dispatch"
+grep -q ' image' <<<"$cotpa_image_dispatch"
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
@@ -50,7 +59,5 @@ bash "$SCRIPT" -f "$CONFIG" \
   --output-dir "$workdir/dispatch-config.yaml.d" \
   --manifest-dir "$workdir/dispatch-manifests" \
   --dry-run -y >/dev/null || true
-
-bash "$SCRIPT" image -f "$IMAGE_CONFIG" --dry-run -y >/dev/null || true
 
 echo "single-node profile smoke test passed"
