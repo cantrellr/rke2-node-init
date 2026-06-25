@@ -26,8 +26,10 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="2026-06-25-v2-menu-driven-zone-prompts"
 BACKUP_ROOT="/root/ufw-zone-backups"
 SYSCTL_DROPIN="/etc/sysctl.d/99-ufw-zone-hardening.conf"
+DETECTED_IFACES=()
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -85,9 +87,14 @@ list_interfaces() {
     | sort -u
 }
 
-interface_exists() {
-  local iface="$1"
-  ip link show "$iface" >/dev/null 2>&1
+discover_interfaces() {
+  mapfile -t DETECTED_IFACES < <(list_interfaces)
+
+  if [[ "${#DETECTED_IFACES[@]}" -eq 0 ]]; then
+    echo "ERROR: No usable ethernet interfaces were detected." >&2
+    echo "Interfaces named lo, docker*, br-*, veth*, virbr*, zt*, tailscale*, wg*, tun*, and tap* are intentionally ignored." >&2
+    exit 1
+  fi
 }
 
 print_interfaces() {
@@ -95,7 +102,7 @@ print_interfaces() {
   echo "Detected physical/primary interfaces:"
   local i=1
   local iface
-  while IFS= read -r iface; do
+  for iface in "${DETECTED_IFACES[@]}"; do
     [[ -z "$iface" ]] && continue
     local state mac addrs
     state="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || echo unknown)"
@@ -104,33 +111,69 @@ print_interfaces() {
     [[ -z "$addrs" ]] && addrs="no-ipv4"
     printf '  %2d) %-18s state=%-8s mac=%-17s ipv4=%s\n' "$i" "$iface" "$state" "$mac" "$addrs"
     ((i++))
-  done < <(list_interfaces)
+  done
   echo
 }
 
-read_iface_list() {
+read_iface_selection() {
   local zone_name="$1"
   local prompt="$2"
-  local input iface
+  shift 2
+  local already_assigned=("$@")
+  local input normalized token idx iface assigned
 
   while true; do
     read -r -p "$prompt" input
     input="$(trim "$input")"
+
     if [[ -z "$input" ]]; then
       echo ""
       return 0
     fi
 
+    # Accept comma-separated or space-separated menu numbers, for example: 1,2 or 1 2 3.
+    normalized="${input//,/ }"
+
     local ok=1
-    for iface in $input; do
-      if ! interface_exists "$iface"; then
-        echo "ERROR: Interface '$iface' does not exist. Try again."
+    local selected=()
+    local seen=" "
+
+    for token in $normalized; do
+      if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: '$token' is not a valid menu number. Enter one or more numbers from the list, for example: 1 or 1,2." >&2
         ok=0
+        break
       fi
+
+      idx=$((token - 1))
+      if (( token < 1 || token > ${#DETECTED_IFACES[@]} )); then
+        echo "ERROR: '$token' is outside the valid range 1-${#DETECTED_IFACES[@]}. Try again." >&2
+        ok=0
+        break
+      fi
+
+      iface="${DETECTED_IFACES[$idx]}"
+      if [[ "$seen" == *" $iface "* ]]; then
+        echo "ERROR: Interface '$iface' was selected more than once for $zone_name. Try again." >&2
+        ok=0
+        break
+      fi
+
+      for assigned in "${already_assigned[@]}"; do
+        if [[ "$iface" == "$assigned" ]]; then
+          echo "ERROR: Interface '$iface' is already assigned to another zone. Pick a different interface for $zone_name." >&2
+          ok=0
+          break
+        fi
+      done
+      [[ "$ok" -eq 0 ]] && break
+
+      selected+=("$iface")
+      seen+="$iface "
     done
 
     if [[ "$ok" -eq 1 ]]; then
-      echo "$input"
+      printf '%s\n' "${selected[*]}"
       return 0
     fi
   done
@@ -367,9 +410,9 @@ apply_interzone_route_denies() {
 }
 
 show_summary() {
-  local restricted="$1"
+  local domain="$1"
   local storage="$2"
-  local domain="$3"
+  local restricted="$3"
   local storage_sources="$4"
   local ssh_sources="$5"
   local domain_profile="$6"
@@ -378,9 +421,9 @@ show_summary() {
 
   echo
   echo "Planned firewall zone assignment:"
-  printf '  restricted_zone: %s\n' "${restricted:-not assigned}"
-  printf '  storage_zone:    %s\n' "${storage:-not assigned}"
   printf '  domain_zone:     %s\n' "${domain:-not assigned}"
+  printf '  storage_zone:    %s\n' "${storage:-not assigned}"
+  printf '  restricted_zone: %s\n' "${restricted:-not assigned}"
   echo
   printf '  Storage allowed source CIDRs: %s\n' "${storage_sources:-any host reaching the storage NIC}"
   printf '  SSH allowed source CIDRs:     %s\n' "${ssh_sources:-any host reaching the domain NIC}"
@@ -401,19 +444,31 @@ main() {
   need_cmd sed
 
   echo "=== UFW Interface Zone Setup ==="
+echo "Version: $SCRIPT_VERSION"
   echo "Host: $(hostname -f 2>/dev/null || hostname)"
 
+  discover_interfaces
   print_interfaces
 
-  local restricted_input storage_input domain_input
-  restricted_input="$(read_iface_list restricted_zone 'Enter interface(s) for restricted_zone [HTTPS inbound only], blank to skip: ')"
-  storage_input="$(read_iface_list storage_zone 'Enter interface(s) for storage_zone [NFS/iSCSI only], blank to skip: ')"
-  domain_input="$(read_iface_list domain_zone 'Enter interface(s) for domain_zone [SSH/HTTP/HTTPS + optional domain services], blank to skip: ')"
+  echo "Assign zones by entering the interface menu number. Multiple interfaces can be entered as space-separated or comma-separated values."
+  echo "Example: enter '1' for a single NIC or '1,2' for two NICs. Leave blank to skip a zone."
+  echo
 
-  local restricted_ifaces=($restricted_input)
-  local storage_ifaces=($storage_input)
-  local domain_ifaces=($domain_input)
-  validate_no_overlap "${restricted_ifaces[@]}" "${storage_ifaces[@]}" "${domain_ifaces[@]}"
+  local domain_input storage_input restricted_input
+  local domain_ifaces=()
+  local storage_ifaces=()
+  local restricted_ifaces=()
+
+  domain_input="$(read_iface_selection domain_zone '1) Enter interface number(s) for domain_zone [SSH/HTTP/HTTPS + optional domain services], blank to skip: ')"
+  domain_ifaces=($domain_input)
+
+  storage_input="$(read_iface_selection storage_zone '2) Enter interface number(s) for storage_zone [NFS/iSCSI only], blank to skip: ' "${domain_ifaces[@]}")"
+  storage_ifaces=($storage_input)
+
+  restricted_input="$(read_iface_selection restricted_zone '3) Enter interface number(s) for restricted_zone [HTTPS inbound only], blank to skip: ' "${domain_ifaces[@]}" "${storage_ifaces[@]}")"
+  restricted_ifaces=($restricted_input)
+
+  validate_no_overlap "${domain_ifaces[@]}" "${storage_ifaces[@]}" "${restricted_ifaces[@]}"
 
   if [[ ${#restricted_ifaces[@]} -eq 0 && ${#storage_ifaces[@]} -eq 0 && ${#domain_ifaces[@]} -eq 0 ]]; then
     echo "ERROR: No interfaces were assigned. Nothing to do." >&2
@@ -450,7 +505,7 @@ main() {
     fi
   fi
 
-  show_summary "$restricted_input" "$storage_input" "$domain_input" "$storage_sources_raw" "$ssh_sources_raw" "$domain_profile" "$nfs_udp" "$legacy_nfs"
+  show_summary "$domain_input" "$storage_input" "$restricted_input" "$storage_sources_raw" "$ssh_sources_raw" "$domain_profile" "$nfs_udp" "$legacy_nfs"
 
   if ! yes_no "Apply this firewall configuration now?" "N"; then
     echo "No changes applied."
@@ -466,17 +521,17 @@ main() {
   echo "Configuring UFW defaults..."
   configure_ufw_defaults
 
-  echo "Applying restricted_zone rules..."
-  apply_restricted_zone "${restricted_ifaces[@]}"
+  echo "Applying domain_zone rules..."
+  apply_domain_zone "$ssh_sources" "$domain_profile" "${domain_ifaces[@]}"
 
   echo "Applying storage_zone rules..."
   apply_storage_zone "$storage_sources" "$nfs_udp" "$legacy_nfs" "${storage_ifaces[@]}"
 
-  echo "Applying domain_zone rules..."
-  apply_domain_zone "$ssh_sources" "$domain_profile" "${domain_ifaces[@]}"
+  echo "Applying restricted_zone rules..."
+  apply_restricted_zone "${restricted_ifaces[@]}"
 
   echo "Applying explicit inter-zone routed traffic denies..."
-  local all_zone_ifaces=("${restricted_ifaces[@]}" "${storage_ifaces[@]}" "${domain_ifaces[@]}")
+  local all_zone_ifaces=("${domain_ifaces[@]}" "${storage_ifaces[@]}" "${restricted_ifaces[@]}")
   apply_interzone_route_denies "${all_zone_ifaces[@]}"
 
   echo "Enabling UFW..."
