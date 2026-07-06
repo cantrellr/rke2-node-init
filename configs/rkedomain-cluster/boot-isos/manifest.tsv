@@ -1,0 +1,5 @@
+metadata_name	source_yaml	iso_path	sha256
+rkedomain-ctrl01	/rke2-node-init/configs/rkedomain-cluster/nodes/rkedomain-ctrl01.yaml	/rke2-node-init/outputs/image-hyperv-rkedomain-v1.35.6+rke2r1/boot-isos/rkedomain-ctrl01.iso	d72cd6bc4e0c87375f1f48013c8669a3e00afe7e37b9d9ae907975842a31fb00
+rkedomain-work01	/rke2-node-init/configs/rkedomain-cluster/nodes/rkedomain-work01.yaml	/rke2-node-init/outputs/image-hyperv-rkedomain-v1.35.6+rke2r1/boot-isos/rkedomain-work01.iso	27cb6324e96eb9db95b65b3a0822650826295000d344e16b6f584ffd7ab8098a
+rkedomain-work02	/rke2-node-init/configs/rkedomain-cluster/nodes/rkedomain-work02.yaml	/rke2-node-init/outputs/image-hyperv-rkedomain-v1.35.6+rke2r1/boot-isos/rkedomain-work02.iso	9f3713e1df98dc31f4a30322dbc72c1a0a8412d2198cc0cf95ffaa4ea6487697
+rkedomain-work03	/rke2-node-init/configs/rkedomain-cluster/nodes/rkedomain-work03.yaml	/rke2-node-init/outputs/image-hyperv-rkedomain-v1.35.6+rke2r1/boot-isos/rkedomain-work03.iso	6528f2e269c8f79f41724c780423a877a5ed6b234c1ce183ebbde1bac50b059e

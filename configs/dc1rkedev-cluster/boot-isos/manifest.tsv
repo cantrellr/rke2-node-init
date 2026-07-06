@@ -1,0 +1,5 @@
+metadata_name	source_yaml	iso_path	sha256
+dc1rkedev-ctrl01	/rke2-node-init/configs/dc1rkedev-cluster/nodes/dc1manager-ctrl01.yaml	/rke2-node-init/outputs/hyperv-dc1rkedev-cluster-image/boot-isos/dc1rkedev-ctrl01.iso	e89a320b862da5c0c4f31fca21f47e5ddb18821b9b0cb0d895de83744ad6d230
+dc1rkedev-work01	/rke2-node-init/configs/dc1rkedev-cluster/nodes/dc1manager-work01.yaml	/rke2-node-init/outputs/hyperv-dc1rkedev-cluster-image/boot-isos/dc1rkedev-work01.iso	01cc49c8845004e33b5277f4f35f44f3016c8cae22102a8992f9ce93f4b182d8
+dc1rkedev-work02	/rke2-node-init/configs/dc1rkedev-cluster/nodes/dc1manager-work02.yaml	/rke2-node-init/outputs/hyperv-dc1rkedev-cluster-image/boot-isos/dc1rkedev-work02.iso	528acab238387cbeb2e0874f5993df2495e0cdb2e34cae45d2ee062988d1e322
+dc1rkedev-work03	/rke2-node-init/configs/dc1rkedev-cluster/nodes/dc1manager-work03.yaml	/rke2-node-init/outputs/hyperv-dc1rkedev-cluster-image/boot-isos/dc1rkedev-work03.iso	cea351e9f7d91e495f533d5323e8368103ba7a24c437856226e12d65586110f5
