@@ -30,6 +30,7 @@ node_modules/
 /outputs/
 /downloads/
 /code/
+/configs/dc1rkedev-cluster/
 /configs/devlocal/
 /configs/gitops/
 /configs/r01preprod-jde/
