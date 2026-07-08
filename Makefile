@@ -1,7 +1,7 @@
 # Utility helpers for project maintenance.
 #
 # Usage:
-#   make token [TOKEN_SIZE=24]
+#   make token [TOKEN_SIZE=32]
 #
 # TOKEN_SIZE controls the number of random bytes (default: 32) used when
 # generating the base64 token. The resulting token is echoed to stdout and
