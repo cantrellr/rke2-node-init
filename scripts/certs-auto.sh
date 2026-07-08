@@ -136,9 +136,9 @@ if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
   echo "${FULL_TOKEN}" > "${TOKEN_TMP}"
   chmod 600 "${TOKEN_TMP}"
   sudo install -d -m 700 "$(dirname "${TOKEN_FILE}")"
-  sudo install -m 600 "${TOKEN_TMP}" "${TOKEN_FILE}" || true
+  sudo install -m 600 "${TOKEN_TMP}" "${TOKEN_FILE}"
   echo "Staging token to ${STAGE_DIR}/bootstrap.token"
-  sudo install -m 600 "${TOKEN_TMP}" "${STAGE_DIR}/bootstrap.token" || true
+  sudo install -m 600 "${TOKEN_TMP}" "${STAGE_DIR}/bootstrap.token"
   rm -f "${TOKEN_TMP}"
   echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: ${TOKEN_FILE}"
 else

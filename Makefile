@@ -3,7 +3,7 @@
 # Usage:
 #   make token [TOKEN_SIZE=24]
 #
-# TOKEN_SIZE controls the number of random bytes (default: 12) used when
+# TOKEN_SIZE controls the number of random bytes (default: 32) used when
 # generating the base64 token. The resulting token is echoed to stdout and
 # persisted at /etc/rancher/rke2/token.d/bootstrap.token.
 
@@ -19,7 +19,7 @@ export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 token:
 	@set -euo pipefail; \
 		TOKEN_FILE="/etc/rancher/rke2/token.d/bootstrap.token"; \
-		TOKEN_TMP="$${TMPDIR:-/tmp}/rke2-bootstrap-token.$$$$"; \
+		TOKEN_TMP="$$(mktemp "$${TMPDIR:-/tmp}/rke2-bootstrap-token.XXXXXX")"; \
 		TOKEN="$$(openssl rand -base64 ${TOKEN_SIZE})"; \
 		printf '%s\n' "$${TOKEN}" > "$${TOKEN_TMP}"; \
 		chmod 600 "$${TOKEN_TMP}"; \
