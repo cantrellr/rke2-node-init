@@ -104,12 +104,23 @@ Checks:
 
 ```bash
 grep -R "tokenFile:" configs/preprod configs/cotpa configs/cotpa-single-nodes
-ls -la outputs
+ls -la /etc/rancher/rke2/token.d
 ```
 
 Fix:
-- confirm token path points to `/rke2-node-init/outputs/...`
-- regenerate bootstrap token if needed
+- confirm token path points to `/etc/rancher/rke2/token.d/bootstrap.token`
+- confirm token file is readable and mode `0600`
+
+Artifact retention checks after successful bootstrap cleanup:
+
+```bash
+ls -la /var/log/rke2-node-init
+ls -la /var/lib/rke2-node-init/artifacts
+```
+
+Fix:
+- if directories are missing, review action logs and rerun with retention defaults
+- ensure `/var/log` and `/var/lib` have available space and writable permissions during bootstrap
 
 ### 6) Registry push failures
 

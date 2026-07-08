@@ -22,7 +22,7 @@ spec:
   node-label:
   - "role=worker"
   - "env=production"
-  tokenFile: /rke2-node-init/outputs/image-hyperv-rkedomain-v1.35.6+rke2r1-bootstrap-token.txt
+  tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
   customCA:
     rootCrt: /rke2-node-init/configs/rkedomain-cluster/certs/cocloud-ca.crt
     rootKey: /rke2-node-init/configs/rkedomain-cluster/certs/cocloud-ca-key.pem

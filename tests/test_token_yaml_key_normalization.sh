@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
-script="$root/bin/rke2nodeinit.sh"
+script="$root/bin/rke2nodeinit-core.sh"
 render="$root/scripts/render_rke2_config.py"
 
 if [[ ! -f "$script" ]]; then

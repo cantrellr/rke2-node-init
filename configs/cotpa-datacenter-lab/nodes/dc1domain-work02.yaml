@@ -36,7 +36,7 @@ spec:
   node-label:
   - "role=worker"
   - "env=production"
-  tokenFile: /rke2-node-init/outputs/hyperv-cotpa-datacenter-lab-image-bootstrap-token.txt
+  tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
   customCA:
     rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
     rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem

@@ -1,11 +1,11 @@
 # Utility helpers for project maintenance.
 #
 # Usage:
-#   make token TOKEN_IMAGE_NAME=<image-name> [TOKEN_SIZE=24]
+#   make token [TOKEN_SIZE=24]
 #
 # TOKEN_SIZE controls the number of random bytes (default: 12) used when
 # generating the base64 token. The resulting token is echoed to stdout and
-# persisted under outputs/<image-name>/<image-name>-bootstrap-token.txt.
+# persisted at /etc/rancher/rke2/token.d/bootstrap.token.
 
 export SHELL := /bin/bash
 export TOKEN_SIZE ?= 32
@@ -15,23 +15,17 @@ export BOOT_ISO_OUTPUT_DIR ?= configs/gitops/boot-isos
 export BOOT_ISO_MANIFEST ?= ${BOOT_ISO_OUTPUT_DIR}/manifest.tsv
 
 .PHONY: token sh kubeconfig boot-isos boot-isos-clean ipam-install ipam-run ipam-test ipam-import
-## Generate a reusable base64 token and persist it for later use.
+## Generate a reusable base64 token and persist it at canonical host path.
 token:
 	@set -euo pipefail; \
-		if [[ -z "${TOKEN_IMAGE_NAME}" ]]; then \
-			echo "ERROR: TOKEN_IMAGE_NAME is required (example: make token TOKEN_IMAGE_NAME=vmware-devlocal-image)"; \
-			exit 1; \
-		fi; \
-		if [[ "${TOKEN_IMAGE_NAME}" == */* ]]; then \
-			echo "ERROR: TOKEN_IMAGE_NAME must be a single folder name, not a path: ${TOKEN_IMAGE_NAME}"; \
-			exit 1; \
-		fi; \
-		TOKEN_OUTPUT_DIR="outputs/${TOKEN_IMAGE_NAME}"; \
-		TOKEN_FILE="${TOKEN_OUTPUT_DIR}/${TOKEN_IMAGE_NAME}-bootstrap-token.txt"; \
-		install -d -m 700 "${TOKEN_OUTPUT_DIR}"; \
+		TOKEN_FILE="/etc/rancher/rke2/token.d/bootstrap.token"; \
+		TOKEN_TMP="$${TMPDIR:-/tmp}/rke2-bootstrap-token.$$$$"; \
 		TOKEN="$$(openssl rand -base64 ${TOKEN_SIZE})"; \
-		printf '%s\n' "$${TOKEN}" | tee "${TOKEN_FILE}"; \
-		chmod 600 "${TOKEN_FILE}"; \
+		printf '%s\n' "$${TOKEN}" > "$${TOKEN_TMP}"; \
+		chmod 600 "$${TOKEN_TMP}"; \
+		sudo install -d -m 700 "$$(dirname "${TOKEN_FILE}")"; \
+		sudo install -m 600 "$${TOKEN_TMP}" "${TOKEN_FILE}"; \
+		rm -f "$${TOKEN_TMP}"; \
 		echo "     Token: $${TOKEN}"; \
 		echo "Token File: ${TOKEN_FILE}";
 

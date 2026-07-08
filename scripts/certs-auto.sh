@@ -12,9 +12,7 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 ROOT_OUT="${OUTDIR}/root-${TIMESTAMP}"
 SUB_OUT="${OUTDIR}/subca-${TIMESTAMP}"
 STAGE_DIR="${STAGE_DIR:-/opt/rke2/stage/certs}"
-TOKEN_IMAGE_NAME="${TOKEN_IMAGE_NAME:-}"
-TOKEN_DIR=""
-TOKEN_FILE=""
+TOKEN_FILE="${TOKEN_FILE:-/etc/rancher/rke2/token.d/bootstrap.token}"
 GENERATE_TOKEN="${GENERATE_TOKEN:-true}"
 
 ROOT_CN="${ROOT_CN:-Offline Root CA}"
@@ -25,20 +23,7 @@ SUB_ENCRYPT="${SUB_ENCRYPT:-false}"
 SUB_PASSFILE="${SUB_PASSFILE:-}"
 SUB_PATHLEN="${SUB_PATHLEN:-1}"
 
-if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
-  if [[ -z "${TOKEN_IMAGE_NAME}" ]]; then
-    echo "ERROR: TOKEN_IMAGE_NAME is required when GENERATE_TOKEN=true (example: TOKEN_IMAGE_NAME=vmware-devlocal-image)" >&2
-    exit 1
-  fi
-  if [[ "${TOKEN_IMAGE_NAME}" == */* ]]; then
-    echo "ERROR: TOKEN_IMAGE_NAME must be a single folder name, not a path: ${TOKEN_IMAGE_NAME}" >&2
-    exit 1
-  fi
-  TOKEN_DIR="outputs/${TOKEN_IMAGE_NAME}"
-  TOKEN_FILE="${TOKEN_DIR}/${TOKEN_IMAGE_NAME}-bootstrap-token.txt"
-fi
-
-echo "certs-auto: OUTDIR=${OUTDIR} STAGE_DIR=${STAGE_DIR} TOKEN_IMAGE_NAME=${TOKEN_IMAGE_NAME:-<unset>}"
+echo "certs-auto: OUTDIR=${OUTDIR} STAGE_DIR=${STAGE_DIR} TOKEN_FILE=${TOKEN_FILE}"
 
 # Helper: ensure directory exists and is owned by current user; if not, use sudo
 ensure_dir() {
@@ -53,11 +38,6 @@ ensure_dir() {
 
 ensure_dir "${ROOT_OUT}"
 ensure_dir "${SUB_OUT}"
-
-# Ensure token dir only when token generation is enabled
-if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
-  ensure_dir "${TOKEN_DIR}"
-fi
 
 # Generate or use provided root passphrase
 if [[ -z "${ROOT_PASS}" ]]; then
@@ -144,6 +124,7 @@ fi
 
 # Compute ca_hash from subordinate cert (DER -> sha256)
 if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
+  TOKEN_TMP="$(mktemp)"
   CA_HASH="$(openssl x509 -outform der -in "${SUB_CERT_PATH}" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}' || true)"
   if [[ -z "${CA_HASH}" ]]; then
     echo "WARNING: failed to compute CA_HASH from ${SUB_CERT_PATH}; falling back to simple token" >&2
@@ -152,13 +133,15 @@ if [[ "${GENERATE_TOKEN}" == "true" || "${GENERATE_TOKEN}" == "1" ]]; then
     FULL_TOKEN="K10${CA_HASH}::server:${PASSHEX}"
   fi
 
-  echo "${FULL_TOKEN}" > "${TOKEN_FILE}"
-  chmod 600 "${TOKEN_FILE}"
+  echo "${FULL_TOKEN}" > "${TOKEN_TMP}"
+  chmod 600 "${TOKEN_TMP}"
+  sudo install -d -m 700 "$(dirname "${TOKEN_FILE}")"
+  sudo install -m 600 "${TOKEN_TMP}" "${TOKEN_FILE}"
   echo "Staging token to ${STAGE_DIR}/bootstrap.token"
-  sudo install -m 600 "${TOKEN_FILE}" "${STAGE_DIR}/bootstrap.token" || true
+  sudo install -m 600 "${TOKEN_TMP}" "${STAGE_DIR}/bootstrap.token"
+  rm -f "${TOKEN_TMP}"
   echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: ${TOKEN_FILE}"
 else
-  TOKEN_FILE=""
   echo "GENERATE_TOKEN is disabled; skipping token creation and token staging"
   echo "certs-auto completed. Root CA: ${ROOT_CERT_PATH}, Sub CA: ${SUB_CERT_PATH}, Token: <skipped>"
 fi

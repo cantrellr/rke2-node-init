@@ -46,7 +46,7 @@ spec:
   enable-servicelb: "false"
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  tokenFile: /rke2-node-init/outputs/cotpa-k8admin-ca-bootstrap-token.txt
+  tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
   disable:
   - rke2-ingress-nginx
   customCA:

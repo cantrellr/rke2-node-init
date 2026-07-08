@@ -28,6 +28,10 @@ jobs:
         run: |
           chmod +x scripts/render_rke2_config.py || true
           chmod +x tests/verify_no_duplicate_tokenfile.sh || true
+          chmod +x tests/test_tokenfile_paths.sh || true
+          chmod +x tests/test_token_strict_policy.sh || true
+          chmod +x tests/test_token_yaml_key_normalization.sh || true
+          chmod +x tests/test_repo_cleanup_contract.sh || true
 
       - name: Validate example YAML files
         run: |
@@ -49,3 +53,10 @@ jobs:
       - name: Run duplicate-token-file verification
         run: |
           ./tests/verify_no_duplicate_tokenfile.sh
+
+      - name: Run token and cleanup contract tests
+        run: |
+          ./tests/test_tokenfile_paths.sh
+          ./tests/test_token_strict_policy.sh
+          ./tests/test_token_yaml_key_normalization.sh
+          ./tests/test_repo_cleanup_contract.sh

@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- No unreleased changes yet.
+- Bootstrap token handling now hard-cuts over to canonical protected host path `/etc/rancher/rke2/token.d/bootstrap.token` for `server`, `agent`, and `add-server` actions.
+- `tokenFile` manifest references across shipped node configs now point to `/etc/rancher/rke2/token.d/bootstrap.token`.
+- Legacy outputs-based bootstrap token artifact generation paths were removed from image/token helper flows.
+- Successful `server`, `agent`, and `add-server` completion now performs guarded repository cleanup for `/rke2-node-init`.
+
+### Added
+
+- Deferred post-success cleanup pipeline that retains operational artifacts before repo cleanup:
+  - Logs under `/var/log/rke2-node-init/<action>-<timestamp>/`
+  - SBOM/metadata/security evidence under `/var/lib/rke2-node-init/artifacts/<action>-<timestamp>/`
+- Cleanup contract test coverage via `tests/test_repo_cleanup_contract.sh`.
 
 ## [3.0.0] - 2026-06-24
 
