@@ -20,7 +20,7 @@ while IFS= read -r hit; do
     echo "ERROR: token file reference must be $expected: $hit"
     fail=1
   fi
-done < <(grep -ERIn "^[[:space:]]*(tokenFile|token-file):" "$root/configs" "$root/clusters" 2>/dev/null || true)
+done < <(grep -RIn "^[[:space:]]*(tokenFile|token-file):" "$root/configs" "$root/clusters" 2>/dev/null || true)
 
 if [[ "$fail" -ne 0 ]]; then
   echo "One or more tokenFile paths are invalid for first-boot runtime." >&2
