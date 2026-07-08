@@ -1,0 +1,5 @@
+metadata_name	source_yaml	iso_path	sha256
+blrerkedev-ctrl01	/rke2-node-init/configs/blrerkedev-cluster/nodes/blrerkedev-ctrl01.yaml	/rke2-node-init/outputs/image-hyperv-blrerkedev-v1.35.6+rke2r1/boot-isos/blrerkedev-ctrl01.iso	2272b4dfe44de9ad78e7706fe9df2b1ac4022e5164960ebab26bedfdbd038fb7
+blrerkedev-work01	/rke2-node-init/configs/blrerkedev-cluster/nodes/blrerkedev-work01.yaml	/rke2-node-init/outputs/image-hyperv-blrerkedev-v1.35.6+rke2r1/boot-isos/blrerkedev-work01.iso	6962c5ecdf8bc538b62a77efe25a1ef32e2770abfeaec34ad2ba4769257dae15
+blrerkedev-work02	/rke2-node-init/configs/blrerkedev-cluster/nodes/blrerkedev-work02.yaml	/rke2-node-init/outputs/image-hyperv-blrerkedev-v1.35.6+rke2r1/boot-isos/blrerkedev-work02.iso	39aba1baf46946fd0ad3422201e5390ed2f8d48a6f073b7cc823201be7df37d7
+blrerkedev-work03	/rke2-node-init/configs/blrerkedev-cluster/nodes/blrerkedev-work03.yaml	/rke2-node-init/outputs/image-hyperv-blrerkedev-v1.35.6+rke2r1/boot-isos/blrerkedev-work03.iso	80f82140e86107d1d08a1bb449c9cc8a6e8c075bc652df6662273f2b88da93fc
