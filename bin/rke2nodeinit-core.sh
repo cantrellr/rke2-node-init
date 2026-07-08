@@ -197,6 +197,18 @@ BOOTSTRAP_TOKEN_FILE=""
 # Captures attempted token-file resolution candidates for diagnostics.
 TOKEN_FILE_RESOLUTION_ATTEMPTS=""
 
+# Canonical bootstrap token host path (hard cutover).
+CANONICAL_BOOTSTRAP_TOKEN_DIR="/etc/rancher/rke2/token.d"
+CANONICAL_BOOTSTRAP_TOKEN_FILE="${CANONICAL_BOOTSTRAP_TOKEN_DIR}/bootstrap.token"
+
+# Post-success repo cleanup and artifact retention defaults.
+CLEANUP_REPO_ON_SUCCESS="${CLEANUP_REPO_ON_SUCCESS:-1}"
+REPO_CLEANUP_ALLOW_PATH="/rke2-node-init"
+ARTIFACT_RETENTION_ROOT="${ARTIFACT_RETENTION_ROOT:-/var/lib/rke2-node-init/artifacts}"
+ARTIFACT_RETENTION_LOG_DIR="${ARTIFACT_RETENTION_LOG_DIR:-/var/log/rke2-node-init}"
+POST_SUCCESS_CLEANUP_ENABLED=0
+POST_SUCCESS_CLEANUP_ACTION=""
+
 # Track the CA file used when deriving full tokens so runs can archive it.
 AGENT_CA_CERT=""
 
@@ -4728,10 +4740,8 @@ resolve_boot_yaml_dir() {
 # ------------------------------------------------------------------------------
 # Function: resolve_token_file_path
 # Purpose : Resolve a token-file path to a readable absolute path. Relative
-#           paths are evaluated against CONFIG_FILE directory, then REPO_ROOT,
-#           then current working directory.
-#           Legacy token-file paths under /outputs/<name>-bootstrap-token.txt
-#           are also mapped to /outputs/<name>/<name>-bootstrap-token.txt.
+#           paths are evaluated only for diagnostics. Hard cutover requires the
+#           canonical protected host token file path.
 # Arguments:
 #   $1 - Raw token-file path
 # Returns :
@@ -4740,45 +4750,17 @@ resolve_boot_yaml_dir() {
 # ------------------------------------------------------------------------------
 resolve_token_file_path() {
   local raw_path="$1"
-  local cfg_dir=""
   local candidate=""
-  local resolved=""
-  local legacy_outputs_rel=""
-  local legacy_prefix=""
-  local legacy_name=""
+  local canonical="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
   local -a candidates=()
   local -A seen=()
 
   TOKEN_FILE_RESOLUTION_ATTEMPTS=""
   [[ -n "$raw_path" ]] || return 1
 
-  if [[ "$raw_path" =~ (^|.*/)outputs/([^/]+)-bootstrap-token\.txt$ ]]; then
-    legacy_prefix="${BASH_REMATCH[1]}outputs"
-    legacy_name="${BASH_REMATCH[2]}"
-    legacy_outputs_rel="${legacy_prefix}/${legacy_name}/${legacy_name}-bootstrap-token.txt"
-  fi
-
-  if [[ "$raw_path" == /* ]]; then
-    candidates+=("$raw_path")
-    if [[ -n "$legacy_outputs_rel" ]]; then
-      candidates+=("$legacy_outputs_rel")
-    fi
-  else
-    if [[ -n "${CONFIG_FILE:-}" ]]; then
-      cfg_dir="$(dirname -- "$CONFIG_FILE")"
-      candidates+=("$cfg_dir/$raw_path")
-      if [[ -n "$legacy_outputs_rel" ]]; then
-        candidates+=("$cfg_dir/$legacy_outputs_rel")
-      fi
-    fi
-    candidates+=("$REPO_ROOT/$raw_path")
-    if [[ -n "$legacy_outputs_rel" ]]; then
-      candidates+=("$REPO_ROOT/$legacy_outputs_rel")
-    fi
-    candidates+=("$raw_path")
-    if [[ -n "$legacy_outputs_rel" ]]; then
-      candidates+=("$legacy_outputs_rel")
-    fi
+  candidates+=("$raw_path")
+  if [[ "$raw_path" != "$canonical" ]]; then
+    candidates+=("$canonical")
   fi
 
   for candidate in "${candidates[@]}"; do
@@ -4789,14 +4771,143 @@ resolve_token_file_path() {
     seen["$candidate"]=1
     TOKEN_FILE_RESOLUTION_ATTEMPTS+="${TOKEN_FILE_RESOLUTION_ATTEMPTS:+, }$candidate"
 
-    if [[ -f "$candidate" && -r "$candidate" ]]; then
-      resolved="$(cd -- "$(dirname -- "$candidate")" && pwd -P)/$(basename -- "$candidate")"
-      printf '%s\n' "$resolved"
+    if [[ "$candidate" == "$canonical" && -f "$candidate" && -r "$candidate" ]]; then
+      printf '%s\n' "$candidate"
       return 0
     fi
   done
 
   return 1
+}
+
+# ------------------------------------------------------------------------------
+# Function: write_token_to_canonical_file
+# Purpose : Persist a token value to the canonical protected host file.
+# Arguments:
+#   $1 - Token value
+# Returns :
+#   Prints canonical token path on success; non-zero on failure.
+# ------------------------------------------------------------------------------
+write_token_to_canonical_file() {
+  local token_value="${1:-}"
+  local tmp_file=""
+
+  [[ -n "$token_value" ]] || return 1
+  mkdir -p "$CANONICAL_BOOTSTRAP_TOKEN_DIR"
+  chmod 700 "$CANONICAL_BOOTSTRAP_TOKEN_DIR"
+
+  tmp_file="$(mktemp "$CANONICAL_BOOTSTRAP_TOKEN_DIR/.bootstrap.token.XXXXXX")"
+  printf '%s\n' "$token_value" > "$tmp_file"
+  chmod 600 "$tmp_file"
+  mv -f "$tmp_file" "$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  chmod 600 "$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  printf '%s\n' "$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Function: schedule_post_success_cleanup
+# Purpose : Defer repo cleanup until prompt_reboot so failures still preserve
+#           scripts in-place.
+# Arguments:
+#   $1 - Action label (server|agent|add-server)
+# ------------------------------------------------------------------------------
+schedule_post_success_cleanup() {
+  local action_label="${1:-}"
+  POST_SUCCESS_CLEANUP_ENABLED=1
+  POST_SUCCESS_CLEANUP_ACTION="$action_label"
+}
+
+# ------------------------------------------------------------------------------
+# Function: retain_operational_artifacts
+# Purpose : Preserve logs/SBOM/security metadata outside repo before cleanup.
+# Arguments:
+#   $1 - Action label
+# Returns :
+#   0 on success, non-zero when retention fails.
+# ------------------------------------------------------------------------------
+retain_operational_artifacts() {
+  local action_label="${1:-node}"
+  local stamp=""
+  local action_artifact_dir=""
+  local action_log_dir=""
+  local rc=0
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  action_artifact_dir="$ARTIFACT_RETENTION_ROOT/${action_label}-${stamp}"
+  action_log_dir="$ARTIFACT_RETENTION_LOG_DIR/${action_label}-${stamp}"
+
+  mkdir -p "$action_artifact_dir" "$action_log_dir" || return 1
+  chmod 750 "$ARTIFACT_RETENTION_ROOT" "$ARTIFACT_RETENTION_LOG_DIR" "$action_artifact_dir" "$action_log_dir" 2>/dev/null || true
+
+  if [[ -n "${LOG_FILE:-}" && -f "$LOG_FILE" ]]; then
+    if cp -f "$LOG_FILE" "$action_log_dir/"; then
+      chmod 640 "$action_log_dir/$(basename -- "$LOG_FILE")" 2>/dev/null || true
+    else
+      rc=1
+    fi
+  fi
+
+  if [[ -d "$SBOM_DIR" ]]; then
+    if ! cp -a "$SBOM_DIR" "$action_artifact_dir/"; then
+      rc=1
+    fi
+  fi
+
+  if [[ -d "$OUT_DIR" ]]; then
+    while IFS= read -r -d '' artifact; do
+      local rel="${artifact#${OUT_DIR}/}"
+      local target_dir="$action_artifact_dir/outputs/$(dirname -- "$rel")"
+      mkdir -p "$target_dir" || { rc=1; continue; }
+      cp -f "$artifact" "$target_dir/" || rc=1
+    done < <(find "$OUT_DIR" -maxdepth 4 -type f \( -name '*sbom*' -o -name '*manifest*' -o -name '*metadata*' -o -name '*scan*' -o -name '*.spdx.json' -o -name '*.inspect.json' \) -print0 2>/dev/null)
+  fi
+
+  [[ "$rc" -eq 0 ]]
+}
+
+# ------------------------------------------------------------------------------
+# Function: maybe_cleanup_repo_after_success
+# Purpose : Remove repo after successful bootstrap actions, preserving artifacts.
+# Arguments:
+#   $1 - Action label
+# ------------------------------------------------------------------------------
+maybe_cleanup_repo_after_success() {
+  local action_label="${1:-node}"
+  local repo_real=""
+
+  if [[ "${CLEANUP_REPO_ON_SUCCESS:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  repo_real="$(cd -- "$REPO_ROOT" && pwd -P 2>/dev/null || true)"
+  if [[ -z "$repo_real" || "$repo_real" != "$REPO_CLEANUP_ALLOW_PATH" || "$repo_real" == "/" ]]; then
+    log_warn "Skipping repo cleanup: path is not allow-listed ($repo_real)"
+    return 0
+  fi
+
+  if ! retain_operational_artifacts "$action_label"; then
+    log_warn "Artifact retention failed; preserving repository at $repo_real for safety"
+    return 0
+  fi
+
+  log_info "Removing working repository after successful ${action_label} bootstrap: $repo_real"
+  rm -rf --one-file-system "$repo_real"
+}
+
+# ------------------------------------------------------------------------------
+# Function: execute_pending_post_success_cleanup
+# Purpose : Run deferred cleanup scheduled by successful bootstrap actions.
+# ------------------------------------------------------------------------------
+execute_pending_post_success_cleanup() {
+  if [[ "${POST_SUCCESS_CLEANUP_ENABLED:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  local action_label="${POST_SUCCESS_CLEANUP_ACTION:-node}"
+  POST_SUCCESS_CLEANUP_ENABLED=0
+  POST_SUCCESS_CLEANUP_ACTION=""
+  maybe_cleanup_repo_after_success "$action_label"
 }
 
 # ------------------------------------------------------------------------------
@@ -9096,6 +9207,7 @@ prompt_reboot() {
   
   if (( AUTO_YES )); then
     log WARN "Auto-confirm enabled (-y). Rebooting now..."
+    execute_pending_post_success_cleanup
     sleep 2
     reboot
   else
@@ -9103,11 +9215,13 @@ prompt_reboot() {
     case "${_ans,,}" in
       y|yes)
         log WARN "Rebooting..."
+        execute_pending_post_success_cleanup
         sleep 2
         reboot
         ;;
       *)
         log INFO "Reboot deferred. Remember to reboot before installing RKE2."
+        execute_pending_post_success_cleanup
         ;;
     esac
   fi
@@ -9745,96 +9859,9 @@ action_image() {
   metrics_increment "success"
   metrics_increment "registry_trust_configured"
 
-  # Generate a custom-CA bootstrap token file in image outputs when custom CA exists.
-  if [[ -n "$CA_ROOT" || -n "$CA_INTCRT" ]]; then
-    local image_token=""
-    local image_name="${SPEC_NAME:-image}"
-    local image_output_dir="${RUN_OUT_DIR:-$OUT_DIR/$image_name}"
-    local image_token_file="${image_output_dir}/${image_name}-bootstrap-token.txt"
-    local token_alias_yaml_dir=""
-    local _alias_manifest=""
-    local _alias_token_file=""
-    local _alias_dir_name=""
-    local _alias_expected_name=""
-    local _created_targets=""
-    local -A _written_token_targets=()
-
-    if [[ -n "$CA_ROOT" && ! -f "$CA_ROOT" ]]; then
-      log_error "Custom CA root certificate path is not readable during image action: $CA_ROOT"
-      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
-      exit 1
-    fi
-    if [[ -n "$CA_INTCRT" && ! -f "$CA_INTCRT" ]]; then
-      log_error "Custom CA intermediate certificate path is not readable during image action: $CA_INTCRT"
-      log_error "Refusing to continue because image bootstrap token generation requires a valid custom CA input."
-      exit 1
-    fi
-
-    CUSTOM_CA_ROOT_CRT="${CA_ROOT:-${CUSTOM_CA_ROOT_CRT:-}}"
-    CUSTOM_CA_ROOT_KEY="${CA_KEY:-${CUSTOM_CA_ROOT_KEY:-}}"
-    CUSTOM_CA_INT_CRT="${CA_INTCRT:-${CUSTOM_CA_INT_CRT:-}}"
-    CUSTOM_CA_INT_KEY="${CA_INTKEY:-${CUSTOM_CA_INT_KEY:-}}"
-
-    if ! image_token="$(generate_bootstrap_token)"; then
-      log_error "Custom CA bootstrap token generation failed during image action."
-      exit 1
-    fi
-
-    image_token="${image_token//$'\n'/}"
-    image_token="${image_token//$'\r'/}"
-    if [[ -z "$image_token" ]]; then
-      log_error "Custom CA bootstrap token generation returned empty output during image action."
-      exit 1
-    fi
-
-    mkdir -p "$(dirname "$image_token_file")"
-    printf '%s\n' "$image_token" > "$image_token_file"
-    chmod 600 "$image_token_file"
-    _written_token_targets["$image_token_file"]=1
-    log_info "Custom CA bootstrap token generated: $image_token_file"
-
-    if [[ -n "$boot_yaml_path_cfg" ]]; then
-      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$boot_yaml_path_cfg")"
-    elif [[ -n "${BOOT_YAML_PATH:-}" ]]; then
-      token_alias_yaml_dir="$(resolve_boot_yaml_dir "$BOOT_YAML_PATH")"
-    fi
-
-    if [[ -n "$token_alias_yaml_dir" && -d "$token_alias_yaml_dir" ]]; then
-      while IFS= read -r _alias_manifest; do
-        _alias_token_file="$(yaml_spec_get "$_alias_manifest" tokenFile || true)"
-        [[ -n "$_alias_token_file" ]] || continue
-
-        if [[ "$_alias_token_file" != /rke2-node-init/outputs/*/*-bootstrap-token.txt ]]; then
-          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile must match /rke2-node-init/outputs/<image>/<image>-bootstrap-token.txt: $_alias_token_file"
-          continue
-        fi
-
-        _alias_dir_name="$(basename -- "$(dirname -- "$_alias_token_file")")"
-        _alias_expected_name="${_alias_dir_name}-bootstrap-token.txt"
-        if [[ "$(basename -- "$_alias_token_file")" != "$_alias_expected_name" ]]; then
-          log_warn "Skipping bootstrap token alias for $_alias_manifest; tokenFile filename must match containing image folder name ($_alias_expected_name): $_alias_token_file"
-          continue
-        fi
-
-        if [[ -n "${_written_token_targets["$_alias_token_file"]+x}" ]]; then
-          continue
-        fi
-
-        mkdir -p "$(dirname "$_alias_token_file")"
-        printf '%s\n' "$image_token" > "$_alias_token_file"
-        chmod 600 "$_alias_token_file" || true
-        _written_token_targets["$_alias_token_file"]=1
-        log_info "Created bootstrap token alias for $_alias_manifest: $_alias_token_file"
-      done < <(find "$token_alias_yaml_dir" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
-    fi
-
-    for _alias_token_file in "${!_written_token_targets[@]}"; do
-      _created_targets+="${_created_targets:+, }${_alias_token_file}"
-    done
-    log_info "Bootstrap token artifacts created: ${_created_targets}"
-  else
-    log_info "No customCA stanza detected; skipping custom CA bootstrap token generation."
-  fi
+  # Bootstrap tokens are no longer emitted into repository output paths.
+  # Runtime bootstrap now reads the canonical protected host token file.
+  log_info "Skipping outputs-based bootstrap token generation during image action."
 
   # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
   # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
@@ -10944,6 +10971,22 @@ action_server() {
   # Phase 7: Token and RKE2 configuration
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
+  if [[ -n "$TOKEN" ]]; then
+    local canonical_token_file=""
+    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
+    if [[ -z "$canonical_token_file" ]]; then
+      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+    TOKEN_FILE="$canonical_token_file"
+    TOKEN=""
+    log_info "Persisted provided token to canonical token-file path."
+  elif [[ -z "$TOKEN_FILE" ]]; then
+    TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  fi
+
   if [[ -n "$TOKEN_FILE" ]]; then
     local resolved_token_file=""
     resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
@@ -10952,44 +10995,19 @@ action_server() {
       log_info "Token file provided and found; using token-file: $TOKEN_FILE"
       TOKEN=""
     else
-      if [[ "$via_boot_service" -eq 1 ]]; then
-        log_warn "Token file provided but unavailable during boot-service run: $TOKEN_FILE"
-        if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
-          log_warn "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
-        fi
-        log_warn "Proceeding without token-file; generating a first-server bootstrap token for this run."
-        TOKEN_FILE=""
-      else
-        log_error "Token file provided but unavailable: $TOKEN_FILE"
-        if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
-          log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
-        fi
-        log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
-        metrics_increment "total"
-        metrics_increment "failed"
-        exit 1
+      log_error "Token file provided but unavailable: $TOKEN_FILE"
+      if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
+        log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
       fi
-    fi
-  elif [[ -n "$TOKEN" ]]; then
-    local full_token
-    full_token="$(ensure_full_cluster_token "$TOKEN")"
-    if [[ -n "$full_token" ]]; then
-      if [[ "$full_token" != "$TOKEN" ]]; then
-        log_info "Expanded provided token to full format (custom CA hash included)."
-      fi
-      TOKEN="$full_token"
-    fi
-  else
-    TOKEN="$(generate_bootstrap_token)"
-    if [[ "$TOKEN" =~ ^K10[0-9a-fA-F]{64}::server: ]]; then
-      log_info "Using generated secure first-server token (custom CA fingerprint embedded)."
-    else
-      log_info "Using generated short first-server bootstrap token."
+      log_error "Remediation: ensure canonical token file exists and is readable at $CANONICAL_BOOTSTRAP_TOKEN_FILE."
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
     fi
   fi
   metrics_increment "total"
   metrics_increment "success"
-  metrics_increment "token_generated"
+  metrics_increment "token_configured"
 
   BOOTSTRAP_TOKEN_FILE="$TOKEN_FILE"
   log_info "Seeding custom cluster CA..."
@@ -11180,6 +11198,7 @@ action_server() {
     echo "[DRY-RUN] Server configuration validated. No changes made."
   fi
   echo
+  schedule_post_success_cleanup "server"
   prompt_reboot
 }
 
@@ -11442,6 +11461,21 @@ action_agent() {
   fi
 
   log_info "Validating/expanding provided token (if any)..."
+  if [[ -n "$TOKEN" ]]; then
+    local canonical_token_file=""
+    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
+    if [[ -z "$canonical_token_file" ]]; then
+      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    TOKEN_FILE="$canonical_token_file"
+    TOKEN=""
+    log_info "Persisted provided token to canonical token-file path."
+  elif [[ -z "$TOKEN_FILE" ]]; then
+    TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  fi
+
   if [[ -n "$TOKEN_FILE" ]]; then
     local resolved_token_file=""
     resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
@@ -11450,7 +11484,7 @@ action_agent() {
       if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
         log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
       fi
-      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+      log_error "Remediation: ensure canonical token file exists and is readable at $CANONICAL_BOOTSTRAP_TOKEN_FILE."
       metrics_increment "failed"
       exit 1
     fi
@@ -11458,15 +11492,6 @@ action_agent() {
     TOKEN_FILE="$resolved_token_file"
     log_info "Token file provided and found; using token-file: $TOKEN_FILE"
     TOKEN=""
-  elif [[ -n "$TOKEN" ]]; then
-    local full_token=""
-    full_token="$(ensure_full_cluster_token "$TOKEN")"
-    if [[ -n "$full_token" ]]; then
-      if [[ "$full_token" != "$TOKEN" ]]; then
-        log_info "Expanded agent join token to full format (custom CA hash included)."
-      fi
-      TOKEN="$full_token"
-    fi
   fi
   metrics_increment "token_configured"
 
@@ -11622,6 +11647,7 @@ action_agent() {
     echo "[DRY-RUN] Agent configuration validated. No changes made."
   fi
   echo
+  schedule_post_success_cleanup "agent"
   prompt_reboot
 }
 
@@ -11901,6 +11927,21 @@ action_add_server() {
   [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
 
   log_info "Validating/expanding provided token (if any)..."
+  if [[ -n "$TOKEN" ]]; then
+    local canonical_token_file=""
+    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
+    if [[ -z "$canonical_token_file" ]]; then
+      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
+      metrics_increment "failed"
+      exit 1
+    fi
+    TOKEN_FILE="$canonical_token_file"
+    TOKEN=""
+    log_info "Persisted provided token to canonical token-file path."
+  elif [[ -z "$TOKEN_FILE" ]]; then
+    TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  fi
+
   if [[ -n "$TOKEN_FILE" ]]; then
     local resolved_token_file=""
     resolved_token_file="$(resolve_token_file_path "$TOKEN_FILE" || true)"
@@ -11909,7 +11950,7 @@ action_add_server() {
       if [[ -n "${TOKEN_FILE_RESOLUTION_ATTEMPTS:-}" ]]; then
         log_error "Attempted token file paths: $TOKEN_FILE_RESOLUTION_ATTEMPTS"
       fi
-      log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."
+      log_error "Remediation: ensure canonical token file exists and is readable at $CANONICAL_BOOTSTRAP_TOKEN_FILE."
       metrics_increment "failed"
       exit 1
     fi
@@ -11917,15 +11958,6 @@ action_add_server() {
     TOKEN_FILE="$resolved_token_file"
     log_info "Token file provided and found; using token-file: $TOKEN_FILE"
     TOKEN=""
-  elif [[ -n "$TOKEN" ]]; then
-    local full_token=""
-    full_token="$(ensure_full_cluster_token "$TOKEN")"
-    if [[ -n "$full_token" ]]; then
-      if [[ "$full_token" != "$TOKEN" ]]; then
-        log_info "Expanded server join token to full format (custom CA hash included)."
-      fi
-      TOKEN="$full_token"
-    fi
   fi
 
   if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" || -n "${CUSTOM_CA_INT_CRT:-}" ]]; then
@@ -12122,6 +12154,7 @@ action_add_server() {
     echo "[DRY-RUN] Add-server configuration validated. No changes made."
   fi
   echo
+  schedule_post_success_cleanup "add-server"
   prompt_reboot
 }
 

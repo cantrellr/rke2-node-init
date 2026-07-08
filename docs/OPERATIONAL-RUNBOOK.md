@@ -81,10 +81,16 @@ sudo ./bin/rke2nodeinit.sh -f configs/preprod/nodes/dc1manager-work01.yaml agent
 ```
 
 Token policy for node provisioning:
-- Use `spec.tokenFile` (or `spec.token-file`) with canonical paths under `/rke2-node-init/outputs/<image>/<image>-bootstrap-token.txt` when using generated token artifacts.
-- If a token file path is provided but unreadable/unresolvable, `server`, `add-server`, and `agent` all fail fast with remediation output.
-- `server` only generates a bootstrap token when neither `token` nor `token-file` is supplied.
-- `add-server` and `agent` are join workflows and therefore require operator-provided token material.
+- Use `spec.tokenFile` (or `spec.token-file`) with the canonical protected host path `/etc/rancher/rke2/token.d/bootstrap.token`.
+- `server`, `agent`, and `add-server` now fail fast when the canonical token file is missing or unreadable.
+
+Post-bootstrap cleanup and artifact retention:
+- After successful `server`, `agent`, or `add-server` completion, the runtime working repository at `/rke2-node-init` is removed.
+- Cleanup is allow-listed and only executes for the expected path to prevent unintended deletions.
+- Operational evidence is retained before cleanup:
+  - Logs: `/var/log/rke2-node-init/<action>-<timestamp>/`
+  - SBOM and metadata artifacts: `/var/lib/rke2-node-init/artifacts/<action>-<timestamp>/`
+- If artifact retention fails, repo cleanup is skipped for safety.
 
 ## Phase 6: Verification
 
@@ -97,6 +103,8 @@ Check:
 - staged artifacts
 - service state
 - token file and custom CA references
+- retained logs under `/var/log/rke2-node-init/`
+- retained SBOM/metadata under `/var/lib/rke2-node-init/artifacts/`
 
 ## Phase 7: Hardening
 

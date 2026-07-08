@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
-script="$root/bin/rke2nodeinit.sh"
+script="$root/bin/rke2nodeinit-core.sh"
 
 if [[ ! -f "$script" ]]; then
   echo "Script not found: $script" >&2
@@ -21,7 +21,7 @@ if [[ "$missing_errors" -lt 3 ]]; then
   exit 1
 fi
 
-remediation_errors="$(grep -F -c 'log_error "Remediation: provide a readable absolute path or a path relative to the manifest/repository root."' "$script" || true)"
+remediation_errors="$(grep -F -c 'log_error "Remediation: ensure canonical token file exists and is readable at $CANONICAL_BOOTSTRAP_TOKEN_FILE."' "$script" || true)"
 if [[ "$remediation_errors" -lt 3 ]]; then
   echo "ERROR: Missing remediation guidance for one or more actions." >&2
   exit 1
@@ -72,13 +72,13 @@ if ! grep -Fq 'Runtime customCA seeding is offline-only. Populate helper during 
   exit 1
 fi
 
-if ! grep -Fq 'Using generated secure first-server token (custom CA fingerprint embedded).' "$script"; then
-  echo "ERROR: First-server generation path appears to be missing." >&2
+if grep -Fq 'Using generated secure first-server token (custom CA fingerprint embedded).' "$script"; then
+  echo "ERROR: Server generation fallback should not remain in strict canonical token-file mode." >&2
   exit 1
 fi
 
-if ! grep -Fq 'Using generated short first-server bootstrap token.' "$script"; then
-  echo "ERROR: First-server short token generation path appears to be missing." >&2
+if grep -Fq 'Using generated short first-server bootstrap token.' "$script"; then
+  echo "ERROR: Short server token generation fallback should not remain in strict canonical token-file mode." >&2
   exit 1
 fi
 
