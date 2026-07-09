@@ -1,0 +1,62 @@
+apiVersion: rkeprep/v2
+kind: AddServer
+metadata:
+  name: cotpa-ctrl02
+spec:
+  disable-default-system-registry: true
+  hostname: cotpa-ctrl02
+  # Bind to cluster communication interface
+  nodeIp: 172.16.15.102
+  bindAddress: 172.16.15.102
+  advertiseAddress: 172.16.15.102
+  cni:
+   - multus
+   - canal
+  interfaces:
+    # vlan9
+    - name: eth0
+      ip: 172.16.15.102
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
+      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud"]
+    # vlan12
+    - name: eth1
+      ip: 172.16.4.252
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains:
+    # vlan17
+    - name: eth2
+      ip: 172.16.5.252
+      prefix: 24
+      gateway:
+      dns: 
+      searchDomains: 
+  node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+  node-label:
+  - "env=development"
+  tls-san:
+    - cotpa-ctrl02
+    - cotpa-ctrl02.cantrellcloud.net
+    - cotpa-cluster
+    - cotpa-cluster.cantrellcloud.net
+    - 172.16.15.102
+  service-cidr: 10.93.0.0/16
+  cluster-cidr: 10.243.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+  serverURL: https://172.16.15.101:9345
+  tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
+  disable:
+  - rke2-ingress-nginx
+  customCA:
+    rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
+    installToOSTrust: true

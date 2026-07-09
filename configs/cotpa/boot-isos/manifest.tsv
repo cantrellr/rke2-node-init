@@ -1,0 +1,4 @@
+metadata_name	source_yaml	iso_path	sha256
+cotpakube01	/rke2-node-init/configs/cotpa/nodes/cotpakube01.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.0+rke2r1-image/boot-isos/cotpakube01.iso	899fe81804071c3b1d7a70e3823b82b3bbfcae90bd9f7908da92cdad91b693b8
+cotpakube02	/rke2-node-init/configs/cotpa/nodes/cotpakube02.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.0+rke2r1-image/boot-isos/cotpakube02.iso	9729ae2b7e4bc0213dcd15280c3e121b0ab4f62f79748cbee0806e94d4df9ee2
+cotpakube03	/rke2-node-init/configs/cotpa/nodes/cotpakube03.yaml	/rke2-node-init/outputs/cotpa-hyperv-v1.36.0+rke2r1-image/boot-isos/cotpakube03.iso	68ab9f51849119681daf528e809cdf66ce4253697318a6dd8ea7dcac7a71f31e

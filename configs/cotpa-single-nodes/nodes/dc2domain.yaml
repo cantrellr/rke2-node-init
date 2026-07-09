@@ -1,0 +1,75 @@
+apiVersion: rkeprep/v2
+kind: singleNodeServer
+metadata:
+  name: dc2domain
+spec:
+  rke2Version: v1.35.5+rke2r2
+
+  clusterMode: single-node
+  singleNode:
+    enabled: true
+    mode: production
+    enableCIS: true
+    lowResourceAddons: true
+    defaultNetworkPolicy: true
+    ingressController: none
+    snapshotScheduleCron: "0 */6 * * *"
+    snapshotRetention: 12
+    snapshotDir: /var/lib/rancher/rke2/server/db/snapshots
+    auditLogMaxAge: 30
+    auditLogMaxBackup: 10
+    auditLogMaxSize: 100
+
+  node-label:
+    - cluster.cantrellnet.net/mode=single-node
+    - topology.kubernetes.io/zone=single-node
+
+  disable-default-system-registry: true
+
+  hostname: dc2domain
+  nodeIp: 172.16.15.103
+  bindAddress: 172.16.15.103
+  advertiseAddress: 172.16.15.103
+  cni:
+    - multus
+    - canal
+  interfaces:
+    - name: eth0
+      ip: 172.16.15.103
+      prefix: 24
+      gateway: 172.16.15.1
+      dns: ["172.16.10.11", "172.16.10.12"]
+      searchDomains: ["k8.cantrellcloud.net", "cantrellcloud.net"]
+    - name: eth1
+      ip: 172.17.0.103
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains: []
+    - name: eth2
+      ip: 172.16.210.103
+      prefix: 24
+      gateway:
+      dns:
+      searchDomains: ["cantrelloffice.cloud", "cantrell.cloud"]
+
+  tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
+  customCA:
+    rootCrt: /rke2-node-init/configs/cotpa/certs/cocloud-ca.crt
+    rootKey: /rke2-node-init/configs/cotpa/certs/cocloud-ca-key.pem
+    intermediateCrt: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2.crt
+    intermediateKey: /rke2-node-init/configs/cotpa/certs/cocloud-issue-ca2-key.pem
+    installToOSTrust: true
+  disable:
+    - rke2-ingress-nginx
+    - rke2-traefik
+  tls-san:
+    - dc2domain
+    - dc2domain.cantrellcloud.net
+    - 172.16.15.103
+  service-cidr: 10.1.0.0/16
+  cluster-dns: 10.1.0.10
+  cluster-cidr: 10.103.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  writeKubeconfigMode: "0600"
