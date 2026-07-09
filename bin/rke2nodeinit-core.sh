@@ -9860,8 +9860,34 @@ action_image() {
   metrics_increment "registry_trust_configured"
 
   # Bootstrap tokens are no longer emitted into repository output paths.
-  # Runtime bootstrap now reads the canonical protected host token file.
-  log_info "Skipping outputs-based bootstrap token generation during image action."
+  # During image prep, stage the canonical protected host token file used by
+  # runtime bootstrap.
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    local image_bootstrap_token=""
+    local image_bootstrap_token_file=""
+    image_bootstrap_token="$(generate_bootstrap_token || true)"
+    if [[ -z "$image_bootstrap_token" ]]; then
+      log_error "Failed to generate canonical bootstrap token during image action."
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+
+    image_bootstrap_token_file="$(write_token_to_canonical_file "$image_bootstrap_token" || true)"
+    if [[ -z "$image_bootstrap_token_file" ]]; then
+      log_error "Failed to stage canonical bootstrap token file during image action: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
+      metrics_increment "total"
+      metrics_increment "failed"
+      exit 1
+    fi
+
+    log_info "Canonical bootstrap token staged: $image_bootstrap_token_file"
+    metrics_increment "total"
+    metrics_increment "success"
+    metrics_increment "bootstrap_token_staged"
+  else
+    log_info "DRY-RUN: Would generate and stage canonical bootstrap token at $CANONICAL_BOOTSTRAP_TOKEN_FILE"
+  fi
 
   # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
   # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
@@ -10972,17 +10998,11 @@ action_server() {
   report_progress "Writing RKE2 configuration" 7 8
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
-    local canonical_token_file=""
-    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
-    if [[ -z "$canonical_token_file" ]]; then
-      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
-      metrics_increment "total"
-      metrics_increment "failed"
-      exit 1
-    fi
-    TOKEN_FILE="$canonical_token_file"
-    TOKEN=""
-    log_info "Persisted provided token to canonical token-file path."
+    log_error "Inline token input is not permitted for server action in strict token-file mode."
+    log_error "Remediation: stage canonical token file during image action at $CANONICAL_BOOTSTRAP_TOKEN_FILE and reference it via tokenFile."
+    metrics_increment "total"
+    metrics_increment "failed"
+    exit 1
   elif [[ -z "$TOKEN_FILE" ]]; then
     TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
   fi
@@ -11462,16 +11482,10 @@ action_agent() {
 
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
-    local canonical_token_file=""
-    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
-    if [[ -z "$canonical_token_file" ]]; then
-      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
-      metrics_increment "failed"
-      exit 1
-    fi
-    TOKEN_FILE="$canonical_token_file"
-    TOKEN=""
-    log_info "Persisted provided token to canonical token-file path."
+    log_error "Inline token input is not permitted for agent action in strict token-file mode."
+    log_error "Remediation: stage canonical token file during image action at $CANONICAL_BOOTSTRAP_TOKEN_FILE and reference it via tokenFile."
+    metrics_increment "failed"
+    exit 1
   elif [[ -z "$TOKEN_FILE" ]]; then
     TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
   fi
@@ -11928,16 +11942,10 @@ action_add_server() {
 
   log_info "Validating/expanding provided token (if any)..."
   if [[ -n "$TOKEN" ]]; then
-    local canonical_token_file=""
-    canonical_token_file="$(write_token_to_canonical_file "$TOKEN" || true)"
-    if [[ -z "$canonical_token_file" ]]; then
-      log_error "Failed to persist provided token to canonical path: $CANONICAL_BOOTSTRAP_TOKEN_FILE"
-      metrics_increment "failed"
-      exit 1
-    fi
-    TOKEN_FILE="$canonical_token_file"
-    TOKEN=""
-    log_info "Persisted provided token to canonical token-file path."
+    log_error "Inline token input is not permitted for add-server action in strict token-file mode."
+    log_error "Remediation: stage canonical token file during image action at $CANONICAL_BOOTSTRAP_TOKEN_FILE and reference it via tokenFile."
+    metrics_increment "failed"
+    exit 1
   elif [[ -z "$TOKEN_FILE" ]]; then
     TOKEN_FILE="$CANONICAL_BOOTSTRAP_TOKEN_FILE"
   fi
