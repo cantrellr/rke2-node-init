@@ -14,6 +14,11 @@ umask 022
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CORE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-core.sh"
 SINGLE_NODE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-single-node.sh"
+SYSTEM_HELPER="${SCRIPT_DIR}/rke2nodeinit-system.sh"
+
+[[ -f "$SYSTEM_HELPER" ]] || { echo "ERROR: Missing system helper: $SYSTEM_HELPER" >&2; exit 1; }
+# shellcheck source=bin/rke2nodeinit-system.sh
+source "$SYSTEM_HELPER"
 
 usage() {
   cat <<'USAGE'
@@ -35,6 +40,10 @@ Supported kind dispatch:
   Verify           -> verify
   Airgap           -> airgap
   CustomCA         -> custom-ca
+
+For Server, AddServer, Agent, and singleNodeServer manifests that enable the CIS
+profile, the dispatcher applies and persists the RKE2-required kernel parameters
+before handing control to the provisioning engine.
 
 Legacy action-first and option-first forms are both accepted:
   sudo bin/rke2nodeinit.sh image -f config.yaml -y
@@ -189,6 +198,18 @@ normalize_args() {
   done
 }
 
+normalized_args_contain() {
+  local needle="${1:-}"
+  local arg=""
+  [[ -n "$needle" ]] || return 1
+
+  for arg in "${NORMALIZED_ARGS[@]:-}"; do
+    [[ "$arg" == "$needle" ]] && return 0
+  done
+
+  return 1
+}
+
 exec_core() {
   [[ -x "$CORE_SCRIPT" ]] || { echo "ERROR: Missing executable core script: $CORE_SCRIPT" >&2; exit 1; }
   exec bash "$CORE_SCRIPT" "$@"
@@ -218,6 +239,8 @@ main() {
 
   local yaml_kind=""
   local resolved_action=""
+  local dry_run=0
+
   if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
     yaml_kind="$(read_yaml_kind "$CONFIG_FILE" || true)"
     if [[ -n "$yaml_kind" ]]; then
@@ -225,12 +248,18 @@ main() {
     fi
   fi
 
-  if [[ -n "$yaml_kind" ]] && kind_is_single_node "$yaml_kind"; then
-    exec_single_node "$ACTION" "${NORMALIZED_ARGS[@]}"
-  fi
-
   if [[ -z "${ACTION:-}" && -n "$resolved_action" ]]; then
     ACTION="$resolved_action"
+  fi
+
+  if normalized_args_contain "--dry-run"; then
+    dry_run=1
+  fi
+
+  rke2nodeinit_system_prepare_cis_for_action "${ACTION:-}" "${CONFIG_FILE:-}" "$dry_run"
+
+  if [[ -n "$yaml_kind" ]] && kind_is_single_node "$yaml_kind"; then
+    exec_single_node "$ACTION" "${NORMALIZED_ARGS[@]}"
   fi
 
   if [[ -n "${ACTION:-}" ]]; then
