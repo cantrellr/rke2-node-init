@@ -6,10 +6,35 @@ MAIN="${ROOT}/bin/rke2nodeinit.sh"
 CORE="${ROOT}/bin/rke2nodeinit-core.sh"
 SCRIPT="${ROOT}/bin/rke2-single-node-profile.sh"
 SINGLE_NODE_HELPER="${ROOT}/bin/rke2nodeinit-single-node.sh"
+SYSTEM_HELPER="${ROOT}/bin/rke2nodeinit-system.sh"
 IMAGE_CONFIG="${ROOT}/configs/single-node/golden-image.yaml"
 CONFIG="${ROOT}/configs/single-node/production-server.yaml"
 COTPA_IMAGE_CONFIG="${ROOT}/configs/cotpa-single-nodes/image-hyperv-v1.35.5+rke2r2-singlenode.yaml"
 COTPA_CONFIG="${ROOT}/configs/cotpa-single-nodes/nodes/dc1manager.yaml"
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+
+CIS_CONFIG="${workdir}/cis-server.yaml"
+NON_CIS_CONFIG="${workdir}/non-cis-server.yaml"
+
+cat > "$CIS_CONFIG" <<'YAML'
+apiVersion: rkeprep/v2
+kind: Server
+metadata:
+  name: cis-server
+spec:
+  profile: cis
+YAML
+
+cat > "$NON_CIS_CONFIG" <<'YAML'
+apiVersion: rkeprep/v2
+kind: Server
+metadata:
+  name: non-cis-server
+spec:
+  profile: ""
+YAML
 
 bash -n "$MAIN"
 bash -n "$CORE"
@@ -19,17 +44,38 @@ bash -n "${ROOT}/bin/rke2nodeinit-config.sh"
 bash -n "${ROOT}/bin/rke2nodeinit-cni.sh"
 bash -n "${ROOT}/bin/rke2nodeinit-yaml.sh"
 bash -n "${ROOT}/bin/rke2nodeinit-router.sh"
-bash -n "${ROOT}/bin/rke2nodeinit-system.sh"
+bash -n "$SYSTEM_HELPER"
 
 grep -q 'CORE_SCRIPT=.*rke2nodeinit-core.sh' "$MAIN"
 grep -q 'SINGLE_NODE_SCRIPT=.*rke2nodeinit-single-node.sh' "$MAIN"
+grep -q 'SYSTEM_HELPER=.*rke2nodeinit-system.sh' "$MAIN"
 grep -q 'singleNodeImage  -> single-node image flow' "$MAIN"
 grep -q 'singleNodeServer -> single-node server flow' "$MAIN"
 grep -q 'RKE2NODEINIT_CORE_DELEGATE=1' "$MAIN"
+grep -q 'rke2nodeinit_system_prepare_cis_for_action' "$MAIN"
 grep -q 'RKE2NODEINIT_CORE_DELEGATE=1' "$SINGLE_NODE_HELPER"
 grep -q 'rke2-single-node-swap-preflight.sh' "$SINGLE_NODE_HELPER"
 grep -q '05-single-node-swap-preflight.conf' "$SINGLE_NODE_HELPER"
 grep -q 'swapoff -a' "$SINGLE_NODE_HELPER"
+
+grep -q 'rke2nodeinit_system_manifest_requires_cis' "$SYSTEM_HELPER"
+grep -q 'rke2nodeinit_system_apply_cis_kernel_prereqs' "$SYSTEM_HELPER"
+grep -q '99-rke2-cis.conf' "$SYSTEM_HELPER"
+grep -q 'vm.overcommit_memory = 1' "$SYSTEM_HELPER"
+grep -q 'vm.panic_on_oom = 0' "$SYSTEM_HELPER"
+grep -q 'kernel.panic = 10' "$SYSTEM_HELPER"
+grep -q 'kernel.panic_on_oops = 1' "$SYSTEM_HELPER"
+
+# shellcheck source=bin/rke2nodeinit-system.sh
+source "$SYSTEM_HELPER"
+
+rke2nodeinit_system_manifest_requires_cis "$CIS_CONFIG"
+rke2nodeinit_system_manifest_requires_cis "$COTPA_CONFIG"
+
+if rke2nodeinit_system_manifest_requires_cis "$NON_CIS_CONFIG"; then
+  echo "non-CIS manifest incorrectly detected as CIS" >&2
+  exit 1
+fi
 
 grep -q '^kind: singleNodeImage$' "$IMAGE_CONFIG"
 grep -q '^kind: singleNodeServer$' "$CONFIG"
@@ -51,6 +97,7 @@ done
 
 bash "$MAIN" --help | grep -q 'singleNodeImage'
 bash "$MAIN" --help | grep -q 'singleNodeServer'
+bash "$MAIN" --help | grep -q 'CIS'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeImage'
 bash "$SCRIPT" --help | grep -q 'kind: singleNodeServer'
 bash "$SCRIPT" --help | grep -q 'bin/rke2nodeinit.sh -f <rkeprep-yaml> image'
@@ -84,14 +131,17 @@ cotpa_image_dispatch="$(bash "$MAIN" -f "$COTPA_IMAGE_CONFIG" --dry-run -y 2>&1 
 grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$cotpa_image_dispatch"
 grep -q ' image' <<<"$cotpa_image_dispatch"
 
+cis_dispatch="$(bash "$MAIN" -f "$CIS_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'DRY-RUN would apply RKE2 CIS kernel prerequisites' <<<"$cis_dispatch"
+grep -q 'vm.overcommit_memory=1' <<<"$cis_dispatch"
+grep -q 'vm.panic_on_oom=0' <<<"$cis_dispatch"
+
 server_dispatch="$(bash "$MAIN" -f "$COTPA_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'DRY-RUN would apply RKE2 CIS kernel prerequisites' <<<"$server_dispatch"
 grep -q 'DRY-RUN would install single-node swap preflight guard' <<<"$server_dispatch"
 grep -q 'DRY-RUN would install rke2-server ExecStartPre preflight guard' <<<"$server_dispatch"
 grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$server_dispatch"
 grep -q ' server' <<<"$server_dispatch"
-
-workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
 
 bash "$SCRIPT" apply -f "$CONFIG" \
   --output-dir "$workdir/config.yaml.d" \
