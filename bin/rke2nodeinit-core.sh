@@ -3416,7 +3416,7 @@ append_spec_config_extras() {
   local -a scalars=(
     "cluster-cidr" "service-cidr" "cluster-dns" "cluster-domain"
     "system-default-registry" "embedded-registry" "disable-default-registry-endpoint" "private-registry" "write-kubeconfig-mode"
-    "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
+    "selinux" "profile" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
     # Image overrides commonly required to avoid external pulls in air-gapped installs
     "kube-proxy-image" "pause-image" "runtime-image"
@@ -9889,17 +9889,16 @@ action_image() {
     log_info "DRY-RUN: Would generate and stage canonical bootstrap token at $CANONICAL_BOOTSTRAP_TOKEN_FILE"
   fi
 
-  # Immediately persist a minimal RKE2 configuration for air‑gapped bootstraps.
-  # RKE2 will automatically import images from /var/lib/rancher/rke2/agent/images
-  # when the `import-images: true` flag is present.  The configuration also
-  # carries an optional embedded registry toggle if the YAML spec requests it
-  # (spec.embeddedRegistry or spec.embedded-registry).  Finally, ensure
+  # Immediately persist a minimal RKE2 configuration for air-gapped bootstraps.
+  # RKE2 imports staged images from /var/lib/rancher/rke2/agent/images without
+  # requiring an import-images config key. The configuration also carries an
+  # optional embedded registry toggle if the YAML spec requests it
+  # (spec.embeddedRegistry or spec.embedded-registry). Finally, ensure
   # disable-default-registry-endpoint is appended so that containerd never
-  # contacts upstream registries on air‑gapped nodes.
+  # contacts upstream registries on air-gapped nodes.
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
     mkdir -p /etc/rancher/rke2
     : > /etc/rancher/rke2/config.yaml
-    #echo "import-images: true" >> /etc/rancher/rke2/config.yaml
     # Honour embedded-registry setting from YAML spec if provided
     local _emb=""
     if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
@@ -9914,7 +9913,7 @@ action_image() {
     chmod 600 /etc/rancher/rke2/config.yaml || true
     log_info "Wrote /etc/rancher/rke2/config.yaml with offline defaults"
   else
-    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml with import-images and offline defaults"
+    log_info "DRY-RUN: Would write /etc/rancher/rke2/config.yaml with offline defaults"
   fi
 
   # --- Save site defaults (DNS/search) ---------------------------------------
@@ -11049,7 +11048,6 @@ action_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
-      echo "import-images: true"
 
       log_debug "Get token..." >&2
       if [[ -n "$TOKEN" ]]; then
@@ -11519,7 +11517,6 @@ action_agent() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
-      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
@@ -12024,7 +12021,6 @@ action_add_server() {
     {
       log_debug "Setting debug..." >&2
       echo "debug: true"
-      echo "import-images: true"
 
       log_debug "Setting server URL..." >&2
       echo "server: \"$URL\""     # required
