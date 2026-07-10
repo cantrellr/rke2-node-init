@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/Release-v3.0.0-brightgreen?style=for-the-badge)](docs/releases/v3.0.0.md)
 [![rkeprep/v2](https://img.shields.io/badge/rkeprep%2Fv2-kind--driven-brightgreen?style=for-the-badge)](docs/REPOSITORY-CONFIGURATION.md)
 [![Single Node](https://img.shields.io/badge/Single--Node-ready-brightgreen?style=for-the-badge&logo=kubernetes&logoColor=white)](docs/SINGLE-NODE-CLUSTERS.md)
-[![RKE2](https://img.shields.io/badge/RKE2-v1.35.5%2Brke2r2-brightgreen?style=for-the-badge&logo=rancher&logoColor=white)](#key-capabilities)
+[![RKE2](https://img.shields.io/badge/RKE2-v1.35.6%2Brke2r1-brightgreen?style=for-the-badge&logo=rancher&logoColor=white)](#key-capabilities)
 [![Air Gap](https://img.shields.io/badge/Air--Gap-ready-brightgreen?style=for-the-badge)](#workflow-overview)
 [![Offline First](https://img.shields.io/badge/Offline--First-supported-brightgreen?style=for-the-badge)](#workflow-overview)
 [![Shell](https://img.shields.io/badge/Shell-Bash-brightgreen?style=for-the-badge&logo=gnu-bash&logoColor=white)](#command-reference)
