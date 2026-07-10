@@ -1,10 +1,17 @@
 # RKE2 CIS Kernel Prerequisites
 
-This document describes the host kernel parameters that `rke2-node-init` enforces when an RKE2 node is configured to use the CIS profile.
+This document describes the host prerequisites that `rke2-node-init` enforces when an RKE2 node is configured to use the CIS profile.
 
 ## Why this exists
 
 RKE2 validates host kernel runtime parameters before starting when `profile: cis` is enabled. If the live kernel values do not match the RKE2 CIS requirements, `rke2-server` or `rke2-agent` exits before Kubernetes starts.
+
+RKE2 CIS startup also expects a local `etcd` system account. If the account is missing, startup can fail with:
+
+```text
+missing required: user: unknown user etcd
+missing required: group: unknown group etcd
+```
 
 A common failure is:
 
@@ -14,16 +21,17 @@ invalid kernel parameter value vm.overcommit_memory=0 - expected 1
 
 The Ubuntu default for `vm.overcommit_memory` may be `0`, while the RKE2 CIS profile requires `1`.
 
-## Required values
+## Required prerequisites
 
-`rke2-node-init` enforces and persists the following values:
+`rke2-node-init` ensures these account prerequisites for CIS startup:
 
 ```text
-vm.overcommit_memory = 1
-vm.panic_on_oom = 0
-kernel.panic = 10
-kernel.panic_on_oops = 1
+group: etcd
+user:  etcd
+shell: /usr/sbin/nologin
 ```
+
+`rke2-node-init` also enforces and persists the following kernel values:
 
 The persistent configuration is written to:
 
@@ -52,7 +60,7 @@ The dispatcher fails early if the required kernel values cannot be applied or ve
 
 ## Dry-run behavior
 
-When `--dry-run` is used, the dispatcher does not modify the host. It reports the exact CIS kernel values that would be applied.
+When `--dry-run` is used, the dispatcher does not modify the host. It reports both account and kernel prerequisites that would be applied.
 
 Example:
 
@@ -63,12 +71,22 @@ sudo bin/rke2nodeinit.sh -f server.yaml --dry-run -y
 Expected message:
 
 ```text
+DRY-RUN would ensure CIS etcd account prerequisites: group=etcd user=etcd shell=/usr/sbin/nologin
 DRY-RUN would apply RKE2 CIS kernel prerequisites: vm.overcommit_memory=1, vm.panic_on_oom=0, kernel.panic=10, kernel.panic_on_oops=1
 ```
 
 ## Manual remediation
 
 For a host that is already failing with a CIS kernel parameter error, apply the values manually:
+
+```bash
+sudo getent group etcd >/dev/null || sudo groupadd --system etcd
+sudo getent passwd etcd >/dev/null || \
+  sudo useradd --system --no-create-home --home-dir /var/lib/rancher/rke2/server/db/etcd \
+    --shell /usr/sbin/nologin --gid etcd etcd
+```
+
+Then apply CIS kernel sysctls:
 
 ```bash
 sudo tee /etc/sysctl.d/99-rke2-cis.conf >/dev/null <<'EOF'

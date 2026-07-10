@@ -32,6 +32,38 @@ rke2nodeinit_system_sysctl_set() {
   sysctl -w "${key}=${value}"
 }
 
+rke2nodeinit_system_ensure_cis_etcd_account() {
+  local etcd_db_dir="/var/lib/rancher/rke2/server/db/etcd"
+
+  rke2nodeinit_system_require_root || return 1
+
+  if ! getent group etcd >/dev/null 2>&1; then
+    if ! groupadd --system etcd >/dev/null 2>&1; then
+      echo "ERROR: failed to create required system group: etcd" >&2
+      return 1
+    fi
+    echo "[INFO] Created system group: etcd" >&2
+  fi
+
+  if ! getent passwd etcd >/dev/null 2>&1; then
+    if ! useradd --system --no-create-home --home-dir "$etcd_db_dir" --shell /usr/sbin/nologin --gid etcd etcd >/dev/null 2>&1; then
+      echo "ERROR: failed to create required system user: etcd" >&2
+      return 1
+    fi
+    echo "[INFO] Created system user: etcd" >&2
+  fi
+
+  if [[ -d "$etcd_db_dir" ]]; then
+    if ! chown -R etcd:etcd "$etcd_db_dir" >/dev/null 2>&1; then
+      echo "ERROR: failed to set ownership on ${etcd_db_dir}" >&2
+      return 1
+    fi
+    echo "[INFO] Ensured etcd ownership on ${etcd_db_dir}" >&2
+  fi
+
+  return 0
+}
+
 rke2nodeinit_system_manifest_requires_cis() {
   local file="${1:-}"
   [[ -n "$file" && -f "$file" ]] || return 1
@@ -190,10 +222,12 @@ rke2nodeinit_system_prepare_cis_for_action() {
   fi
 
   if [[ "$dry_run" == "1" ]]; then
+    echo "[INFO] DRY-RUN would ensure CIS etcd account prerequisites: group=etcd user=etcd shell=/usr/sbin/nologin" >&2
     echo "[INFO] DRY-RUN would apply RKE2 CIS kernel prerequisites: vm.overcommit_memory=1, vm.panic_on_oom=0, kernel.panic=10, kernel.panic_on_oops=1" >&2
     return 0
   fi
 
-  echo "[INFO] CIS profile detected for ${action}; applying RKE2 kernel prerequisites before service startup." >&2
+  echo "[INFO] CIS profile detected for ${action}; applying account and kernel prerequisites before service startup." >&2
+  rke2nodeinit_system_ensure_cis_etcd_account
   rke2nodeinit_system_apply_cis_kernel_prereqs
 }

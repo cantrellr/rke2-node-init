@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-Last Updated: June 24, 2026
+Last Updated: July 10, 2026
 
 This guide maps common failures to targeted remediation.
 
@@ -111,6 +111,38 @@ Fix:
 - confirm token path points to `/etc/rancher/rke2/token.d/bootstrap.token`
 - confirm token file is readable and mode `0600`
 
+### 6) `rke2-server` fails with unknown `etcd` user/group
+
+Symptoms:
+- `systemctl status rke2-server` shows exit code `1`
+- `journalctl -u rke2-server` includes:
+  - `missing required: user: unknown user etcd`
+  - `missing required: group: unknown group etcd`
+
+Checks:
+
+```bash
+getent passwd etcd || echo "missing etcd user"
+getent group etcd || echo "missing etcd group"
+```
+
+Fix:
+
+```bash
+sudo getent group etcd >/dev/null || sudo groupadd --system etcd
+sudo getent passwd etcd >/dev/null || \
+  sudo useradd --system --no-create-home --home-dir /var/lib/rancher/rke2/server/db/etcd \
+    --shell /usr/sbin/nologin --gid etcd etcd
+
+if [ -d /var/lib/rancher/rke2/server/db/etcd ]; then
+  sudo chown -R etcd:etcd /var/lib/rancher/rke2/server/db/etcd
+fi
+
+sudo systemctl restart rke2-server
+sudo systemctl status rke2-server --no-pager -l
+sudo journalctl -u rke2-server -n 100 --no-pager -l
+```
+
 Artifact retention checks after successful bootstrap cleanup:
 
 ```bash
@@ -122,7 +154,7 @@ Fix:
 - if directories are missing, review action logs and rerun with retention defaults
 - ensure `/var/log` and `/var/lib` have available space and writable permissions during bootstrap
 
-### 6) Registry push failures
+### 7) Registry push failures
 
 Checks:
 
@@ -135,7 +167,7 @@ Fix:
 - validate registry CA trust and mirror configuration
 - validate name resolution and firewall
 
-### 7) STIG script side effects
+### 8) STIG script side effects
 
 Use report-first mode:
 

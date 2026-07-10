@@ -22,6 +22,12 @@ umask 022
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+SYSTEM_HELPER="${SCRIPT_DIR}/rke2nodeinit-system.sh"
+
+if [[ -f "$SYSTEM_HELPER" ]]; then
+  # shellcheck source=bin/rke2nodeinit-system.sh
+  source "$SYSTEM_HELPER"
+fi
 
 ACTION=""
 CONFIG_FILE=""
@@ -589,17 +595,21 @@ apply_cis_host_prereqs() {
   [[ "$ENABLE_CIS" -eq 1 ]] || return 0
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "DRY-RUN would ensure local etcd user/group and enforce RKE2 CIS sysctls"
+    info "DRY-RUN would ensure CIS etcd account prerequisites: group=etcd user=etcd shell=/usr/sbin/nologin"
     return 0
   fi
 
-  if ! getent group etcd >/dev/null 2>&1; then
-    groupadd --system etcd
-    info "Created system group: etcd"
-  fi
-  if ! id etcd >/dev/null 2>&1; then
-    useradd -r -c "etcd user" -s /usr/sbin/nologin -M -g etcd etcd
-    info "Created system user: etcd"
+  if declare -F rke2nodeinit_system_ensure_cis_etcd_account >/dev/null 2>&1; then
+    rke2nodeinit_system_ensure_cis_etcd_account
+  else
+    if ! getent group etcd >/dev/null 2>&1; then
+      groupadd --system etcd
+      info "Created system group: etcd"
+    fi
+    if ! id etcd >/dev/null 2>&1; then
+      useradd -r -c "etcd user" -s /usr/sbin/nologin -M -g etcd etcd
+      info "Created system user: etcd"
+    fi
   fi
 
   install_preflight_service_guard

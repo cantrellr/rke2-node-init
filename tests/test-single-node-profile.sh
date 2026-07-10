@@ -60,6 +60,9 @@ grep -q 'swapoff -a' "$SINGLE_NODE_HELPER"
 
 grep -q 'rke2nodeinit_system_manifest_requires_cis' "$SYSTEM_HELPER"
 grep -q 'rke2nodeinit_system_apply_cis_kernel_prereqs' "$SYSTEM_HELPER"
+grep -q 'rke2nodeinit_system_ensure_cis_etcd_account' "$SYSTEM_HELPER"
+grep -q 'groupadd --system etcd' "$SYSTEM_HELPER"
+grep -q 'useradd --system --no-create-home' "$SYSTEM_HELPER"
 grep -q '99-rke2-cis.conf' "$SYSTEM_HELPER"
 grep -q 'vm.overcommit_memory = 1' "$SYSTEM_HELPER"
 grep -q 'vm.panic_on_oom = 0' "$SYSTEM_HELPER"
@@ -104,6 +107,7 @@ bash "$SCRIPT" --help | grep -q 'bin/rke2nodeinit.sh -f <rkeprep-yaml> image'
 bash "$SCRIPT" --help | grep -q 'preflight guard'
 
 grep -q '99-rke2-single-node-cis.conf' "$SCRIPT"
+grep -q 'rke2nodeinit_system_ensure_cis_etcd_account' "$SCRIPT"
 grep -q 'vm.overcommit_memory = 1' "$SCRIPT"
 grep -q 'kernel.panic = 10' "$SCRIPT"
 grep -q 'kernel.panic_on_oops = 1' "$SCRIPT"
@@ -132,6 +136,7 @@ grep -q 'bin/rke2nodeinit.sh --dry-run -y -f ' <<<"$cotpa_image_dispatch"
 grep -q ' image' <<<"$cotpa_image_dispatch"
 
 cis_dispatch="$(bash "$MAIN" -f "$CIS_CONFIG" --dry-run -y 2>&1 || true)"
+grep -q 'DRY-RUN would ensure CIS etcd account prerequisites' <<<"$cis_dispatch"
 grep -q 'DRY-RUN would apply RKE2 CIS kernel prerequisites' <<<"$cis_dispatch"
 grep -q 'vm.overcommit_memory=1' <<<"$cis_dispatch"
 grep -q 'vm.panic_on_oom=0' <<<"$cis_dispatch"
