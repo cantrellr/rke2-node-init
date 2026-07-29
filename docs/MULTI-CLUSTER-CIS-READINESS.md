@@ -44,12 +44,7 @@ For the Segment 1 deployment, `ens33` is the primary routed interface and must u
   gateway: 1.0.0.1
 ```
 
-Secondary interfaces, including `ens36`, must not contain a gateway. Enforce or validate this policy across a node-manifest directory with:
-
-```bash
-python3 scripts/enforce-primary-interface-gateway.py configs/seg1opdev/nodes
-python3 scripts/enforce-primary-interface-gateway.py configs/seg1opdev/nodes --check
-```
+Secondary interfaces, including `ens36`, must not contain a gateway. Apply this directly in each deployment node manifest before regenerating the boot ISOs.
 
 ## CNI image preparation
 
