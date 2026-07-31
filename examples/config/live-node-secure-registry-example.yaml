@@ -1,0 +1,36 @@
+apiVersion: rkeprep/v2
+kind: Server
+metadata:
+  name: rke2-live-secure-registry-server
+  description: First live RKE2 server using deployment-time registry credentials
+
+spec:
+  rke2Version: v1.35.6+rke2r1
+  hostname: rke2-server-01
+
+  interfaces:
+    - name: eth0
+      ip: 10.0.100.10
+      prefix: 24
+      gateway: 10.0.100.1
+      dns:
+        - 10.0.0.10
+        - 10.0.0.11
+
+  # Registry host or host/namespace used by RKE2.
+  registry: kubeharbor.dev.kube
+
+  # Live execution fails closed unless both credentials resolve. Do not place
+  # this setting or the credential values in the golden-image manifest.
+  secureRegistry: true
+
+  # These files are copied into the environment-specific deployment image
+  # before it is cloned into final nodes. The boot ISO contains only these
+  # absolute path references. Both files must be mode 0600.
+  registryUsernameFile: /etc/rancher/rke2/registry-credentials/username
+  registryPasswordFile: /etc/rancher/rke2/registry-credentials/token
+
+  # Optional private CA trust staged into the deployment image.
+  # customCA:
+  #   rootCrt: /etc/rancher/rke2/private-ca/kubeharbor-ca.crt
+  #   installToOSTrust: true
