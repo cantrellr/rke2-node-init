@@ -11,20 +11,20 @@ set -Eeuo pipefail
 rke2nodeinit_registry_require_yaml_support() {
   command -v python3 >/dev/null 2>&1 || {
     echo "ERROR: secureRegistry requires python3." >&2
-    return 1
+    return 2
   }
 
   python3 -c 'import yaml' >/dev/null 2>&1 || {
     echo "ERROR: secureRegistry requires the Python PyYAML module." >&2
-    return 1
+    return 2
   }
 }
 
 rke2nodeinit_registry_manifest_is_secure() {
   local manifest="${1:-}"
-  [[ -n "$manifest" && -f "$manifest" ]] || return 1
+  [[ -n "$manifest" && -f "$manifest" ]] || return 2
 
-  rke2nodeinit_registry_require_yaml_support || return 1
+  rke2nodeinit_registry_require_yaml_support || return 2
 
   python3 - "$manifest" <<'PY'
 import sys
@@ -51,7 +51,7 @@ def normalize_kind(value):
 try:
     documents = [doc for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")) if doc]
 except (OSError, UnicodeError, yaml.YAMLError):
-    raise SystemExit(1)
+    raise SystemExit(2)
 
 for document in documents:
     if not isinstance(document, dict):
