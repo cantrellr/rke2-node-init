@@ -54,10 +54,17 @@ Supported kind dispatch:
   Airgap           -> airgap
   CustomCA         -> custom-ca
 
-For Image and singleNodeImage manifests, spec.secureRegistry: true requires
-registry credentials. Prefer registryUsernameFile and registryPasswordFile, or
-set RKE2_REGISTRY_USERNAME_FILE and RKE2_REGISTRY_PASSWORD_FILE. The dispatcher
-stages a root-only runtime manifest and removes it when provisioning completes.
+For live Server, AddServer, Agent, and singleNodeServer manifests,
+spec.secureRegistry: true requires both a registry username and password/token.
+Prefer registryUsernameFile and registryPasswordFile, or set the corresponding
+RKE2_REGISTRY_* environment variables. The dispatcher resolves credentials only
+at live node execution, stages a root-only manifest under /run/rke2-node-init,
+and removes it after provisioning returns.
+
+Do not set secureRegistry on Image, singleNodeImage, or Airgap manifests. Golden
+image creation must remain free of deployment-specific registry credentials;
+place secureRegistry and its credential-file references in the node manifest
+that the boot ISO supplies to the cloned VM.
 
 For Server, AddServer, Agent, and singleNodeServer manifests that enable the CIS
 profile, the dispatcher applies and persists the RKE2-required kernel parameters
@@ -264,10 +271,27 @@ prepare_secure_registry_config() {
   local staged=""
   local detection_rc=0
 
-  [[ "$action" == "image" ]] || return 0
   [[ -n "$manifest" && -f "$manifest" ]] || return 0
 
-  if rke2nodeinit_registry_manifest_is_secure "$manifest"; then
+  case "$action" in
+    image|airgap)
+      if rke2nodeinit_registry_image_manifest_misuses_secure_registry "$manifest"; then
+        echo "ERROR: spec.secureRegistry is a live node setting and must not be enabled on Image, singleNodeImage, or Airgap manifests." >&2
+        echo "ERROR: move secureRegistry and its credential-file references to the Server, AddServer, Agent, or singleNodeServer manifest carried by the boot ISO." >&2
+        return 1
+      fi
+      detection_rc=$?
+      [[ "$detection_rc" -eq 1 ]] && return 0
+      return "$detection_rc"
+      ;;
+    server|add-server|agent)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if rke2nodeinit_registry_manifest_requires_live_credentials "$manifest"; then
     :
   else
     detection_rc=$?
@@ -278,17 +302,17 @@ prepare_secure_registry_config() {
   fi
 
   install -d -m 0700 "$runtime_dir"
-  staged="$(mktemp "${runtime_dir}/secure-registry.XXXXXX.yaml")"
+  staged="$(mktemp "${runtime_dir}/live-secure-registry.XXXXXX.yaml")"
   chmod 0600 "$staged"
 
-  if ! rke2nodeinit_registry_materialize_secure_manifest "$manifest" "$staged"; then
+  if ! rke2nodeinit_registry_materialize_live_manifest "$manifest" "$staged"; then
     rke2nodeinit_registry_remove_staged_manifest "$staged"
     return 1
   fi
 
   SECURE_REGISTRY_CONFIG="$staged"
   replace_normalized_config_file "$staged"
-  echo "[INFO] secureRegistry enabled; registry credentials resolved into a temporary root-only runtime manifest." >&2
+  echo "[INFO] secureRegistry enabled; live registry credentials resolved into a temporary root-only runtime manifest." >&2
 }
 
 exec_core() {
