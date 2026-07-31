@@ -262,12 +262,19 @@ prepare_secure_registry_config() {
   local manifest="${2:-}"
   local runtime_dir="${RKE2NODEINIT_RUNTIME_DIR:-/run/rke2-node-init}"
   local staged=""
+  local detection_rc=0
 
   [[ "$action" == "image" ]] || return 0
   [[ -n "$manifest" && -f "$manifest" ]] || return 0
 
-  if ! rke2nodeinit_registry_manifest_is_secure "$manifest"; then
-    return 0
+  if rke2nodeinit_registry_manifest_is_secure "$manifest"; then
+    :
+  else
+    detection_rc=$?
+    if [[ "$detection_rc" -eq 1 ]]; then
+      return 0
+    fi
+    return "$detection_rc"
   fi
 
   install -d -m 0700 "$runtime_dir"
