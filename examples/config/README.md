@@ -2,7 +2,7 @@
 
 This directory provides runnable `rkeprep/v2` YAML examples for `bin/rke2nodeinit.sh` actions.
 
-**Last Updated:** February 16, 2026
+**Last Updated:** July 31, 2026
 
 ---
 
@@ -23,6 +23,7 @@ Use `-P` first to print sanitized configuration and confirm parsed values.
 | Example | Kind | Primary Action |
 | --- | --- | --- |
 | `image-example.yaml` | `Image` | `image` |
+| `image-secure-registry-example.yaml` | `Image` | `image` with authenticated registry runtime configuration |
 | `airgap-example.yaml` | `Airgap` | `airgap` |
 | `push-example.yaml` | `Push` | `push` |
 | `server-example.yaml` | `Server` | `server` |
@@ -51,12 +52,29 @@ spec: {}
 
 - `rke2Version`, `rke2CNIVersion`, `rke2MultusVersion`, `rke2FlannelVersion`
 - `registry`, `registryUsername`, `registryPassword`
+- `secureRegistry`, `registryUsernameFile`, `registryPasswordFile`
 - `customCA.rootCrt`, `customCA.intermediateCrt`, `customCA.installToOSTrust`
 - `interfaces[]` for multi-NIC declarations
 - `cluster.serverUrl`, `cluster.token`, `cluster.tlsCertFingerprint`
 - `fixCNIPermissions` to enable timer-based CNI permission remediation during `image`
 
 The script accepts both camelCase and several legacy kebab-case aliases.
+
+### Authenticated registry image preparation
+
+Set `spec.secureRegistry: true` on an `Image` or `singleNodeImage` manifest when RKE2 must authenticate to the configured registry. Prefer external credential files:
+
+```yaml
+spec:
+  registry: kubeharbor.dev.kube
+  secureRegistry: true
+  registryUsernameFile: /root/.config/rke2-node-init/kubeharbor-pull-username
+  registryPasswordFile: /root/.config/rke2-node-init/kubeharbor-pull-token
+```
+
+The dispatcher resolves the files into a temporary root-only runtime manifest. The existing registry renderer then writes authenticated settings to `/etc/rancher/rke2/registries.yaml`. The action fails before provisioning when credentials are missing or the password/token file is not protected.
+
+See [`../../docs/SECURE-REGISTRY-CREDENTIALS.md`](../../docs/SECURE-REGISTRY-CREDENTIALS.md) for source precedence, environment alternatives, validation behavior, and verification commands.
 
 ---
 
@@ -112,11 +130,25 @@ sudo ./bin/rke2nodeinit.sh -f examples/config/airgap-example.yaml airgap
 
 This performs image preparation and powers off at completion for template capture.
 
+### Golden image with a secure registry
+
+```bash
+sudo chmod 600 \
+  /root/.config/rke2-node-init/kubeharbor-pull-username \
+  /root/.config/rke2-node-init/kubeharbor-pull-token
+
+sudo ./bin/rke2nodeinit.sh \
+  -f examples/config/image-secure-registry-example.yaml \
+  image -y
+```
+
 ---
 
 ## Security Guidance
 
 - Never commit real credentials or tokens in YAML.
+- Prefer `registryUsernameFile` and `registryPasswordFile` when `secureRegistry` is enabled.
+- Keep credential files outside the repository with mode `0600`.
 - Keep production manifests outside committed example paths.
 - Use placeholders in committed files and inject secrets at runtime.
 - Use restrictive file permissions for private material (`chmod 600`).
