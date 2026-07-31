@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Secure-registry manifest helper for rke2nodeinit.
 #
-# The legacy provisioning core already writes registry authentication into
-# /etc/rancher/rke2/registries.yaml when registryUsername/registryPassword are
-# present. This helper lets operators keep those credentials outside Git while
-# preserving the existing core contract.
+# Environment-specific registry credentials are resolved only for live node
+# actions. Golden-image actions remain free of deployment credentials; the live
+# Server/AddServer/Agent manifest carried by the boot ISO references protected
+# credential files that are copied into the deployment image before cloning.
 
 set -Eeuo pipefail
 
@@ -20,19 +20,23 @@ rke2nodeinit_registry_require_yaml_support() {
   }
 }
 
-rke2nodeinit_registry_manifest_is_secure() {
+rke2nodeinit_registry_manifest_has_secure_kind() {
   local manifest="${1:-}"
+  shift || true
+
   [[ -n "$manifest" && -f "$manifest" ]] || return 2
+  [[ $# -gt 0 ]] || return 2
 
   rke2nodeinit_registry_require_yaml_support || return 2
 
-  python3 - "$manifest" <<'PY'
+  python3 - "$manifest" "$@" <<'PY'
 import sys
 from pathlib import Path
 
 import yaml
 
 path = Path(sys.argv[1])
+allowed_kinds = set(sys.argv[2:])
 
 
 def truthy(value):
@@ -56,8 +60,7 @@ except (OSError, UnicodeError, yaml.YAMLError):
 for document in documents:
     if not isinstance(document, dict):
         continue
-    kind = normalize_kind(document.get("kind"))
-    if kind not in {"image", "singlenodeimage"}:
+    if normalize_kind(document.get("kind")) not in allowed_kinds:
         continue
     spec = document.get("spec") or {}
     if not isinstance(spec, dict):
@@ -70,7 +73,17 @@ raise SystemExit(1)
 PY
 }
 
-rke2nodeinit_registry_materialize_secure_manifest() {
+rke2nodeinit_registry_manifest_requires_live_credentials() {
+  rke2nodeinit_registry_manifest_has_secure_kind \
+    "${1:-}" server singlenodeserver addserver agent
+}
+
+rke2nodeinit_registry_image_manifest_misuses_secure_registry() {
+  rke2nodeinit_registry_manifest_has_secure_kind \
+    "${1:-}" image singlenodeimage airgap
+}
+
+rke2nodeinit_registry_materialize_live_manifest() {
   local source_manifest="${1:-}"
   local output_manifest="${2:-}"
 
@@ -95,6 +108,7 @@ import yaml
 
 source = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2])
+live_kinds = {"server", "singlenodeserver", "addserver", "agent"}
 
 
 def fail(message):
@@ -132,14 +146,13 @@ def resolve_secret_path(raw_value, field_name):
     return path
 
 
-def read_secret_file(path, field_name, require_private=False):
-    if require_private:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            fail(
-                f"{field_name} must not be group/world accessible: {path}; "
-                "run chmod 600 on the file"
-            )
+def read_secret_file(path, field_name):
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        fail(
+            f"{field_name} must not be group/world accessible: {path}; "
+            "run chmod 600 on the file"
+        )
     try:
         raw = path.read_bytes()
     except OSError:
@@ -155,11 +168,11 @@ def read_secret_file(path, field_name, require_private=False):
     return value
 
 
-def resolve_credential(spec, value_key, file_key, env_value, env_file, private_file):
+def resolve_credential(spec, value_key, file_key, env_value, env_file):
     file_value = spec.get(file_key) or os.environ.get(env_file, "")
     if file_value:
         path = resolve_secret_path(file_value, file_key)
-        return read_secret_file(path, file_key, require_private=private_file)
+        return read_secret_file(path, file_key)
 
     env_direct = os.environ.get(env_value, "")
     if env_direct:
@@ -186,7 +199,7 @@ for document in documents:
         continue
 
     kind = normalize_kind(document.get("kind"))
-    if kind not in {"image", "singlenodeimage"}:
+    if kind not in live_kinds:
         continue
 
     spec = document.get("spec")
@@ -211,7 +224,6 @@ for document in documents:
         "registryUsernameFile",
         "RKE2_REGISTRY_USERNAME",
         "RKE2_REGISTRY_USERNAME_FILE",
-        False,
     )
     password = resolve_credential(
         spec,
@@ -219,20 +231,19 @@ for document in documents:
         "registryPasswordFile",
         "RKE2_REGISTRY_PASSWORD",
         "RKE2_REGISTRY_PASSWORD_FILE",
-        True,
     )
 
     if not username:
         fail(
-            "secureRegistry requires a username from spec.registryUsernameFile, "
-            "RKE2_REGISTRY_USERNAME_FILE, RKE2_REGISTRY_USERNAME, or "
-            "spec.registryUsername"
+            "secureRegistry requires a registry username from "
+            "spec.registryUsernameFile, RKE2_REGISTRY_USERNAME_FILE, "
+            "RKE2_REGISTRY_USERNAME, or spec.registryUsername"
         )
     if not password:
         fail(
-            "secureRegistry requires a password/token from spec.registryPasswordFile, "
-            "RKE2_REGISTRY_PASSWORD_FILE, RKE2_REGISTRY_PASSWORD, or "
-            "spec.registryPassword"
+            "secureRegistry requires a registry password/token from "
+            "spec.registryPasswordFile, RKE2_REGISTRY_PASSWORD_FILE, "
+            "RKE2_REGISTRY_PASSWORD, or spec.registryPassword"
         )
 
     spec["secureRegistry"] = True
@@ -243,7 +254,10 @@ for document in documents:
     spec.pop("registryPasswordFile", None)
 
 if matched == 0:
-    fail("no Image or singleNodeImage document has spec.secureRegistry set to true")
+    fail(
+        "no Server, singleNodeServer, AddServer, or Agent document has "
+        "spec.secureRegistry set to true"
+    )
 
 output.parent.mkdir(parents=True, exist_ok=True)
 with output.open("w", encoding="utf-8") as handle:
