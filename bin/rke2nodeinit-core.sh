@@ -8206,8 +8206,8 @@ write_local_loopback_registries_yaml() {
 # ------------------------------------------------------------------------------
 # Function: ensure_server_loopback_registry_safeguard
 # Purpose : Server-flow guard to ensure registries.yaml always includes local
-#           loopback mirror endpoints. If configured registry host is
-#           unresolved, force local-only registries.yaml for disconnected boot.
+#           loopback mirror endpoints. Preserve configured registry endpoints
+#           even when DNS is not yet available during early bootstrap.
 # Arguments:
 #   $1 - Optional YAML config path
 # Returns : 0 on success
@@ -8235,12 +8235,12 @@ ensure_server_loopback_registry_safeguard() {
   fi
 
   if getent hosts "$reg_host" >/dev/null 2>&1; then
-    write_registries_yaml_with_fallbacks "$reg_host" "$reg_ns" "$REG_USER" "$REG_PASS" ""
     log INFO "Server registry safeguard applied: loopback + resolvable registry host ($reg_host)."
   else
-    log WARN "Configured registry host '$reg_host' is unresolved; enforcing local-only loopback mirror endpoints."
-    write_local_loopback_registries_yaml
+    log WARN "Configured registry host '$reg_host' is unresolved at generation time; preserving configured endpoint for delayed DNS availability."
   fi
+
+  write_registries_yaml_with_fallbacks "$reg_host" "$reg_ns" "$REG_USER" "$REG_PASS" ""
 
   return 0
 }
@@ -11594,6 +11594,13 @@ action_agent() {
   metrics_increment "success"
   metrics_increment "netplan_written"
 
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    log_info "Applying agent offline registry safeguard (loopback mirror endpoints)"
+    ensure_server_loopback_registry_safeguard "$CONFIG_FILE"
+  else
+    log_info "DRY-RUN: Would enforce agent offline registry safeguard"
+  fi
+
   # Phase 8: Install RKE2
   report_progress "Installing RKE2 agent" 8 8
   if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
@@ -12100,6 +12107,13 @@ action_add_server() {
   metrics_increment "total"
   metrics_increment "success"
   metrics_increment "netplan_written"
+
+  if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+    log_info "Applying add-server offline registry safeguard (loopback mirror endpoints)"
+    ensure_server_loopback_registry_safeguard "$CONFIG_FILE"
+  else
+    log_info "DRY-RUN: Would enforce add-server offline registry safeguard"
+  fi
 
   # Phase 8: Install RKE2
   report_progress "Installing RKE2 server" 8 8
