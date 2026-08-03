@@ -10810,6 +10810,9 @@ action_server() {
       fi
     fi
     load_custom_ca_from_config "$CONFIG_FILE"
+    REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
+    REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${REG_USER:-}")"
+    REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${REG_PASS:-}")"
     metrics_increment "total"
     metrics_increment "success"
     metrics_increment "config_loaded"
@@ -11307,6 +11310,9 @@ action_agent() {
       fi
     fi
     load_custom_ca_from_config "$CONFIG_FILE"
+    REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
+    REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${REG_USER:-}")"
+    REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${REG_PASS:-}")"
     metrics_increment "config_loaded"
   fi
 
@@ -11747,6 +11753,9 @@ action_add_server() {
       fi
     fi
     load_custom_ca_from_config "$CONFIG_FILE"
+    REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
+    REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${REG_USER:-}")"
+    REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${REG_PASS:-}")"
     metrics_increment "config_loaded"
   fi
 
