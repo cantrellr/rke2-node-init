@@ -15,10 +15,23 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CORE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-core.sh"
 SINGLE_NODE_SCRIPT="${SCRIPT_DIR}/rke2nodeinit-single-node.sh"
 SYSTEM_HELPER="${SCRIPT_DIR}/rke2nodeinit-system.sh"
+REGISTRY_HELPER="${SCRIPT_DIR}/rke2nodeinit-registry.sh"
+SECURE_REGISTRY_CONFIG=""
 
 [[ -f "$SYSTEM_HELPER" ]] || { echo "ERROR: Missing system helper: $SYSTEM_HELPER" >&2; exit 1; }
+[[ -f "$REGISTRY_HELPER" ]] || { echo "ERROR: Missing registry helper: $REGISTRY_HELPER" >&2; exit 1; }
 # shellcheck source=bin/rke2nodeinit-system.sh
 source "$SYSTEM_HELPER"
+# shellcheck source=bin/rke2nodeinit-registry.sh
+source "$REGISTRY_HELPER"
+
+cleanup_secure_registry_config() {
+  if [[ -n "${SECURE_REGISTRY_CONFIG:-}" ]]; then
+    rke2nodeinit_registry_remove_staged_manifest "$SECURE_REGISTRY_CONFIG"
+    SECURE_REGISTRY_CONFIG=""
+  fi
+}
+trap cleanup_secure_registry_config EXIT
 
 usage() {
   cat <<'USAGE'
@@ -40,6 +53,18 @@ Supported kind dispatch:
   Verify           -> verify
   Airgap           -> airgap
   CustomCA         -> custom-ca
+
+For live Server, AddServer, Agent, and singleNodeServer manifests,
+spec.secureRegistry: true requires both a registry username and password/token.
+Prefer registryUsernameFile and registryPasswordFile, or set the corresponding
+RKE2_REGISTRY_* environment variables. The dispatcher resolves credentials only
+at live node execution, stages a root-only manifest under /run/rke2-node-init,
+and removes it after provisioning returns.
+
+Do not set secureRegistry on Image, singleNodeImage, or Airgap manifests. Golden
+image creation must remain free of deployment-specific registry credentials;
+place secureRegistry and its credential-file references in the node manifest
+that the boot ISO supplies to the cloned VM.
 
 For Server, AddServer, Agent, and singleNodeServer manifests that enable the CIS
 profile, the dispatcher applies and persists the RKE2-required kernel parameters
@@ -210,8 +235,94 @@ normalized_args_contain() {
   return 1
 }
 
+replace_normalized_config_file() {
+  local replacement="${1:-}"
+  local index=0
+
+  [[ -n "$replacement" ]] || return 1
+
+  for ((index = 0; index < ${#NORMALIZED_ARGS[@]}; index++)); do
+    case "${NORMALIZED_ARGS[$index]}" in
+      -f|--file)
+        if (( index + 1 >= ${#NORMALIZED_ARGS[@]} )); then
+          echo "ERROR: malformed config-file argument." >&2
+          return 1
+        fi
+        NORMALIZED_ARGS[$((index + 1))]="$replacement"
+        CONFIG_FILE="$replacement"
+        return 0
+        ;;
+      --file=*)
+        NORMALIZED_ARGS[$index]="--file=$replacement"
+        CONFIG_FILE="$replacement"
+        return 0
+        ;;
+    esac
+  done
+
+  echo "ERROR: unable to replace config-file argument for secure registry staging." >&2
+  return 1
+}
+
+prepare_secure_registry_config() {
+  local action="${1:-}"
+  local manifest="${2:-}"
+  local runtime_dir="${RKE2NODEINIT_RUNTIME_DIR:-/run/rke2-node-init}"
+  local staged=""
+  local detection_rc=0
+
+  [[ -n "$manifest" && -f "$manifest" ]] || return 0
+
+  case "$action" in
+    image|airgap)
+      if rke2nodeinit_registry_image_manifest_misuses_secure_registry "$manifest"; then
+        echo "ERROR: spec.secureRegistry is a live node setting and must not be enabled on Image, singleNodeImage, or Airgap manifests." >&2
+        echo "ERROR: move secureRegistry and its credential-file references to the Server, AddServer, Agent, or singleNodeServer manifest carried by the boot ISO." >&2
+        return 1
+      fi
+      detection_rc=$?
+      [[ "$detection_rc" -eq 1 ]] && return 0
+      return "$detection_rc"
+      ;;
+    server|add-server|agent)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if rke2nodeinit_registry_manifest_requires_live_credentials "$manifest"; then
+    :
+  else
+    detection_rc=$?
+    if [[ "$detection_rc" -eq 1 ]]; then
+      return 0
+    fi
+    return "$detection_rc"
+  fi
+
+  install -d -m 0700 "$runtime_dir"
+  staged="$(mktemp "${runtime_dir}/live-secure-registry.XXXXXX.yaml")"
+  chmod 0600 "$staged"
+
+  if ! rke2nodeinit_registry_materialize_live_manifest "$manifest" "$staged"; then
+    rke2nodeinit_registry_remove_staged_manifest "$staged"
+    return 1
+  fi
+
+  SECURE_REGISTRY_CONFIG="$staged"
+  replace_normalized_config_file "$staged"
+  echo "[INFO] secureRegistry enabled; live registry credentials resolved into a temporary root-only runtime manifest." >&2
+}
+
 exec_core() {
   [[ -x "$CORE_SCRIPT" ]] || { echo "ERROR: Missing executable core script: $CORE_SCRIPT" >&2; exit 1; }
+
+  if [[ -n "${SECURE_REGISTRY_CONFIG:-}" ]]; then
+    bash "$CORE_SCRIPT" "$@"
+    exit $?
+  fi
+
   exec bash "$CORE_SCRIPT" "$@"
 }
 
@@ -219,6 +330,15 @@ exec_single_node() {
   local action="${1:-}"
   shift || true
   [[ -f "$SINGLE_NODE_SCRIPT" ]] || { echo "ERROR: Missing single-node helper: $SINGLE_NODE_SCRIPT" >&2; exit 1; }
+
+  if [[ -n "${SECURE_REGISTRY_CONFIG:-}" ]]; then
+    if [[ -n "$action" ]]; then
+      RKE2NODEINIT_CORE_DELEGATE=1 bash "$SINGLE_NODE_SCRIPT" "$action" "$@"
+    else
+      RKE2NODEINIT_CORE_DELEGATE=1 bash "$SINGLE_NODE_SCRIPT" "$@"
+    fi
+    exit $?
+  fi
 
   if [[ -n "$action" ]]; then
     RKE2NODEINIT_CORE_DELEGATE=1 exec bash "$SINGLE_NODE_SCRIPT" "$action" "$@"
@@ -256,6 +376,7 @@ main() {
     dry_run=1
   fi
 
+  prepare_secure_registry_config "${ACTION:-}" "${CONFIG_FILE:-}"
   rke2nodeinit_system_prepare_cis_for_action "${ACTION:-}" "${CONFIG_FILE:-}" "$dry_run"
 
   if [[ -n "$yaml_kind" ]] && kind_is_single_node "$yaml_kind"; then
