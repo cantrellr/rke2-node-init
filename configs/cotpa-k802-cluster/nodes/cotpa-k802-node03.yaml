@@ -34,12 +34,10 @@ spec:
   enable-servicelb: "false"
   kube-apiserver-arg:
     - "audit-log-maxage=15"
-  serverURL: https://172.16.15.111:9345
+  serverURL: https://172.16.8.111:9345
   tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
   disable:
   - rke2-ingress-nginx
-  - rke2-traefik
-  - rke2-traefik-crd
   customCA:
     rootCrt: /rke2-node-init/configs/cotpa-k802-cluster/certs/cocloud-ca.crt
     rootKey: /rke2-node-init/configs/cotpa-k802-cluster/certs/cocloud-ca-key.pem

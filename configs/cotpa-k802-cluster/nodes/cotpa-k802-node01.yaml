@@ -38,8 +38,6 @@ spec:
   tokenFile: /etc/rancher/rke2/token.d/bootstrap.token
   disable:
   - rke2-ingress-nginx
-  - rke2-traefik
-  - rke2-traefik-crd
   customCA:
     rootCrt: /rke2-node-init/configs/cotpa-k802-cluster/certs/cocloud-ca.crt
     rootKey: /rke2-node-init/configs/cotpa-k802-cluster/certs/cocloud-ca-key.pem
