@@ -3420,7 +3420,7 @@ append_spec_config_extras() {
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
     # Image overrides commonly required to avoid external pulls in air-gapped installs
     "kube-proxy-image" "pause-image" "runtime-image"
-    "enable-servicelb" "node-ip" "bind-address" "advertise-address"
+    "enable-servicelb" "ingress-controller" "node-ip" "bind-address" "advertise-address"
   )
 
 
