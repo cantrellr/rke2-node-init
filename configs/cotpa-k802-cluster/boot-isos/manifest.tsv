@@ -1,4 +1,4 @@
 metadata_name	source_yaml	iso_path	sha256
-cotpa-k802-node01	configs/cotpa-k802-cluster/nodes/cotpa-k802-node01.yaml	configs/cotpa-k802-cluster/boot-isos/cotpa-k802-node01.iso	15f495d15e93b3c52087f4c12c7eb771740fbcd2d91ebaea326d10beacab8368
-cotpa-k802-node02	configs/cotpa-k802-cluster/nodes/cotpa-k802-node02.yaml	configs/cotpa-k802-cluster/boot-isos/cotpa-k802-node02.iso	58750a797290b1ce52441a98bea3f29fc4655b1730fcd3ff2d6bfeaa0740b0e9
-cotpa-k802-node03	configs/cotpa-k802-cluster/nodes/cotpa-k802-node03.yaml	configs/cotpa-k802-cluster/boot-isos/cotpa-k802-node03.iso	32f8800536d39b518a74daec927ca0d863a62d723e491f0f3ec8e77fed59beb6
+cotpa-k802-node01	/rke2-node-init/configs/cotpa-k802-cluster/nodes/cotpa-k802-node01.yaml	/rke2-node-init/outputs/image-hyperv-cotpa-k802-v1.35.6+rke2r1/boot-isos/cotpa-k802-node01.iso	ef4c88d7eff6bcbf5e26ccf539457c2e89e761e9f5da144478d06ded70df35de
+cotpa-k802-node02	/rke2-node-init/configs/cotpa-k802-cluster/nodes/cotpa-k802-node02.yaml	/rke2-node-init/outputs/image-hyperv-cotpa-k802-v1.35.6+rke2r1/boot-isos/cotpa-k802-node02.iso	159e27960cb5dbb34b763b1bbccf176b1807648fa676daa91a75cd1a59eb5de5
+cotpa-k802-node03	/rke2-node-init/configs/cotpa-k802-cluster/nodes/cotpa-k802-node03.yaml	/rke2-node-init/outputs/image-hyperv-cotpa-k802-v1.35.6+rke2r1/boot-isos/cotpa-k802-node03.iso	67f0fc66b46e11dfec63c6e72950926965a431782c4f5608d646fb46bff4f43f
