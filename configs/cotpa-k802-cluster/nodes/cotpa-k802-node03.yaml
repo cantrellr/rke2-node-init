@@ -20,7 +20,14 @@ spec:
       prefix: 24
       gateway: 172.16.8.1
       dns: ["172.16.10.11", "172.16.10.12"]
-      searchDomains: ["k8.cantrellcloud.net","cantrellcloud.net", "cantrelloffice.cloud", "cantrell.cloud"]
+      searchDomains: ["k8.cantrellcloud.net", "cantrellcloud.net", "cantrelloffice.cloud", "cantrell.cloud"]
+    # vlan1
+    - name: eth1
+      ip: 10.0.15.113
+      prefix: 24
+      gateway: 
+      dns: []
+      searchDomains: []
   node-label:
   - "role=worker"
   - "env=production"
